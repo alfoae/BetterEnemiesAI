@@ -1,9 +1,7 @@
 package com.example.examplemod.mobAi.Mixin;
 
-import com.example.examplemod.Enemy.EnemyBehavior.EnemyBreak_N_Build.BuildPathGoal;
-import com.example.examplemod.Enemy.EnemyBehavior.EnemyBreak_N_Build.DigThroughWallsGoal;
-import com.example.examplemod.Enemy.EnemyBehavior.EnemyBreak_N_Build.TowerClimbGoal;
 import com.example.examplemod.Enemy.EnemyBehavior.EnemyPursuit_N_Search.PursuitBehavior.PursuitEnemyBehavior;
+import com.example.examplemod.Enemy.EnemyMovement.Run_N_Jump.GapJumpAssistGoal;
 import com.example.examplemod.mobAi.Goal.BetterZombieGoalAi;
 import net.minecraft.world.entity.ai.goal.MeleeAttackGoal;
 import net.minecraft.world.entity.monster.Drowned;
@@ -40,19 +38,27 @@ public class ZombieMixin {
         );
 
         mob.goalSelector.addGoal(0, new PursuitEnemyBehavior(mob, true));
-        // pursuit=1 (найвищий) - build/dig НІКОЛИ не перебивають його силою. Підтверджено
+        // pursuit=1 (найвищий) - build/dig/jump НІКОЛИ не перебивають його силою. Підтверджено
         // експериментально: саме примусове переривання прапорців MOVE/LOOK посеред виконання
         // PursuitEnemyMeleeBehavior ламало трекінг гравця (не кількість викликів createPath() -
         // кеш сам собою це не виправив). PursuitEnemyMeleeBehavior сам добровільно віддає чергу
         // (canYieldToTerraforming=true) через чистий stop()/start(), коли шлях дійсно
-        // заблокований довше за grace-період.
+        // заблокований довше за grace-період — і той самий сигнал (isPathBlocked) покриває і
+        // розрив-без-Path для GapJumpAssistGoal нижче, без жодних додаткових змін тут.
         mob.goalSelector.addGoal(1, new BetterZombieGoalAi(mob, 1.0D));
         // TowerClimbGoal веде підйом до ЖИВОЇ позиції гравця (проекція/зона/стіни); BuildPathGoal
         // сам віддає йому чергу в цьому випадку (canUse()/canContinueToUse() повертають false) -
         // конкретна цифра пріоритету тут другорядна порівняно з тим явним yield-ом, але нижче за
         // pursuit і вище за "наївний" BuildPathGoal для наочності.
-        mob.goalSelector.addGoal(2, new TowerClimbGoal(mob));
-        mob.goalSelector.addGoal(3, new BuildPathGoal(mob));
-        mob.goalSelector.addGoal(4, new DigThroughWallsGoal(mob));
+        ///mob.goalSelector.addGoal(2, new TowerClimbGoal(mob));
+        // GapJumpAssistGoal — ВИЩЕ за BuildPathGoal/DigThroughWallsGoal: якщо розрив у межах
+        // дальності стрибка моба, стрибок має перехопити MOVE/LOOK/JUMP раніше, ніж BuildPathGoal
+        // встигне вирішити бриджити його блоками (стрибок дешевший і швидший). Той самий набір
+        // флагів, що й у Tower/Build/Dig, тому звичайне блокування прапорців за пріоритетом у
+        // GoalSelector-і саме й розводить їх — жодного ручного yield() між GapJumpAssistGoal і
+        // BuildPathGoal писати не треба.
+        mob.goalSelector.addGoal(3, new GapJumpAssistGoal(mob));
+        ///mob.goalSelector.addGoal(4, new BuildPathGoal(mob));
+        ///mob.goalSelector.addGoal(5, new DigThroughWallsGoal(mob));
     }
 }
