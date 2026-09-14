@@ -7,45 +7,46 @@ import net.minecraft.world.entity.ai.attributes.Attributes;
 import net.minecraft.world.phys.Vec3;
 
 /**
- * Детекція "чи є прямо по курсу на chasePos короткий розрив, який моб може перестрибнути" +
- * оцінка дальності стрибка ПІД КОНКРЕТНОГО моба.
+ * Детекція розриву на курсі до chasePos + розрахунок дальності стрибка.
  * <p>
- * Різні типи мобів бігають з різною швидкістю ({@code ChangeEnemiesAttributes} /
- * {@link Run_N_JumpUtils#getRunSpeedModifier(Mob)}), а горизонтальна дальність стрибка — це
- * швидкість-в-момент-відриву помножена на час у повітрі. Тому дальність рахуємо по ЖИВІЙ
- * поточній швидкості моба ({@link Mob#getDeltaMovement()}), а не по одній константі на всіх.
+ * Дальність стрибка рахується у ДВА окремі числа, і це навмисно, не зайва складність:
+ * <ul>
+ *   <li>{@link #estimateMaxJumpRangeBlocks} — ТЕОРЕТИЧНА межа на повній швидкості моба
+ *       (з атрибута, не з поточного руху). Використовується тільки щоб зрозуміти, чи розрив
+ *       В ПРИНЦИПІ коли-небудь проходимий для цього моба — це межа сканування.</li>
+ *   <li>{@link #requiredTakeoffSpeed} — яку ЖИВУ швидкість треба мати прямо перед відривом
+ *       для КОНКРЕТНОГО знайденого розриву. GapJumpAssistGoal порівнює це з
+ *       {@code mob.getDeltaMovement()} і не стрибає, поки моб реально не розігнався —
+ *       якщо просто довіритись атрибуту "мав би вміти", а не живій швидкості, моб стрибає
+ *       з тим імпульсом, який реально має в моменту, а не з тим, що "мав би" на бумазі.
+ * </ul>
+ * Обидві формули використовують ОДИН і той самий SAFETY_MARGIN, тому вони узгоджені: для
+ * найширшого розриву, який взагалі пройде через скан, необхідна жива швидкість ≈ повна швидкість
+ * моба — рівно те, чого й слід очікувати.
  * <p>
- * Час у повітрі (JUMP_AIRTIME_TICKS), навпаки, однаковий для всіх мобів (поки жоден з них не
- * перевизначає {@code getJumpPower()}) — вертикальна фізика стрибка від горизонтальної швидкості
- * не залежить. Порахований раз тим самим рівнянням, що й ванільний
- * {@code LivingEntity#jumpFromGround()}: v0 = 0.42, гравітація -0.08/тік, опір ×0.98/тік.
+ * Час у повітрі (JUMP_AIRTIME_TICKS) однаковий для всіх мобів (поки жоден не перевизначає
+ * getJumpPower()) — порахований раз тим самим рівнянням, що й ванільний
+ * LivingEntity#jumpFromGround(): v0=0.42, гравітація -0.08/тік, опір ×0.98/тік.
  * <p>
- * ВАЖЛИВО: жодного виклику {@code EnemyBreak_N_BuildUtils.canOperate()} тут навмисно немає.
- * Стрибок нічого не будує й не ламає — на відміну від BuildPathGoal/DigThroughWallsGoal/
- * TowerClimbGoal, він має працювати і тоді, коли mobGriefing/ENABLE_MOB_TERRAFORMING вимкнено,
- * бо саме тоді мобу більше нічим перетнути розрив.
- * <p>
- * ЧЕСНО: константи стрибка (0.42 / 0.08 / 0.98) не перевірені компіляцією проти реальних
- * Minecraft-бібліотек (пісочниця без доступу до Maven/NeoForge) — це стандартні, добре
- * задокументовані ванільні значення, але перед мерджем варто звірити з реальною грою чи хоча б
- * ще раз з декомпільованими сорсами в IDE.
+ * ЧЕСНО: не компілилось проти реальних Minecraft-бібліотек (пісочниця без Maven/NeoForge) —
+ * константи стрибка стандартні й добре задокументовані, звір перед мерджем.
  */
 public final class GapJumpUtils {
 
-    private static final double JUMP_VERTICAL_VELOCITY = 0.42; // LivingEntity#jumpFromGround, без Jump Boost
+    private static final double JUMP_VERTICAL_VELOCITY = 0.42;
     private static final double GRAVITY_PER_TICK = 0.08;
     private static final double DRAG_PER_TICK = 0.98;
     private static final int JUMP_AIRTIME_TICKS = computeAirTimeTicks();
 
     /**
-     * Запас від теоретичного максимуму — не намагаємось стрибати рівно на межі дальності.
+     * Один запас на обидва розрахунки (і межу сканування, і потрібну швидкість) - тримає їх узгодженими.
      */
     private static final double SAFETY_MARGIN = 0.85;
 
     /**
-     * Мінімальна швидкість, нижче якої вважаємо, що моб ще не розігнався, і підстраховуємось атрибутом.
+     * Скільки блоків вперед взагалі готові шукати край розриву.
      */
-    private static final double MIN_TRUSTED_SPEED = 0.05;
+    private static final int MAX_SCAN_BLOCKS = 16;
 
     private GapJumpUtils() {
     }
@@ -63,27 +64,29 @@ public final class GapJumpUtils {
     }
 
     /**
-     * Скільки блоків по горизонталі цей КОНКРЕТНИЙ моб зараз покриє за час стрибка (із запасом).
+     * Теоретична максимальна дальність стрибка цього моба на повній швидкості (не поточній).
      */
-    public static int estimateJumpRangeBlocks(Mob mob) {
-        double horizontalSpeed = mob.getDeltaMovement().horizontalDistance();
-        if (horizontalSpeed < MIN_TRUSTED_SPEED) {
-            // на старті чейсу мобу ще нема з чого братись live-швидкості - підстраховуємось
-            // атрибутом, інакше estimateJumpRangeBlocks() тут завжди повертав би ~0
-            horizontalSpeed = mob.getAttributeValue(Attributes.MOVEMENT_SPEED) * Run_N_JumpUtils.getRunSpeedModifier(mob);
-        }
-        return (int) Math.floor(horizontalSpeed * JUMP_AIRTIME_TICKS * SAFETY_MARGIN);
+    public static int estimateMaxJumpRangeBlocks(Mob mob) {
+        double topSpeed = mob.getAttributeValue(Attributes.MOVEMENT_SPEED) * Run_N_JumpUtils.getRunSpeedModifier(mob);
+        return (int) Math.floor(topSpeed * JUMP_AIRTIME_TICKS * SAFETY_MARGIN);
     }
 
     /**
-     * Шукає точку приземлення прямо по курсу на chasePos: перший крок попереду вже без опори
-     * (інакше стрибати нема сенсу — звичайний Path і так впорається), і десь у межах дальності
-     * стрибка опора знову з'являється, не вище ніж на 1 блок від поточної позиції моба (вище —
-     * це вже сценарій TowerClimbGoal, не наш).
-     *
-     * @return точка приземлення, або {@code null}, якщо стрибати нема куди/нема сенсу
+     * Яку живу горизонтальну швидкість (mob.getDeltaMovement()) треба мати прямо перед відривом.
      */
-    public static Vec3 findLanding(Mob mob, Vec3 chasePos) {
+    public static double requiredTakeoffSpeed(int gapBlocks) {
+        return gapBlocks / (JUMP_AIRTIME_TICKS * SAFETY_MARGIN);
+    }
+
+    /**
+     * Шукає розрив по курсу на chasePos незалежно від того, чи моб уже стоїть на самому краю,
+     * чи ще підбігає — межу сканування бере ТЕОРЕТИЧНОЮ (estimateMaxJumpRangeBlocks), бо живої
+     * швидкості на момент виявлення в моба ще могло й не бути (саме на це і чекає
+     * GapJumpAssistGoal, перш ніж дозволити сам стрибок).
+     *
+     * @return дані про розрив, або {@code null}, якщо стрибати нема куди/нема сенсу
+     */
+    public static GapJump findGapJump(Mob mob, Vec3 chasePos) {
         if (!(mob.level() instanceof ServerLevel level)) {
             return null;
         }
@@ -94,21 +97,35 @@ public final class GapJumpUtils {
         Vec3 dir = toTarget.normalize();
         BlockPos feet = mob.blockPosition();
 
-        if (hasFloor(level, feet, dir, 1)) {
-            return null; // попереду й так є опора - не наш кейс, хай веде звичайний Path
-        }
-
-        int maxGap = estimateJumpRangeBlocks(mob);
-        for (int step = 2; step <= maxGap + 1; step++) {
-            if (hasFloor(level, feet, dir, step)) {
-                BlockPos landing = offset(feet, dir, step);
-                if (landing.getY() - feet.getY() > 1) {
-                    return null; // приземлення суттєво вище - TowerClimbGoal, не наш кейс
-                }
-                return Vec3.atBottomCenterOf(landing);
+        int edgeStep = -1;
+        for (int step = 0; step <= MAX_SCAN_BLOCKS; step++) {
+            if (!hasFloor(level, feet, dir, step)) {
+                edgeStep = step - 1; // останній твердий блок перед розривом
+                break;
             }
         }
-        return null; // розрив ширший за дальність стрибка - хай бере BuildPathGoal
+        if (edgeStep < 0) {
+            return null; // або весь скан твердий, або моб уже якимось чином у повітрі
+        }
+
+        int maxGap = estimateMaxJumpRangeBlocks(mob);
+        for (int step = edgeStep + 2; step <= edgeStep + 1 + maxGap; step++) {
+            if (hasFloor(level, feet, dir, step)) {
+                BlockPos edge = offset(feet, dir, edgeStep);
+                BlockPos landing = offset(feet, dir, step);
+                if (landing.getY() - edge.getY() > 1) {
+                    return null; // приземлення суттєво вище - TowerClimbGoal, не наш кейс
+                }
+                return new GapJump(edge, Vec3.atBottomCenterOf(landing), step - edgeStep - 1);
+            }
+        }
+        return null; // розрив ширший за теоретичну дальність стрибка - хай бере BuildPathGoal
+    }
+
+    /**
+     * Край (останній твердий блок перед розривом), точка приземлення і ширина розриву в блоках.
+     */
+    public record GapJump(BlockPos edge, Vec3 landing, int gapBlocks) {
     }
 
     private static boolean hasFloor(ServerLevel level, BlockPos origin, Vec3 dir, int step) {

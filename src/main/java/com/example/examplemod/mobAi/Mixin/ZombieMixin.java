@@ -1,5 +1,8 @@
 package com.example.examplemod.mobAi.Mixin;
 
+import com.example.examplemod.Enemy.EnemyBehavior.EnemyBreak_N_Build.BuildPathGoal;
+import com.example.examplemod.Enemy.EnemyBehavior.EnemyBreak_N_Build.DigThroughWallsGoal;
+import com.example.examplemod.Enemy.EnemyBehavior.EnemyBreak_N_Build.TowerClimbGoal;
 import com.example.examplemod.Enemy.EnemyBehavior.EnemyPursuit_N_Search.PursuitBehavior.PursuitEnemyBehavior;
 import com.example.examplemod.Enemy.EnemyMovement.Run_N_Jump.GapJumpAssistGoal;
 import com.example.examplemod.mobAi.Goal.BetterZombieGoalAi;
@@ -10,6 +13,7 @@ import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
+
 
 @Mixin(Zombie.class)
 public class ZombieMixin {
@@ -50,7 +54,7 @@ public class ZombieMixin {
         // сам віддає йому чергу в цьому випадку (canUse()/canContinueToUse() повертають false) -
         // конкретна цифра пріоритету тут другорядна порівняно з тим явним yield-ом, але нижче за
         // pursuit і вище за "наївний" BuildPathGoal для наочності.
-        ///mob.goalSelector.addGoal(2, new TowerClimbGoal(mob));
+        mob.goalSelector.addGoal(2, new TowerClimbGoal(mob));
         // GapJumpAssistGoal — ВИЩЕ за BuildPathGoal/DigThroughWallsGoal: якщо розрив у межах
         // дальності стрибка моба, стрибок має перехопити MOVE/LOOK/JUMP раніше, ніж BuildPathGoal
         // встигне вирішити бриджити його блоками (стрибок дешевший і швидший). Той самий набір
@@ -58,7 +62,7 @@ public class ZombieMixin {
         // GoalSelector-і саме й розводить їх — жодного ручного yield() між GapJumpAssistGoal і
         // BuildPathGoal писати не треба.
         mob.goalSelector.addGoal(3, new GapJumpAssistGoal(mob));
-        ///mob.goalSelector.addGoal(4, new BuildPathGoal(mob));
-        ///mob.goalSelector.addGoal(5, new DigThroughWallsGoal(mob));
+        mob.goalSelector.addGoal(4, new BuildPathGoal(mob));
+        mob.goalSelector.addGoal(5, new DigThroughWallsGoal(mob));
     }
 }
