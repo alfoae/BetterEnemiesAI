@@ -1,6 +1,7 @@
 package com.example.examplemod.Enemy.EnemyBehavior.EnemyPursuit_N_Search.PursuitBehavior;
 
 import com.example.examplemod.Enemy.EnemyBehavior.EnemyBreak_N_Build.EnemyBreak_N_BuildUtils;
+import com.example.examplemod.Enemy.EnemyMovement.Run_N_Jump.GapJumpAssistGoal;
 import com.example.examplemod.Enemy.EnemyMovement.Run_N_Jump.GapJumpUtils;
 import com.example.examplemod.Enemy.EnemyMovement.Run_N_Jump.Run_N_JumpUtils;
 import net.minecraft.world.InteractionHand;
@@ -189,6 +190,15 @@ public class PursuitEnemyMeleeBehavior extends Goal {
         if (!this.canYieldToTerraforming) {
             return false;
         }
+
+        // Якщо GapJumpAssistGoal уже забрав керування,
+        // Pursuit не має права запускатися назад навіть після
+        // navigation.stop(), коли Path вже null.
+        if (GapJumpAssistGoal.isActive(this.mob)) {
+            return true;
+        }
+
+        // Поки GapJumpAssist ще не стартував — шукаємо GapJump у Path.
         return GapJumpUtils.findUpcomingJumpSegment(this.mob) != null;
     }
 
@@ -206,15 +216,25 @@ public class PursuitEnemyMeleeBehavior extends Goal {
 
     @Override
     public void stop() {
+        boolean yieldToGapJump = this.shouldYieldToGapJump();
+
         super.stop();
         this.mob.setAggressive(false);
         this.mob.setSprinting(false);
-        // ТИМЧАСОВИЙ DEBUG: до navigation().stop(), щоб побачити останній реальний шлях.
+
         Player p = PursuitEnemyBehavior.getTrackedPlayer(this.mob);
         if (p != null) {
-            PursuitEnemyBehavior.debugMsg(p, "[DEBUG PursuitEnemyMeleeBehavior] STOP моб=" + this.mob.blockPosition());
+            PursuitEnemyBehavior.debugMsg(
+                    p,
+                    "[DEBUG PursuitEnemyMeleeBehavior] STOP моб="
+                            + this.mob.blockPosition()
+                            + " yieldToGapJump=" + yieldToGapJump
+            );
         }
-        this.mob.getNavigation().stop();
+
+        if (!yieldToGapJump) {
+            this.mob.getNavigation().stop();
+        }
     }
 
     @Override
@@ -234,7 +254,7 @@ public class PursuitEnemyMeleeBehavior extends Goal {
 
         // chasePos — ЗАВЖДИ правильна точка руху для всіх трьох активних станів (жива позиція
         // в CHASING, застигла точка в GOING_TO_LAST_SEEN, точка пошуку в SEARCHING). НЕ звіряємось
-        // з canSee для вибору точки: hasLineOfSight — це чистий рейкаст, він не враховує
+        // з canSee для вибору точки: hasLineOfSight — це чистий рейкаст, він не враховує8
         // дистанцію, тож у відкритому полі гравець "видимий" навіть далеко за FOLLOW_RANGE — і
         // код лазив у гілку "жива позиція", намагаючись прокласти шлях за межу дальності
         // навігатора, а vanilla pathfinding такий довгий шлях просто не будує — моб стояв на

@@ -54,11 +54,31 @@ public class GapJumpAssistGoal extends Goal {
         this.setFlags(EnumSet.of(Flag.MOVE, Flag.LOOK, Flag.JUMP));
     }
 
+    private static final java.util.Set<Mob> ACTIVE_MOBS =
+            java.util.Collections.newSetFromMap(new java.util.WeakHashMap<>());
+
+    public static boolean isActive(Mob mob) {
+        return ACTIVE_MOBS.contains(mob);
+    }
+
     @Override
     public boolean canContinueToUse() {
-        // не пересканюємо і не чіпаємо this.jump посеред маневру - інакше кожен тік знаходить
-        // "трохи інший" сегмент і весь стан (фаза, retreatTarget, лічильник спроб) втрачає сенс
-        return !this.done && this.jump != null && PursuitEnemyBehavior.isMemoryChasing(this.mob);
+        boolean result =
+                !this.done
+                        && this.jump != null
+                        && PursuitEnemyBehavior.isMemoryChasing(this.mob);
+
+        System.out.println(
+                "[DEBUG GapJumpAssistGoal] CAN_CONTINUE=" + result
+                        + " done=" + this.done
+                        + " jump=" + this.jump
+                        + " memoryChasing="
+                        + PursuitEnemyBehavior.isMemoryChasing(this.mob)
+                        + " onGround=" + this.mob.onGround()
+                        + " pos=" + this.mob.position()
+        );
+
+        return result;
     }
 
     @Override
@@ -67,6 +87,18 @@ public class GapJumpAssistGoal extends Goal {
         this.retreatAttempts = 0;
         this.hasBeenAirborne = false;
         this.done = false;
+
+        ACTIVE_MOBS.add(this.mob);
+
+        // Зупиняємо старий Path.
+        // Далі рухом керує сам GapJumpAssistGoal через MoveControl.
+        this.mob.getNavigation().stop();
+
+        System.out.println(
+                "[DEBUG GapJumpAssistGoal] START mob=" + this.mob.blockPosition()
+                        + " jump=" + this.jump
+                        + " path=" + this.mob.getNavigation().getPath()
+        );
     }
 
     @Override
@@ -117,6 +149,12 @@ public class GapJumpAssistGoal extends Goal {
                     requiredSpeed,
                     this.jump.gapBlocks());
 
+            System.out.println(
+                    "[DEBUG GapJumpAssistGoal] TICK onGround=" + this.mob.onGround()
+                            + " phase=" + this.phase
+                            + " pos=" + this.mob.position()
+                            + " speed=" + this.mob.getDeltaMovement().horizontalDistance());
+
             // 2. Візуальний ефект у грі (спавнить зелені партикли над головою моба)
             if (this.mob.level() instanceof net.minecraft.server.level.ServerLevel serverLevel) {
                 serverLevel.sendParticles(
@@ -157,8 +195,11 @@ public class GapJumpAssistGoal extends Goal {
 
     @Override
     public void stop() {
+        ACTIVE_MOBS.remove(this.mob);
+
         this.jump = null;
         this.retreatTarget = null;
+
         this.mob.getNavigation().stop();
     }
 
