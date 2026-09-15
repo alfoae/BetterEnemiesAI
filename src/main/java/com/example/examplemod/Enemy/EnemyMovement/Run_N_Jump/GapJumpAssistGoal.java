@@ -1,6 +1,5 @@
 package com.example.examplemod.Enemy.EnemyMovement.Run_N_Jump;
 
-import com.example.examplemod.Enemy.EnemyBehavior.EnemyBreak_N_Build.EnemyBreak_N_BuildUtils;
 import com.example.examplemod.Enemy.EnemyBehavior.EnemyPursuit_N_Search.PursuitBehavior.PursuitEnemyBehavior;
 import net.minecraft.world.entity.Mob;
 import net.minecraft.world.entity.ai.goal.Goal;
@@ -9,46 +8,46 @@ import net.minecraft.world.phys.Vec3;
 import java.util.EnumSet;
 
 /**
- * Стрибок через короткий природний розрив на шляху до chasePos.
+ * Виконання стрибка через розрив, який {@link GapJumpNodeEvaluator} уже заклав у sharedPath як
+ * "далекий" вузол — сама детекція розриву тепер живе в pathfinding-графі, цей Goal лише читає
+ * {@link GapJumpUtils#findUpcomingJumpSegment} і виконує розгін/стрибок.
  * <p>
- * ЧОМУ моб "губив імпульс" у першій версії: звичайний Path не вміє прокласти вузол через розрив,
- * тож PursuitEnemyMeleeBehavior вів моба до ОСТАННЬОГО досяжного вузла — а це вузол рівно на
- * краю. MoveControl бачить, що ціль (край) уже близько, і гальмує zza до нуля ще ДО того, як
- * встигав спрацювати сам стрибок — моб приходив на край з практично нульовою живою швидкістю.
+ * Виконавча частина (фази CHARGING/RETREATING, безпечний відступ, гейт живою швидкістю,
+ * самозавершення після приземлення) не змінилась проти v3 — та логіка вже перевірена в грі,
+ * змінилось тільки ЗВІДКИ береться сам факт "тут є стрибок".
  * <p>
- * Тому тут ДВІ зміни одночасно, не одна:
- * <ol>
- *   <li>{@code setWantedPosition} завжди ціляє в {@code landing} (точку ЗА розривом), а не в
- *       край. Поки моб ще підбігає, ціль лишається "далеко", MoveControl не переводить операцію
- *       в WAIT і не гальмує zza рівно на кромці — це і є основний фікс втрати імпульсу.</li>
- *   <li>Сам виклик {@code jump()} додатково гейтиться живою швидкістю
- *       ({@link GapJumpUtils#requiredTakeoffSpeed}) — якщо моб все одно підійшов до краю
- *       недостатньо розігнаним (щойно розвернувся, щойно почав чейс), він відходить назад на
- *       {@code BASE_RUNUP_BLOCKS} і заряджається ще раз, аж поки жива швидкість не наздожене
- *       потрібну (чи не вичерпає {@code MAX_RETREAT_ATTEMPTS}).</li>
- * </ol>
- * "Розгін" — це та сама сама Run_N_Jump-швидкість (sprint), жодного окремого руху не заведено:
- * і відхід назад, і заряд вперед ідуть через той самий {@code Run_N_JumpUtils.getRunSpeedModifier}.
- * <p>
- * Флаги (MOVE+LOOK+JUMP) і пріоритет — як і раніше, ті самі, що в TowerClimbGoal/BuildPathGoal;
- * не звертається до {@code EnemyBreak_N_BuildUtils.canOperate()} (нічого не будує/ламає).
- * <p>
- * НЕДОВІРЕНА ЧАСТИНА, чесно: {@code BASE_RUNUP_BLOCKS} — не розрахунок з формули прискорення
- * Minecraft (не був певний у точних константах тертя блоків, щоб на них покладатись без
- * компіляції/тестів), а проста евристика "відійти й заміряти живу швидкість ще раз", яка
- * зростає з кожною невдалою спробою. Працює незалежно від типу поверхні під ногами, але
- * оптимальне значення варто підібрати в грі.
+ * Той самий набір флагів (MOVE+LOOK+JUMP), що й TowerClimbGoal/BuildPathGoal, і той самий
+ * пріоритет — АЛЕ тригер для {@code PursuitEnemyMeleeBehavior.shouldYieldToTerraforming()}
+ * (isPathBlocked) більше НЕ спрацьовує для прохідних-через-стрибок розривів, бо createPath()
+ * тепер для них реально знаходить шлях. Тому в PursuitEnemyMeleeBehavior додано окрему умову
+ * {@code shouldYieldToGapJump()} — без неї GoalSelector ніколи не віддасть нам MOVE/LOOK
+ * (пріоритет 1 форсовано не перебивається вищими номерами, це підтверджена ванільна поведінка,
+ * не якась забаганка).
  */
 public class GapJumpAssistGoal extends Goal {
+
+    private static final double ARRIVED_RADIUS = 0.5;
 
     private static final int BASE_RUNUP_BLOCKS = 5;
     private static final int MAX_RETREAT_ATTEMPTS = 3;
     private static final double EDGE_RADIUS = 0.7;
+    private Phase phase;
 
     private final Mob mob;
     private GapJumpUtils.GapJump jump;
+    private Vec3 retreatTarget;
+    private boolean hasBeenAirborne;
     private int retreatAttempts;
-    private boolean abandoned;
+    private boolean done;
+
+    @Override
+    public boolean canUse() {
+        if (!PursuitEnemyBehavior.isMemoryChasing(this.mob) || !this.mob.onGround()) {
+            return false;
+        }
+        this.jump = GapJumpUtils.findUpcomingJumpSegment(this.mob);
+        return this.jump != null;
+    }
 
     public GapJumpAssistGoal(Mob mob) {
         this.mob = mob;
@@ -56,69 +55,88 @@ public class GapJumpAssistGoal extends Goal {
     }
 
     @Override
-    public boolean canUse() {
-        if (!PursuitEnemyBehavior.isMemoryChasing(this.mob) || !this.mob.onGround()) {
-            return false;
-        }
-        Vec3 chasePos = PursuitEnemyBehavior.getChasePosition(this.mob);
-        if (chasePos == null || !EnemyBreak_N_BuildUtils.isPathBlocked(this.mob, chasePos)) {
-            return false; // не ганяти скан даремно, коли звичайний шлях і так вільний
-        }
-        this.jump = GapJumpUtils.findGapJump(this.mob, chasePos);
-        return this.jump != null;
-    }
-
-    @Override
     public boolean canContinueToUse() {
-        if (this.abandoned) {
-            return false;
-        }
-        // у польоті довіряємо вже взятому напрямку; на землі - переоцінюємо наново
-        return !this.mob.onGround() || canUse();
+        // не пересканюємо і не чіпаємо this.jump посеред маневру - інакше кожен тік знаходить
+        // "трохи інший" сегмент і весь стан (фаза, retreatTarget, лічильник спроб) втрачає сенс
+        return !this.done && this.jump != null && PursuitEnemyBehavior.isMemoryChasing(this.mob);
     }
 
     @Override
     public void start() {
+        this.phase = Phase.CHARGING;
         this.retreatAttempts = 0;
-        this.abandoned = false;
+        this.hasBeenAirborne = false;
+        this.done = false;
     }
 
     @Override
     public void tick() {
         if (!this.mob.onGround()) {
+            this.hasBeenAirborne = true;
             steerTo(this.jump.landing());
             return;
         }
 
+        if (this.hasBeenAirborne) {
+            this.done = true; // долетіли й сіли - завдання виконане, далі звичайний чейс по sharedPath
+            return;
+        }
+
+        double requiredSpeed = GapJumpUtils.requiredTakeoffSpeed(this.jump.gapBlocks());
+
+        if (this.phase == Phase.RETREATING) {
+            double liveSpeed = this.mob.getDeltaMovement().horizontalDistance();
+            boolean arrived = this.mob.position().distanceTo(this.retreatTarget) < ARRIVED_RADIUS;
+            if (arrived || liveSpeed >= requiredSpeed) {
+                this.phase = Phase.CHARGING; // доїхали до точки розгону (чи вже й так розігнались) - заряджаємось вперед
+            } else {
+                steerTo(this.retreatTarget);
+                return;
+            }
+        }
+
+        // phase == CHARGING
         Vec3 edgeCenter = Vec3.atCenterOf(this.jump.edge());
         double distToEdge = this.mob.position().distanceTo(edgeCenter);
 
         if (distToEdge > EDGE_RADIUS) {
-            // ще підбігаємо - ціляємо на ПРИЗЕМЛЕННЯ, не на край (див. javadoc: саме це не дає
-            // MoveControl загальмувати zza рівно на кромці)
-            steerTo(this.jump.landing());
+            steerTo(this.jump.landing()); // ціляти на приземлення, не на край - не гальмує zza на кромці
             return;
         }
 
         double currentSpeed = this.mob.getDeltaMovement().horizontalDistance();
-        double requiredSpeed = GapJumpUtils.requiredTakeoffSpeed(this.jump.gapBlocks());
-
         if (currentSpeed >= requiredSpeed) {
             steerTo(this.jump.landing());
             this.mob.getJumpControl().jump();
             return;
         }
 
-        // на краю, але живої швидкості не вистачає - відходимо назад для розгону замість
-        // стрибка наосліп з тим імпульсом, який випадково є зараз
+        // на краю, але живої швидкості не вистачає - готуємо відступ для розгону
         if (this.retreatAttempts >= MAX_RETREAT_ATTEMPTS) {
-            this.abandoned = true; // евристика вичерпана - хай цей розрив бере BuildPathGoal
+            this.done = true; // евристика вичерпана - хай цей розрив бере BuildPathGoal (якщо він ширший за стрибок - там і так тільки він)
             return;
         }
         this.retreatAttempts++;
+
         Vec3 dirToLanding = this.jump.landing().subtract(edgeCenter).normalize();
-        Vec3 retreatTo = edgeCenter.subtract(dirToLanding.scale((double) BASE_RUNUP_BLOCKS * this.retreatAttempts));
-        steerTo(retreatTo);
+        Vec3 safeRetreat = GapJumpUtils.findSafeRetreatPoint(
+                this.mob, dirToLanding.scale(-1), BASE_RUNUP_BLOCKS * this.retreatAttempts);
+
+        if (safeRetreat.distanceTo(this.mob.position()) < ARRIVED_RADIUS) {
+            this.done = true; // позаду теж обрив/стіна - нема куди відступати, не штовхаємо в діру
+            return;
+        }
+
+        this.retreatTarget = safeRetreat;
+        this.phase = Phase.RETREATING;
+        steerTo(this.retreatTarget);
+    }
+
+    @Override
+    public void stop() {
+        this.jump = null;
+        this.retreatTarget = null;
+        this.mob.getNavigation().stop();
     }
 
     private void steerTo(Vec3 target) {
@@ -127,9 +145,5 @@ public class GapJumpAssistGoal extends Goal {
                 target.x, target.y, target.z, Run_N_JumpUtils.getRunSpeedModifier(this.mob));
     }
 
-    @Override
-    public void stop() {
-        this.jump = null;
-        this.mob.getNavigation().stop();
-    }
+    private enum Phase {CHARGING, RETREATING}
 }

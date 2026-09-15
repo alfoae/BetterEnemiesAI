@@ -1,6 +1,7 @@
 package com.example.examplemod.Enemy.EnemyBehavior.EnemyPursuit_N_Search.PursuitBehavior;
 
 import com.example.examplemod.Enemy.EnemyBehavior.EnemyBreak_N_Build.EnemyBreak_N_BuildUtils;
+import com.example.examplemod.Enemy.EnemyMovement.Run_N_Jump.GapJumpUtils;
 import com.example.examplemod.Enemy.EnemyMovement.Run_N_Jump.Run_N_JumpUtils;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.entity.LivingEntity;
@@ -79,9 +80,11 @@ public class PursuitEnemyMeleeBehavior extends Goal {
     @Override
     public boolean canUse() {
         boolean yieldToTerraforming = this.shouldYieldToTerraforming();
+        boolean yieldToGapJump = this.shouldYieldToGapJump();
         boolean result = this.extraCanUseCondition.test(this.mob)
                 && !this.shouldYield()
                 && !yieldToTerraforming
+                && !yieldToGapJump
                 && PursuitEnemyBehavior.getChasePosition(this.mob) != null;
         // ТИМЧАСОВИЙ DEBUG: без throttle - рідкісна подія (раз на весь епізод переслідування),
         // варто бачити кожного разу. Якщо ЦЕ раптом = false довго поки моб на вигляд атакує -
@@ -92,7 +95,8 @@ public class PursuitEnemyMeleeBehavior extends Goal {
                 PursuitEnemyBehavior.debugMsg(p, "[DEBUG PursuitEnemyMeleeBehavior] canUse()=false. "
                         + "chasePos=" + PursuitEnemyBehavior.getChasePosition(this.mob)
                         + " shouldYield=" + this.shouldYield()
-                        + " yieldToTerraforming=" + yieldToTerraforming + " моб=" + this.mob.blockPosition());
+                        + " yieldToTerraforming=" + yieldToTerraforming
+                        + " yieldToGapJump=" + yieldToGapJump + " моб=" + this.mob.blockPosition());
             }
         }
         return result;
@@ -101,9 +105,11 @@ public class PursuitEnemyMeleeBehavior extends Goal {
     @Override
     public boolean canContinueToUse() {
         boolean yieldToTerraforming = this.shouldYieldToTerraforming();
+        boolean yieldToGapJump = this.shouldYieldToGapJump();
         boolean result = this.extraCanUseCondition.test(this.mob)
                 && !this.shouldYield()
                 && !yieldToTerraforming
+                && !yieldToGapJump
                 && (PursuitEnemyBehavior.getChasePosition(this.mob) != null
                 || !this.mob.getNavigation().isDone());
         // ТИМЧАСОВИЙ DEBUG: без throttle - показує ТОЧНИЙ момент STOP і чому саме.
@@ -114,7 +120,8 @@ public class PursuitEnemyMeleeBehavior extends Goal {
                         + "chasePos=" + PursuitEnemyBehavior.getChasePosition(this.mob)
                         + " navigation.isDone()=" + this.mob.getNavigation().isDone()
                         + " shouldYield=" + this.shouldYield()
-                        + " yieldToTerraforming=" + yieldToTerraforming + " моб=" + this.mob.blockPosition());
+                        + " yieldToTerraforming=" + yieldToTerraforming
+                        + " yieldToGapJump=" + yieldToGapJump + " моб=" + this.mob.blockPosition());
             }
         }
         return result;
@@ -165,6 +172,24 @@ public class PursuitEnemyMeleeBehavior extends Goal {
             return false;
         }
         return EnemyBreak_N_BuildUtils.isPathBlocked(this.mob, chasePos);
+    }
+
+    /**
+     * Той самий принцип, що й {@link #shouldYieldToTerraforming()} (чемний voluntary yield, не
+     * примусове перехоплення прапорців), але для {@code GapJumpAssistGoal}. НАВМИСНО не через
+     * {@code isPathBlocked}: щойно розрив стає прохідним через GapJumpNodeEvaluator, createPath()
+     * для нього більше НЕ unreachable — isPathBlocked сам собою перестає бачити тут проблему.
+     * Тому тригер тут окремий: чи в РЕАЛЬНОМУ поточному Path попереду є стрибковий сегмент.
+     * <p>
+     * Той самий {@link #canYieldToTerraforming} прапорець використано як гейт (а не окремий
+     * конструкторний параметр) — на практиці GapJumpAssistGoal зареєстрований на тих самих
+     * мобах, що й build/dig, тож розділяти прапорці поки нема сенсу.
+     */
+    private boolean shouldYieldToGapJump() {
+        if (!this.canYieldToTerraforming) {
+            return false;
+        }
+        return GapJumpUtils.findUpcomingJumpSegment(this.mob) != null;
     }
 
     @Override

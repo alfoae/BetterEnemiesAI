@@ -11,6 +11,7 @@
     "DrownedMixin",
     "GhastMixin",
     "IronGolemMixin",
+    "MobAccessor",
     "MobBlockStorageMixin",
     "MobWeaponStorageMixin",
     "PiglinBruteMixin",
