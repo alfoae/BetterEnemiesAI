@@ -107,7 +107,30 @@ public class GapJumpAssistGoal extends Goal {
         double currentSpeed = this.mob.getDeltaMovement().horizontalDistance();
         if (currentSpeed >= requiredSpeed) {
             steerTo(this.jump.landing());
-            this.mob.getJumpControl().jump();
+            this.mob.getJumpControl().jump(); // Сам стрибок
+
+            // ================= [DEBUG] =================
+            // 1. Повідомлення в консоль з деталями стрибка
+            System.out.printf("[DEBUG JUMP] Моб %s стрибнув! Швидкість: %.2f (потрібно: %.2f) | Розрив: %d блоків%n",
+                    this.mob.getName().getString(),
+                    currentSpeed,
+                    requiredSpeed,
+                    this.jump.gapBlocks());
+
+            // 2. Візуальний ефект у грі (спавнить зелені партикли над головою моба)
+            if (this.mob.level() instanceof net.minecraft.server.level.ServerLevel serverLevel) {
+                serverLevel.sendParticles(
+                        net.minecraft.core.particles.ParticleTypes.HAPPY_VILLAGER,
+                        this.mob.getX(),
+                        this.mob.getY() + this.mob.getBbHeight() + 0.5,
+                        this.mob.getZ(),
+                        20,   // кількість партиклів
+                        0.2, 0.2, 0.2, // розкид по X, Y, Z
+                        0.05  // швидкість рух партиклів
+                );
+            }
+            // ===========================================
+
             return;
         }
 
