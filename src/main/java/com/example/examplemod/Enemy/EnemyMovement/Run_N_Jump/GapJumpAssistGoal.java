@@ -88,15 +88,6 @@ public class GapJumpAssistGoal extends Goal {
         return result;
     }
 
-    private static String formatVec(Vec3 v) {
-        return String.format(
-                "(%.3f, %.3f, %.3f)",
-                v.x,
-                v.y,
-                v.z
-        );
-    }
-
     @Override
     public void start() {
         this.phase = Phase.CHARGING;
@@ -146,20 +137,13 @@ public class GapJumpAssistGoal extends Goal {
         );
     }
 
-    @Override
-    public void stop() {
-        ACTIVE_MOBS.remove(this.mob);
-
-        this.jump = null;
-        this.retreatTarget = null;
-
-        this.mob.getNavigation().stop();
-    }
-
-    private void steerTo(Vec3 target) {
-        this.mob.getLookControl().setLookAt(target.x, target.y, target.z, 30.0F, 30.0F);
-        this.mob.getMoveControl().setWantedPosition(
-                target.x, target.y, target.z, Run_N_JumpUtils.getRunSpeedModifier(this.mob));
+    private static String formatVec(Vec3 v) {
+        return String.format(
+                "(%.3f, %.3f, %.3f)",
+                v.x,
+                v.y,
+                v.z
+        );
     }
 
     @Override
@@ -171,7 +155,22 @@ public class GapJumpAssistGoal extends Goal {
         if (!this.mob.onGround()) {
             this.hasBeenAirborne = true;
 
-            steerTo(this.jump.landing());
+            // === ФІКС (переліт, дебаг 2 і 4) === requiredTakeoffSpeed/JUMP_AIRTIME_TICKS
+            // рахують ЧИСТО балістичний політ (тільки гравітація + DRAG_PER_TICK, жодного
+            // розгону в польоті). А steerTo() тут щотіку кликав moveControl на тій самій
+            // біговій швидкості, що й на землі. Повітряне керування у ванілі слабше за
+            // наземне (менший коефіцієнт прискорення в польоті), але НЕ нульове - і
+            // застосоване щотіку весь ~10-тіковий політ, воно додає зайву дистанцію поверх
+            // розрахунку. Звідси стабільний переліт повз ціль на 1+ блок (у дебазі 4 - аж
+            // у стіну за приземленням, з різким обнуленням швидкості). Явно "гасимо"
+            // moveControl (ціль = поточна позиція - а не просто перестаємо кликати
+            // steerTo(), інакше moveControl і далі тягне до старої цілі, виставленої ще на
+            // землі перед стрибком) і лишаємо тільки погляд на приземлення - нехай летить
+            // по інерції, як і порахували.
+            Vec3 herePos = this.mob.position();
+            this.mob.getMoveControl().setWantedPosition(herePos.x, herePos.y, herePos.z, 0.0);
+            this.mob.getLookControl().setLookAt(
+                    this.jump.landing().x, this.jump.landing().y, this.jump.landing().z, 30.0F, 30.0F);
 
             System.out.println(
                     "[DEBUG GAP JUMP] МОБ У ПОВІТРІ"
@@ -263,10 +262,24 @@ public class GapJumpAssistGoal extends Goal {
         // =========================================================
         // CHARGING — рух вперед до краю / сам розбіг
         // =========================================================
-        Vec3 edgeCenter = Vec3.atCenterOf(this.jump.edge());
+        // === ФІКС (дебаг 1, дебаг 2 фінальне падіння) === Vec3.atCenterOf() додає +0.5
+        // по ВСІХ трьох осях, включно з Y. Але mob.position() стоїть на тому ж Y, що й
+        // edge (це рівень "ніг", без +0.5 - так само, як landing/findSafeRetreatPoint
+        // рахують через atBottomCenterOf, без зсуву по Y). Через це distanceTo() тут
+        // завжди мала зайвих ~0.5 по Y, з'їдаючи більшість EDGE_RADIUS: реальний
+        // прохідний горизонтальний радіус був sqrt(0.7²-0.5²)≈0.49 замість заявлених 0.7,
+        // і то лише коли підхід рівно по центру блоку. Досить трохи офсету по X чи Z - і
+        // "КРАЙ" не встигав спрацювати між двома тіками: моб проходив усю ширину вікна за
+        // один крок і опинявся вже в польоті, так і не діставшись до перевірки швидкості й
+        // jump() (дебаг 1 - жодного СТРИБОК! за всю сесію; дебаг 2 - те саме на 4-й
+        // спробі, вже з достатньою швидкістю, яка так і лишилась невикористаною). Рахуємо
+        // суто горизонтально - Y тут взагалі не мало б впливати.
+        Vec3 edgeCenter = Vec3.atBottomCenterOf(this.jump.edge());
 
-        double distToEdge =
-                this.mob.position().distanceTo(edgeCenter);
+        double distToEdge = Math.sqrt(
+                Math.pow(this.mob.getX() - edgeCenter.x, 2)
+                        + Math.pow(this.mob.getZ() - edgeCenter.z, 2)
+        );
 
         // ---------------------------------------------------------
         // Моб ще далеко від краю
@@ -359,20 +372,24 @@ public class GapJumpAssistGoal extends Goal {
         // ПОТРІБЕН НОВИЙ ВІДХІД
         // =========================================================
 
+        // === ФІКС === Спроби вичерпано - раніше тут Goal здавався (done=true) БЕЗ
+        // стрибка. Але здача так само НЕ рятує від падіння: PursuitEnemyMeleeBehavior
+        // однаково веде моба в той самий розрив звичайним ходом без жодного стрибка (в
+        // дебазі 2 4-й цикл після цього і закінчився падінням у прірву). Тому й тут -
+        // стрибаємо з тим розгоном, що є, замість здаватись наосліп.
         if (this.retreatAttempts >= MAX_RETREAT_ATTEMPTS) {
 
             System.out.println(
-                    "[DEBUG GAP JUMP] НЕ ВДАЛОСЯ РОЗІГНАТИСЯ"
+                    "[DEBUG GAP JUMP] СПРОБИ ВИЧЕРПАНО - СТРИБАЄМО НАВПРОСТЕЦЬ"
                             + " | спроб=" + this.retreatAttempts
                             + " | currentSpeed=" + String.format("%.3f", currentSpeed)
                             + " | requiredSpeed=" + String.format("%.3f", requiredSpeed)
             );
 
-            this.done = true;
+            steerTo(this.jump.landing());
+            this.mob.getJumpControl().jump();
             return;
         }
-
-        this.retreatAttempts++;
 
         Vec3 dirToLanding =
                 this.jump.landing()
@@ -383,23 +400,30 @@ public class GapJumpAssistGoal extends Goal {
                 GapJumpUtils.findSafeRetreatPoint(
                         this.mob,
                         dirToLanding.scale(-1),
-                        BASE_RUNUP_BLOCKS * this.retreatAttempts
+                        BASE_RUNUP_BLOCKS * (this.retreatAttempts + 1)
                 );
 
-        if (safeRetreat.distanceTo(this.mob.position()) < ARRIVED_RADIUS) {
+        boolean noRoomAtAll =
+                safeRetreat.distanceTo(this.mob.position()) < ARRIVED_RADIUS;
 
-            // === ФІКС (дебаг 3) === Платформа 1х1: позаду теж обрив, відступати
-            // нікуди. Раніше тут Goal просто здавався (done=true) - але це НЕ рятує
-            // моба від падіння: він повертається під PursuitEnemyMeleeBehavior, яка
-            // все одно веде його прямо в той самий розрив звичайним ходом (бо шлях
-            // через GapJumpNodeEvaluator formally "прохідний"), і моб падає туди без
-            // жодної спроби стрибка - просто пізніше й без контролю. Замість здаватись
-            // наосліп - стрибаємо з тим розгоном, що вже є: requiredSpeed і так рахується
-            // із запасом (SAFETY_MARGIN=0.85), тож трохи недостатня жива швидкість
-            // нерідко все одно долітає, а гірший випадок нічим не гірший за те падіння,
-            // яке сталось би однаково.
+        // === ФІКС (дебаг 2, "ходить туди-сюди") === findSafeRetreatPoint зупиняється на
+        // першій небезпечній клітині в напрямку відходу - якщо це стіна чи ще один
+        // розрив ближче за BASE_RUNUP_BLOCKS, збільшення desiredBlocks на наступній
+        // спробі НІЧОГО не змінює: та сама точка повернеться знову. Раніше це не
+        // перевірялось, і Goal слухняно повторював ІДЕНТИЧНИЙ відхід-розгін до
+        // MAX_RETREAT_ATTEMPTS разів поспіль - видимо це і є те "ходить туди-сюди" з
+        // дебага 2. Порівнюємо з точкою МИНУЛОЇ спроби і, якщо вона та сама, одразу
+        // стрибаємо, не витрачаючи решту спроб на завідомо той самий результат.
+        boolean stuckAtSameSpot =
+                this.retreatTarget != null
+                        && safeRetreat.distanceTo(this.retreatTarget) < ARRIVED_RADIUS;
+
+        if (noRoomAtAll || stuckAtSameSpot) {
+
             System.out.println(
-                    "[DEBUG GAP JUMP] НЕМАЄ МІСЦЯ ДЛЯ РОЗБІГУ - СТРИБАЄМО НАВПРОСТЕЦЬ"
+                    "[DEBUG GAP JUMP] "
+                            + (noRoomAtAll ? "НЕМАЄ МІСЦЯ ДЛЯ РОЗБІГУ" : "УПИРАЄМОСЬ У ТЕ САМЕ МІСЦЕ")
+                            + " - СТРИБАЄМО НАВПРОСТЕЦЬ"
                             + " | pos=" + formatVec(this.mob.position())
                             + " | currentSpeed=" + String.format("%.3f", currentSpeed)
                             + " | requiredSpeed=" + String.format("%.3f", requiredSpeed)
@@ -410,6 +434,7 @@ public class GapJumpAssistGoal extends Goal {
             return;
         }
 
+        this.retreatAttempts++;
         this.retreatTarget = safeRetreat;
         this.phase = Phase.RETREATING;
         this.debugRetreatPrinted = false;
@@ -427,6 +452,22 @@ public class GapJumpAssistGoal extends Goal {
         );
 
         steerTo(this.retreatTarget);
+    }
+
+    @Override
+    public void stop() {
+        ACTIVE_MOBS.remove(this.mob);
+
+        this.jump = null;
+        this.retreatTarget = null;
+
+        this.mob.getNavigation().stop();
+    }
+
+    private void steerTo(Vec3 target) {
+        this.mob.getLookControl().setLookAt(target.x, target.y, target.z, 30.0F, 30.0F);
+        this.mob.getMoveControl().setWantedPosition(
+                target.x, target.y, target.z, Run_N_JumpUtils.getRunSpeedModifier(this.mob));
     }
 
     private enum Phase {CHARGING, RETREATING}
