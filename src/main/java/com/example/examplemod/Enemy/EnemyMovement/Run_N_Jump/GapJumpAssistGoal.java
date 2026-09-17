@@ -40,6 +40,13 @@ public class GapJumpAssistGoal extends Goal {
     private int retreatAttempts;
     private boolean done;
 
+    // =========================================
+    private boolean debugJumpInfoPrinted = false;
+    private boolean debugRetreatPrinted = false;
+    private boolean debugRunupPrinted = false;
+    private int debugRunTicks = 0;
+    // =========================================
+
     @Override
     public boolean canUse() {
         if (!PursuitEnemyBehavior.isMemoryChasing(this.mob) || !this.mob.onGround()) {
@@ -81,6 +88,15 @@ public class GapJumpAssistGoal extends Goal {
         return result;
     }
 
+    private static String formatVec(Vec3 v) {
+        return String.format(
+                "(%.3f, %.3f, %.3f)",
+                v.x,
+                v.y,
+                v.z
+        );
+    }
+
     @Override
     public void start() {
         this.phase = Phase.CHARGING;
@@ -88,109 +104,46 @@ public class GapJumpAssistGoal extends Goal {
         this.hasBeenAirborne = false;
         this.done = false;
 
+        // === ФІКС ===
+        // 1. ACTIVE_MOBS раніше ніколи не заповнювався (тільки remove() в stop() і
+        //    contains() в isActive()) - isActive() завжди повертав false, тож
+        //    PursuitEnemyMeleeBehavior.shouldYieldToGapJump() тримався ЛИШЕ на
+        //    findUpcomingJumpSegment(Path). Реєструємо моба тут, як і задумувалось.
+        // 2. mob.getNavigation() досі тримає СТАРИЙ шлях від PursuitEnemyMeleeBehavior
+        //    (той свідомо не викликав navigation.stop(), щоб findUpcomingJumpSegment
+        //    міг далі читати Path). Але PathNavigation.tick() виконується КОЖЕН тік
+        //    БЕЗУМОВНО (customServerAiStep: sensing -> targetSelector -> goalSelector ->
+        //    navigation -> controls), тобто ПІСЛЯ goalSelector.tick() - і сам додає
+        //    moveControl.setWantedPosition() у напрямку старого шляху (до гравця,
+        //    ЧЕРЕЗ розрив), затираючи щойно виставлений steerTo(). Це і є причина всіх
+        //    5 багів: retreatTarget ігнорується (дебаг 1, 3), стрибок ніколи не
+        //    викликається бо моба просто зносить уперед по старому шляху (дебаг 1, 5),
+        //    зайвий імпульс від старого шляху додається до розгону і моб перелітає повз
+        //    ціль (дебаг 2, 4). Зупиняємо стару навігацію тут - тепер це безпечно,
+        //    бо ACTIVE_MOBS.add() вище вже гарантує shouldYieldToGapJump()=true
+        //    незалежно від стану Path.
         ACTIVE_MOBS.add(this.mob);
-
-        // Зупиняємо старий Path.
-        // Далі рухом керує сам GapJumpAssistGoal через MoveControl.
         this.mob.getNavigation().stop();
 
-        System.out.println(
-                "[DEBUG GapJumpAssistGoal] START mob=" + this.mob.blockPosition()
-                        + " jump=" + this.jump
-                        + " path=" + this.mob.getNavigation().getPath()
-        );
-    }
-
-    @Override
-    public void tick() {
-        if (!this.mob.onGround()) {
-            this.hasBeenAirborne = true;
-            steerTo(this.jump.landing());
-            return;
-        }
-
-        if (this.hasBeenAirborne) {
-            this.done = true; // долетіли й сіли - завдання виконане, далі звичайний чейс по sharedPath
-            return;
-        }
+        this.debugJumpInfoPrinted = false;
+        this.debugRetreatPrinted = false;
+        this.debugRunupPrinted = false;
+        this.debugRunTicks = 0;
 
         double requiredSpeed = GapJumpUtils.requiredTakeoffSpeed(this.jump.gapBlocks());
 
-        if (this.phase == Phase.RETREATING) {
-            double liveSpeed = this.mob.getDeltaMovement().horizontalDistance();
-            boolean arrived = this.mob.position().distanceTo(this.retreatTarget) < ARRIVED_RADIUS;
-            if (arrived || liveSpeed >= requiredSpeed) {
-                this.phase = Phase.CHARGING; // доїхали до точки розгону (чи вже й так розігнались) - заряджаємось вперед
-            } else {
-                steerTo(this.retreatTarget);
-                return;
-            }
-        }
-
-        // phase == CHARGING
-        Vec3 edgeCenter = Vec3.atCenterOf(this.jump.edge());
-        double distToEdge = this.mob.position().distanceTo(edgeCenter);
-
-        if (distToEdge > EDGE_RADIUS) {
-            steerTo(this.jump.landing()); // ціляти на приземлення, не на край - не гальмує zza на кромці
-            return;
-        }
-
-        double currentSpeed = this.mob.getDeltaMovement().horizontalDistance();
-        if (currentSpeed >= requiredSpeed) {
-            steerTo(this.jump.landing());
-            this.mob.getJumpControl().jump(); // Сам стрибок
-
-            // ================= [DEBUG] =================
-            // 1. Повідомлення в консоль з деталями стрибка
-            System.out.printf("[DEBUG JUMP] Моб %s стрибнув! Швидкість: %.2f (потрібно: %.2f) | Розрив: %d блоків%n",
-                    this.mob.getName().getString(),
-                    currentSpeed,
-                    requiredSpeed,
-                    this.jump.gapBlocks());
-
-            System.out.println(
-                    "[DEBUG GapJumpAssistGoal] TICK onGround=" + this.mob.onGround()
-                            + " phase=" + this.phase
-                            + " pos=" + this.mob.position()
-                            + " speed=" + this.mob.getDeltaMovement().horizontalDistance());
-
-            // 2. Візуальний ефект у грі (спавнить зелені партикли над головою моба)
-            if (this.mob.level() instanceof net.minecraft.server.level.ServerLevel serverLevel) {
-                serverLevel.sendParticles(
-                        net.minecraft.core.particles.ParticleTypes.HAPPY_VILLAGER,
-                        this.mob.getX(),
-                        this.mob.getY() + this.mob.getBbHeight() + 0.5,
-                        this.mob.getZ(),
-                        20,   // кількість партиклів
-                        0.2, 0.2, 0.2, // розкид по X, Y, Z
-                        0.05  // швидкість рух партиклів
-                );
-            }
-            // ===========================================
-
-            return;
-        }
-
-        // на краю, але живої швидкості не вистачає - готуємо відступ для розгону
-        if (this.retreatAttempts >= MAX_RETREAT_ATTEMPTS) {
-            this.done = true; // евристика вичерпана - хай цей розрив бере BuildPathGoal (якщо він ширший за стрибок - там і так тільки він)
-            return;
-        }
-        this.retreatAttempts++;
-
-        Vec3 dirToLanding = this.jump.landing().subtract(edgeCenter).normalize();
-        Vec3 safeRetreat = GapJumpUtils.findSafeRetreatPoint(
-                this.mob, dirToLanding.scale(-1), BASE_RUNUP_BLOCKS * this.retreatAttempts);
-
-        if (safeRetreat.distanceTo(this.mob.position()) < ARRIVED_RADIUS) {
-            this.done = true; // позаду теж обрив/стіна - нема куди відступати, не штовхаємо в діру
-            return;
-        }
-
-        this.retreatTarget = safeRetreat;
-        this.phase = Phase.RETREATING;
-        steerTo(this.retreatTarget);
+        System.out.println(
+                "[DEBUG GAP JUMP] ==============================="
+                        + "\nМоб: " + this.mob.getName().getString()
+                        + "\nПоточні координати: " + formatVec(this.mob.position())
+                        + "\nБлок краю: " + this.jump.edge()
+                        + "\nТочка приземлення: " + formatVec(this.jump.landing())
+                        + "\nРозрив: " + this.jump.gapBlocks() + " блок."
+                        + "\nПотрібна швидкість перед стрибком: " + String.format("%.3f", requiredSpeed)
+                        + "\nПоточна швидкість: " + String.format("%.3f", this.mob.getDeltaMovement().horizontalDistance())
+                        + "\nФаза: " + this.phase
+                        + "\n================================"
+        );
     }
 
     @Override
@@ -207,6 +160,273 @@ public class GapJumpAssistGoal extends Goal {
         this.mob.getLookControl().setLookAt(target.x, target.y, target.z, 30.0F, 30.0F);
         this.mob.getMoveControl().setWantedPosition(
                 target.x, target.y, target.z, Run_N_JumpUtils.getRunSpeedModifier(this.mob));
+    }
+
+    @Override
+    public void tick() {
+
+        // =========================================================
+        // AIRBORNE — моб уже летить
+        // =========================================================
+        if (!this.mob.onGround()) {
+            this.hasBeenAirborne = true;
+
+            steerTo(this.jump.landing());
+
+            System.out.println(
+                    "[DEBUG GAP JUMP] МОБ У ПОВІТРІ"
+                            + " | pos=" + formatVec(this.mob.position())
+                            + " | landing=" + formatVec(this.jump.landing())
+                            + " | speed=" + String.format("%.3f",
+                            this.mob.getDeltaMovement().horizontalDistance())
+            );
+
+            return;
+        }
+
+        // =========================================================
+        // ПОСАДКА
+        // =========================================================
+        if (this.hasBeenAirborne) {
+            this.done = true;
+
+            System.out.println(
+                    "[DEBUG GAP JUMP] ПРИЗЕМЛЕННЯ"
+                            + " | pos=" + formatVec(this.mob.position())
+                            + " | landing=" + formatVec(this.jump.landing())
+                            + " | speed=" + String.format("%.3f",
+                            this.mob.getDeltaMovement().horizontalDistance())
+            );
+
+            return;
+        }
+
+        double requiredSpeed =
+                GapJumpUtils.requiredTakeoffSpeed(this.jump.gapBlocks());
+
+        double currentSpeed =
+                this.mob.getDeltaMovement().horizontalDistance();
+
+        // =========================================================
+        // RETREATING — моб відходить назад для розбігу
+        // =========================================================
+        if (this.phase == Phase.RETREATING) {
+
+            double liveSpeed =
+                    this.mob.getDeltaMovement().horizontalDistance();
+
+            boolean arrived =
+                    this.mob.position().distanceTo(this.retreatTarget)
+                            < ARRIVED_RADIUS;
+
+            if (arrived || liveSpeed >= requiredSpeed) {
+
+                this.phase = Phase.CHARGING;
+                this.debugRunupPrinted = false;
+                this.debugRunTicks = 0;
+
+                System.out.println(
+                        "[DEBUG GAP JUMP] ПОЧАТОК РОЗБІГУ"
+                                + " | pos=" + formatVec(this.mob.position())
+                                + " | retreatTarget=" + formatVec(this.retreatTarget)
+                                + " | currentSpeed=" + String.format("%.3f", liveSpeed)
+                                + " | requiredSpeed=" + String.format("%.3f", requiredSpeed)
+                                + " | причина="
+                                + (arrived ? "дійшов до точки розбігу" : "швидкість уже достатня")
+                );
+
+            } else {
+
+                steerTo(this.retreatTarget);
+
+                // Один раз при початку відходу + потім раз на 5 тіків
+                if (!this.debugRetreatPrinted || this.debugRunTicks % 5 == 0) {
+                    System.out.println(
+                            "[DEBUG GAP JUMP] ВІДХІД ДЛЯ РОЗБІГУ"
+                                    + " | pos=" + formatVec(this.mob.position())
+                                    + " | target=" + formatVec(this.retreatTarget)
+                                    + " | speed=" + String.format("%.3f", liveSpeed)
+                                    + " | required=" + String.format("%.3f", requiredSpeed)
+                                    + " | distance="
+                                    + String.format("%.3f",
+                                    this.mob.position().distanceTo(this.retreatTarget))
+                    );
+
+                    this.debugRetreatPrinted = true;
+                }
+
+                this.debugRunTicks++;
+                return;
+            }
+        }
+
+        // =========================================================
+        // CHARGING — рух вперед до краю / сам розбіг
+        // =========================================================
+        Vec3 edgeCenter = Vec3.atCenterOf(this.jump.edge());
+
+        double distToEdge =
+                this.mob.position().distanceTo(edgeCenter);
+
+        // ---------------------------------------------------------
+        // Моб ще далеко від краю
+        // ---------------------------------------------------------
+        if (distToEdge > EDGE_RADIUS) {
+
+            steerTo(this.jump.landing());
+
+            if (!this.debugRunupPrinted) {
+
+                System.out.println(
+                        "[DEBUG GAP JUMP] РОЗБІГ"
+                                + " | pos=" + formatVec(this.mob.position())
+                                + " | edge=" + this.jump.edge()
+                                + " | distanceToEdge=" + String.format("%.3f", distToEdge)
+                                + " | speed=" + String.format("%.3f", currentSpeed)
+                                + " | required=" + String.format("%.3f", requiredSpeed)
+                );
+
+                this.debugRunupPrinted = true;
+            }
+
+            // Поточне прискорення/швидкість під час розбігу
+            if (this.debugRunupPrinted && this.debugRunTicks % 5 == 0) {
+
+                System.out.println(
+                        "[DEBUG GAP JUMP] ПОТОЧНЕ ПРИСКОРЕННЯ"
+                                + " | pos=" + formatVec(this.mob.position())
+                                + " | speed=" + String.format("%.3f", currentSpeed)
+                                + " | required=" + String.format("%.3f", requiredSpeed)
+                                + " | до краю=" + String.format("%.3f", distToEdge)
+                );
+            }
+
+            this.debugRunTicks++;
+            return;
+        }
+
+        // =========================================================
+        // Моб уже на краю
+        // =========================================================
+
+        System.out.println(
+                "[DEBUG GAP JUMP] КРАЙ"
+                        + " | pos=" + formatVec(this.mob.position())
+                        + " | edge=" + this.jump.edge()
+                        + " | speed=" + String.format("%.3f", currentSpeed)
+                        + " | required=" + String.format("%.3f", requiredSpeed)
+                        + " | gap=" + this.jump.gapBlocks()
+        );
+
+        // =========================================================
+        // ШВИДКОСТІ ВИСТАЧАЄ — СТРИБАЄМО
+        // =========================================================
+        if (currentSpeed >= requiredSpeed) {
+
+            steerTo(this.jump.landing());
+
+            System.out.println(
+                    "[DEBUG GAP JUMP] СТРИБОК!"
+                            + " | pos=" + formatVec(this.mob.position())
+                            + " | edge=" + this.jump.edge()
+                            + " | landing=" + formatVec(this.jump.landing())
+                            + " | currentSpeed=" + String.format("%.3f", currentSpeed)
+                            + " | requiredSpeed=" + String.format("%.3f", requiredSpeed)
+                            + " | запас="
+                            + String.format("%.3f", currentSpeed - requiredSpeed)
+            );
+
+            this.mob.getJumpControl().jump();
+
+            return;
+        }
+
+        // =========================================================
+        // ШВИДКОСТІ НЕ ВИСТАЧАЄ
+        // =========================================================
+        System.out.println(
+                "[DEBUG GAP JUMP] НЕДОСТАТНЄ ПРИСКОРЕННЯ!"
+                        + " | pos=" + formatVec(this.mob.position())
+                        + " | edge=" + this.jump.edge()
+                        + " | currentSpeed=" + String.format("%.3f", currentSpeed)
+                        + " | requiredSpeed=" + String.format("%.3f", requiredSpeed)
+                        + " | не вистачає="
+                        + String.format("%.3f", requiredSpeed - currentSpeed)
+                        + " | retreatAttempt=" + this.retreatAttempts
+        );
+
+        // =========================================================
+        // ПОТРІБЕН НОВИЙ ВІДХІД
+        // =========================================================
+
+        if (this.retreatAttempts >= MAX_RETREAT_ATTEMPTS) {
+
+            System.out.println(
+                    "[DEBUG GAP JUMP] НЕ ВДАЛОСЯ РОЗІГНАТИСЯ"
+                            + " | спроб=" + this.retreatAttempts
+                            + " | currentSpeed=" + String.format("%.3f", currentSpeed)
+                            + " | requiredSpeed=" + String.format("%.3f", requiredSpeed)
+            );
+
+            this.done = true;
+            return;
+        }
+
+        this.retreatAttempts++;
+
+        Vec3 dirToLanding =
+                this.jump.landing()
+                        .subtract(edgeCenter)
+                        .normalize();
+
+        Vec3 safeRetreat =
+                GapJumpUtils.findSafeRetreatPoint(
+                        this.mob,
+                        dirToLanding.scale(-1),
+                        BASE_RUNUP_BLOCKS * this.retreatAttempts
+                );
+
+        if (safeRetreat.distanceTo(this.mob.position()) < ARRIVED_RADIUS) {
+
+            // === ФІКС (дебаг 3) === Платформа 1х1: позаду теж обрив, відступати
+            // нікуди. Раніше тут Goal просто здавався (done=true) - але це НЕ рятує
+            // моба від падіння: він повертається під PursuitEnemyMeleeBehavior, яка
+            // все одно веде його прямо в той самий розрив звичайним ходом (бо шлях
+            // через GapJumpNodeEvaluator formally "прохідний"), і моб падає туди без
+            // жодної спроби стрибка - просто пізніше й без контролю. Замість здаватись
+            // наосліп - стрибаємо з тим розгоном, що вже є: requiredSpeed і так рахується
+            // із запасом (SAFETY_MARGIN=0.85), тож трохи недостатня жива швидкість
+            // нерідко все одно долітає, а гірший випадок нічим не гірший за те падіння,
+            // яке сталось би однаково.
+            System.out.println(
+                    "[DEBUG GAP JUMP] НЕМАЄ МІСЦЯ ДЛЯ РОЗБІГУ - СТРИБАЄМО НАВПРОСТЕЦЬ"
+                            + " | pos=" + formatVec(this.mob.position())
+                            + " | currentSpeed=" + String.format("%.3f", currentSpeed)
+                            + " | requiredSpeed=" + String.format("%.3f", requiredSpeed)
+            );
+
+            steerTo(this.jump.landing());
+            this.mob.getJumpControl().jump();
+            return;
+        }
+
+        this.retreatTarget = safeRetreat;
+        this.phase = Phase.RETREATING;
+        this.debugRetreatPrinted = false;
+
+        System.out.println(
+                "[DEBUG GAP JUMP] ВІДХІД"
+                        + " | спроба=" + this.retreatAttempts
+                        + " | pos=" + formatVec(this.mob.position())
+                        + " | retreatTarget=" + formatVec(this.retreatTarget)
+                        + " | distance="
+                        + String.format("%.3f",
+                        this.mob.position().distanceTo(this.retreatTarget))
+                        + " | requiredSpeed="
+                        + String.format("%.3f", requiredSpeed)
+        );
+
+        steerTo(this.retreatTarget);
     }
 
     private enum Phase {CHARGING, RETREATING}
