@@ -68,6 +68,20 @@ public final class GapJumpUtils {
     }
 
     /**
+     * Те саме, що {@link #requiredTakeoffSpeed(int)}, але від РЕАЛЬНОЇ живої горизонтальної
+     * відстані до landing замість дискретизованого gapBlocks. gapBlocks - ціле число, округлене
+     * від довжини сегмента шляху; фактична точка, де GapJumpAssistGoal ловить моба в межах
+     * EDGE_RADIUS, від стрибка до стрибка трохи гуляє (платформи по 1 блоку - "зловити" можна і
+     * за 0.05 блока від edge, і майже впритул до самого landing). requiredTakeoffSpeed(gapBlocks)
+     * лишається для порогу "чи взагалі варто пробувати", а фактичну швидкість відриву варто
+     * рахувати цим методом - інакше дальність польоту стала (та сама швидкість = та сама
+     * дистанція), а реально потрібна щоразу різна, звідси зростаючий переліт/недоліт.
+     */
+    public static double requiredTakeoffSpeedForDistance(double horizontalDistance) {
+        return horizontalDistance / (JUMP_AIRTIME_TICKS * SAFETY_MARGIN);
+    }
+
+    /**
      * Дивиться в РЕАЛЬНИЙ поточний Path моба (уже побудований {@link GapJumpNodeEvaluator}-ом,
      * якщо на мобі стоїть {@link GapJumpPathNavigation}) і шукає, чи серед НАЙБЛИЖЧИХ пари
      * сусідніх вузлів попереду є "стрибковий" сегмент — тобто пара вузлів, що лежать далі одне

@@ -61,6 +61,15 @@ public class GapJumpAssistGoal extends Goal {
         this.setFlags(EnumSet.of(Flag.MOVE, Flag.LOOK, Flag.JUMP));
     }
 
+    private static String formatVec(Vec3 v) {
+        return String.format(
+                "(%.3f, %.3f, %.3f)",
+                v.x,
+                v.y,
+                v.z
+        );
+    }
+
     private static final java.util.Set<Mob> ACTIVE_MOBS =
             java.util.Collections.newSetFromMap(new java.util.WeakHashMap<>());
 
@@ -137,29 +146,18 @@ public class GapJumpAssistGoal extends Goal {
         );
     }
 
-    private static String formatVec(Vec3 v) {
-        return String.format(
-                "(%.3f, %.3f, %.3f)",
-                v.x,
-                v.y,
-                v.z
-        );
-    }
-
+    // === ФІКС (дебаг2 "падає на 3-4 прижок", дебаг1 "перебіг через пустоту без стрибка") ===
+    // За замовчуванням Goal.requiresUpdateEveryTick()==false, і GoalSelector тоді звіряє
+    // canUse() для НЕзапущених Goal-ів не щотіку, а десь раз на ~3 тіки (newGoalRate).
+    // Платформи тут по 1 блоку завширшки: поки в ці "сліпі" 1-3 тіки PursuitEnemyMeleeBehavior
+    // (який про розриви нічого не знає) продовжує вести моба звичайним ходом на біговій
+    // швидкості (~0.15 бл/тік), цього достатньо, щоб проскочити всю вузьку платформу
+    // наскрізь - і GapJumpAssistGoal просто не встигає перехопити керування на краю
+    // взагалі (СТРИБОК! у логах для такого переходу відсутній). Повертаємо true, щоб
+    // canUse() перевірявся щотіку - ловимо момент якнайраніше.
     @Override
-    public void stop() {
-        ACTIVE_MOBS.remove(this.mob);
-
-        this.jump = null;
-        this.retreatTarget = null;
-
-        this.mob.getNavigation().stop();
-    }
-
-    private void steerTo(Vec3 target) {
-        this.mob.getLookControl().setLookAt(target.x, target.y, target.z, 30.0F, 30.0F);
-        this.mob.getMoveControl().setWantedPosition(
-                target.x, target.y, target.z, Run_N_JumpUtils.getRunSpeedModifier(this.mob));
+    public boolean requiresUpdateEveryTick() {
+        return true;
     }
 
     @Override
@@ -297,6 +295,35 @@ public class GapJumpAssistGoal extends Goal {
                         + Math.pow(this.mob.getZ() - edgeCenter.z, 2)
         );
 
+        // === ФІКС (застрягання "ходить туди-сюди" після пробігу через розрив без
+        // стрибка) === distToEdge рахується від edge і не зменшується, а РОСТЕ, щойно
+        // моб минув edge і рухається далі до landing - якщо десь (везіння з хітбоксом на
+        // куті платформи, чи просто ще один рідкісний випадок, який
+        // requiresUpdateEveryTick не покрив) КРАЙ так і не спрацював, і моб на живих
+        // ногах перейшов увесь розрив, ця відстань більше НІКОЛИ не стане <= EDGE_RADIUS.
+        // Раніше Goal в цьому разі зависав у РОЗБІГ назавжди: canContinueToUse() і далі
+        // true (this.jump не null, memoryChasing), а steerTo(landing) щотіку смикає то в
+        // один бік від landing, то в інший - от і "ходить туди-сюди" з debug1. Додатково
+        // звіряємо з landing: якщо моб уже практично там - вважаємо цей стрибок
+        // фактично відбувся (ногами, а не польотом - але результат той самий) і
+        // завершуємо Goal, а не жене його далі в порожнечу.
+        double distToLanding = Math.sqrt(
+                Math.pow(this.mob.getX() - this.jump.landing().x, 2)
+                        + Math.pow(this.mob.getZ() - this.jump.landing().z, 2)
+        );
+
+        if (distToLanding <= ARRIVED_RADIUS) {
+            this.done = true;
+
+            System.out.println(
+                    "[DEBUG GAP JUMP] РОЗРИВ ПРОЙДЕНО НОГАМИ (без стрибка)"
+                            + " | pos=" + formatVec(this.mob.position())
+                            + " | landing=" + formatVec(this.jump.landing())
+            );
+
+            return;
+        }
+
         // ---------------------------------------------------------
         // Моб ще далеко від краю
         // ---------------------------------------------------------
@@ -358,23 +385,35 @@ public class GapJumpAssistGoal extends Goal {
             // тіку прискорення перетнуло поріг, а на землі прискорення за тік доволі
             // відчутне). Що вище швидкість відриву, то далі летить моб - тому "з чим
             // встиг розігнатись" і давало нестабільний переліт понад 1-блоковий розрив.
-            // Тепер задаємо горизонтальну швидкість ЯВНО, рівно requiredSpeed (формула
-            // вже враховує потрібний запас через SAFETY_MARGIN=0.85) у напрямку
-            // landing - дальність польоту більше не залежить від того, наскільки
-            // "вдало" розігнався підхід, а завжди відповідає розрахунку. Заразом гасимо
-            // moveControl на цей тік (як і в польоті), інакше він одразу ж додасть своє
-            // прискорення поверх щойно виставленої швидкості, і розрахунок знову
-            // "попливе" - погляд на приземлення лишаємо через LookControl окремо.
-            Vec3 launchDir =
-                    this.jump.landing()
-                            .subtract(this.mob.position())
-                            .normalize();
+            //
+            // === ФІКС (зростаючий переліт/недоліт по кілька стрибків поспіль) ===
+            // requiredSpeed рахований з дискретного gapBlocks і дає СТАЛУ дальність
+            // польоту щоразу (перевірено - однакова з точністю до тисячних на 3
+            // послідовних стрибках). Але платформи по 1 блоку, і точка, де EDGE_RADIUS
+            // ловить моба, від стрибка до стрибка трохи гуляє (могло впіймати за 0.02
+            // блока до edge, а могло вже за 0.17 блока ЗА ним) - тобто РЕАЛЬНО потрібна
+            // дистанція щоразу різна, а стала швидкість/дальність - ні. Помилка від
+            // цього не випадкова, а накопичувалась з кожним наступним стрибком (0.014 -
+            // 0.108 - 0.230 блока повз ціль поспіль), поки не виносило повз платформу
+            // зовсім. Рахуємо швидкість відриву від ЖИВОЇ горизонтальної відстані до
+            // landing просто зараз, а не від округленого gapBlocks - requiredSpeed
+            // лишається тільки порогом "чи взагалі варто пробувати".
+            //
+            // Заразом гасимо moveControl на цей тік (як і в польоті), інакше він одразу ж
+            // додасть своє прискорення поверх щойно виставленої швидкості, і розрахунок
+            // знову "попливе" - погляд на приземлення лишаємо через LookControl окремо.
+            double dx = this.jump.landing().x - this.mob.getX();
+            double dz = this.jump.landing().z - this.mob.getZ();
+            double realDistance = Math.sqrt(dx * dx + dz * dz);
+            double launchSpeed = GapJumpUtils.requiredTakeoffSpeedForDistance(realDistance);
+
+            Vec3 launchDir = new Vec3(dx, 0.0, dz).normalize();
 
             Vec3 vel = this.mob.getDeltaMovement();
             this.mob.setDeltaMovement(
-                    launchDir.x * requiredSpeed,
+                    launchDir.x * launchSpeed,
                     vel.y,
-                    launchDir.z * requiredSpeed
+                    launchDir.z * launchSpeed
             );
 
             Vec3 herePos = this.mob.position();
@@ -388,8 +427,9 @@ public class GapJumpAssistGoal extends Goal {
                             + " | edge=" + this.jump.edge()
                             + " | landing=" + formatVec(this.jump.landing())
                             + " | currentSpeed(до фіксу)=" + String.format("%.3f", currentSpeed)
-                            + " | launchSpeed=" + String.format("%.3f", requiredSpeed)
-                            + " | requiredSpeed=" + String.format("%.3f", requiredSpeed)
+                            + " | realDistance=" + String.format("%.3f", realDistance)
+                            + " | launchSpeed=" + String.format("%.3f", launchSpeed)
+                            + " | requiredSpeed(поріг)=" + String.format("%.3f", requiredSpeed)
             );
 
             this.mob.getJumpControl().jump();
@@ -495,6 +535,22 @@ public class GapJumpAssistGoal extends Goal {
         );
 
         steerTo(this.retreatTarget);
+    }
+
+    @Override
+    public void stop() {
+        ACTIVE_MOBS.remove(this.mob);
+
+        this.jump = null;
+        this.retreatTarget = null;
+
+        this.mob.getNavigation().stop();
+    }
+
+    private void steerTo(Vec3 target) {
+        this.mob.getLookControl().setLookAt(target.x, target.y, target.z, 30.0F, 30.0F);
+        this.mob.getMoveControl().setWantedPosition(
+                target.x, target.y, target.z, Run_N_JumpUtils.getRunSpeedModifier(this.mob));
     }
 
     private enum Phase {CHARGING, RETREATING}
