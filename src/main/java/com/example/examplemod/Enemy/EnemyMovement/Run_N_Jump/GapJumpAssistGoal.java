@@ -147,6 +147,22 @@ public class GapJumpAssistGoal extends Goal {
     }
 
     @Override
+    public void stop() {
+        ACTIVE_MOBS.remove(this.mob);
+
+        this.jump = null;
+        this.retreatTarget = null;
+
+        this.mob.getNavigation().stop();
+    }
+
+    private void steerTo(Vec3 target) {
+        this.mob.getLookControl().setLookAt(target.x, target.y, target.z, 30.0F, 30.0F);
+        this.mob.getMoveControl().setWantedPosition(
+                target.x, target.y, target.z, Run_N_JumpUtils.getRunSpeedModifier(this.mob));
+    }
+
+    @Override
     public void tick() {
 
         // =========================================================
@@ -336,17 +352,44 @@ public class GapJumpAssistGoal extends Goal {
         // =========================================================
         if (currentSpeed >= requiredSpeed) {
 
-            steerTo(this.jump.landing());
+            // === ФІКС (перепригує 1-блоковий розрив) === Раніше стрибали з тією живою
+            // швидкістю, яка вже випадково назбиралась на землі - вона могла помітно
+            // перевищувати requiredSpeed (наскільки саме - залежить від того, на якому
+            // тіку прискорення перетнуло поріг, а на землі прискорення за тік доволі
+            // відчутне). Що вище швидкість відриву, то далі летить моб - тому "з чим
+            // встиг розігнатись" і давало нестабільний переліт понад 1-блоковий розрив.
+            // Тепер задаємо горизонтальну швидкість ЯВНО, рівно requiredSpeed (формула
+            // вже враховує потрібний запас через SAFETY_MARGIN=0.85) у напрямку
+            // landing - дальність польоту більше не залежить від того, наскільки
+            // "вдало" розігнався підхід, а завжди відповідає розрахунку. Заразом гасимо
+            // moveControl на цей тік (як і в польоті), інакше він одразу ж додасть своє
+            // прискорення поверх щойно виставленої швидкості, і розрахунок знову
+            // "попливе" - погляд на приземлення лишаємо через LookControl окремо.
+            Vec3 launchDir =
+                    this.jump.landing()
+                            .subtract(this.mob.position())
+                            .normalize();
+
+            Vec3 vel = this.mob.getDeltaMovement();
+            this.mob.setDeltaMovement(
+                    launchDir.x * requiredSpeed,
+                    vel.y,
+                    launchDir.z * requiredSpeed
+            );
+
+            Vec3 herePos = this.mob.position();
+            this.mob.getMoveControl().setWantedPosition(herePos.x, herePos.y, herePos.z, 0.0);
+            this.mob.getLookControl().setLookAt(
+                    this.jump.landing().x, this.jump.landing().y, this.jump.landing().z, 30.0F, 30.0F);
 
             System.out.println(
                     "[DEBUG GAP JUMP] СТРИБОК!"
                             + " | pos=" + formatVec(this.mob.position())
                             + " | edge=" + this.jump.edge()
                             + " | landing=" + formatVec(this.jump.landing())
-                            + " | currentSpeed=" + String.format("%.3f", currentSpeed)
+                            + " | currentSpeed(до фіксу)=" + String.format("%.3f", currentSpeed)
+                            + " | launchSpeed=" + String.format("%.3f", requiredSpeed)
                             + " | requiredSpeed=" + String.format("%.3f", requiredSpeed)
-                            + " | запас="
-                            + String.format("%.3f", currentSpeed - requiredSpeed)
             );
 
             this.mob.getJumpControl().jump();
@@ -452,22 +495,6 @@ public class GapJumpAssistGoal extends Goal {
         );
 
         steerTo(this.retreatTarget);
-    }
-
-    @Override
-    public void stop() {
-        ACTIVE_MOBS.remove(this.mob);
-
-        this.jump = null;
-        this.retreatTarget = null;
-
-        this.mob.getNavigation().stop();
-    }
-
-    private void steerTo(Vec3 target) {
-        this.mob.getLookControl().setLookAt(target.x, target.y, target.z, 30.0F, 30.0F);
-        this.mob.getMoveControl().setWantedPosition(
-                target.x, target.y, target.z, Run_N_JumpUtils.getRunSpeedModifier(this.mob));
     }
 
     private enum Phase {CHARGING, RETREATING}
