@@ -97,20 +97,6 @@ public class GapJumpAssistGoal extends Goal {
         return result;
     }
 
-    // === ФІКС (дебаг2 "падає на 3-4 прижок", дебаг1 "перебіг через пустоту без стрибка") ===
-    // За замовчуванням Goal.requiresUpdateEveryTick()==false, і GoalSelector тоді звіряє
-    // canUse() для НЕзапущених Goal-ів не щотіку, а десь раз на ~3 тіки (newGoalRate).
-    // Платформи тут по 1 блоку завширшки: поки в ці "сліпі" 1-3 тіки PursuitEnemyMeleeBehavior
-    // (який про розриви нічого не знає) продовжує вести моба звичайним ходом на біговій
-    // швидкості (~0.15 бл/тік), цього достатньо, щоб проскочити всю вузьку платформу
-    // наскрізь - і GapJumpAssistGoal просто не встигає перехопити керування на краю
-    // взагалі (СТРИБОК! у логах для такого переходу відсутній). Повертаємо true, щоб
-    // canUse() перевірявся щотіку - ловимо момент якнайраніше.
-    @Override
-    public boolean requiresUpdateEveryTick() {
-        return true;
-    }
-
     @Override
     public void start() {
         this.phase = Phase.CHARGING;
@@ -170,6 +156,31 @@ public class GapJumpAssistGoal extends Goal {
                         + "\nФаза: " + this.phase
                         + "\n================================"
         );
+    }
+
+    // === ФІКС (дебаг2 "падає на 3-4 прижок", дебаг1 "перебіг через пустоту без стрибка") ===
+    // За замовчуванням Goal.requiresUpdateEveryTick()==false, і GoalSelector тоді звіряє
+    // canUse() для НЕзапущених Goal-ів не щотіку, а десь раз на ~3 тіки (newGoalRate).
+    // Платформи тут по 1 блоку завширшки: поки в ці "сліпі" 1-3 тіки PursuitEnemyMeleeBehavior
+    // (який про розриви нічого не знає) продовжує вести моба звичайним ходом на біговій
+    // швидкості (~0.15 бл/тік), цього достатньо, щоб проскочити всю вузьку платформу
+    // наскрізь - і GapJumpAssistGoal просто не встигає перехопити керування на краю
+    // взагалі (СТРИБОК! у логах для такого переходу відсутній). Повертаємо true, щоб
+    // canUse() перевірявся щотіку - ловимо момент якнайраніше.
+    @Override
+    public boolean requiresUpdateEveryTick() {
+        return true;
+    }
+
+    @Override
+    public void stop() {
+        ACTIVE_MOBS.remove(this.mob);
+
+        this.jump = null;
+        this.retreatTarget = null;
+
+        this.mob.setSprinting(false);
+        this.mob.getNavigation().stop();
     }
 
     @Override
@@ -442,6 +453,18 @@ public class GapJumpAssistGoal extends Goal {
             this.mob.getLookControl().setLookAt(
                     this.jump.landing().x, this.jump.landing().y, this.jump.landing().z, 30.0F, 30.0F);
 
+            // === ФІКС (дебаг1, стрибок знову полетів не туди) === Тепер, коли
+            // sprinting=true, ванільний jumpFromGround() додає ще й спринт-поштовх
+            // (~0.2 бл/тік) у напрямку getYRot() - а це ЖИВЕ обличчя моба, яке
+            // LookControl лише ПОСТУПОВО довертає за кілька тіків (setLookAt() вище
+            // задає ціль, а не миттєвий поворот). Якщо секунду тому був ВІДХІД (моб
+            // дивився в протилежний бік), yRot ще міг лишатись стариим - і 0.2-блоковий
+            // поштовх стріляв назад, переважаючи щойно розраховану швидкість. Примусово
+            // довертаємо обличчя на landing ПЕРЕД jump(), щоб поштовх завжди був у
+            // потрібний бік, а не проти нього.
+            this.mob.setYRot((float) Math.toDegrees(Math.atan2(-dx, dz)));
+            this.mob.setYHeadRot(this.mob.getYRot());
+
             System.out.println(
                     "[DEBUG GAP JUMP] СТРИБОК!"
                             + " | pos=" + formatVec(this.mob.position())
@@ -556,17 +579,6 @@ public class GapJumpAssistGoal extends Goal {
         steerTo(this.retreatTarget);
     }
 
-    @Override
-    public void stop() {
-        ACTIVE_MOBS.remove(this.mob);
-
-        this.jump = null;
-        this.retreatTarget = null;
-
-        this.mob.setSprinting(false);
-        this.mob.getNavigation().stop();
-    }
-
     // === ФІКС (дебаг3 "стрибнув у протилежному напрямку") === Усі три fallback-гілки
     // нижче ("немає місця", "упираємось у те саме місце", "спроби вичерпано") раніше
     // просто кликали steerTo(landing) і одразу jump() в ОДИН і той самий тік. Якщо перед
@@ -595,6 +607,13 @@ public class GapJumpAssistGoal extends Goal {
         this.mob.getMoveControl().setWantedPosition(herePos.x, herePos.y, herePos.z, 0.0);
         this.mob.getLookControl().setLookAt(
                 this.jump.landing().x, this.jump.landing().y, this.jump.landing().z, 30.0F, 30.0F);
+
+        // === ФІКС (дебаг1) === Той самий прийом, що й у розрахованому стрибку: без
+        // цього sprint-поштовх jumpFromGround() стріляв туди, куди моб дивився ДО цього
+        // (типово - назад, з щойного ВІДХОДУ), а не туди, куди щойно переспрямували живу
+        // швидкість вище. Див. коментар у гілці СТРИБОК! для повного пояснення.
+        this.mob.setYRot((float) Math.toDegrees(Math.atan2(-dx, dz)));
+        this.mob.setYHeadRot(this.mob.getYRot());
 
         this.mob.getJumpControl().jump();
     }
