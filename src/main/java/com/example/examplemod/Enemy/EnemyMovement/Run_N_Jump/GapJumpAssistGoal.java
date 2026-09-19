@@ -97,6 +97,20 @@ public class GapJumpAssistGoal extends Goal {
         return result;
     }
 
+    // === ФІКС (дебаг2 "падає на 3-4 прижок", дебаг1 "перебіг через пустоту без стрибка") ===
+    // За замовчуванням Goal.requiresUpdateEveryTick()==false, і GoalSelector тоді звіряє
+    // canUse() для НЕзапущених Goal-ів не щотіку, а десь раз на ~3 тіки (newGoalRate).
+    // Платформи тут по 1 блоку завширшки: поки в ці "сліпі" 1-3 тіки PursuitEnemyMeleeBehavior
+    // (який про розриви нічого не знає) продовжує вести моба звичайним ходом на біговій
+    // швидкості (~0.15 бл/тік), цього достатньо, щоб проскочити всю вузьку платформу
+    // наскрізь - і GapJumpAssistGoal просто не встигає перехопити керування на краю
+    // взагалі (СТРИБОК! у логах для такого переходу відсутній). Повертаємо true, щоб
+    // canUse() перевірявся щотіку - ловимо момент якнайраніше.
+    @Override
+    public boolean requiresUpdateEveryTick() {
+        return true;
+    }
+
     @Override
     public void start() {
         this.phase = Phase.CHARGING;
@@ -125,6 +139,18 @@ public class GapJumpAssistGoal extends Goal {
         ACTIVE_MOBS.add(this.mob);
         this.mob.getNavigation().stop();
 
+        // === ФІКС (гравець долає 3 блоки з 1 блока розбігу, а моб - ні) ===
+        // PursuitEnemyMeleeBehavior.stop() безумовно кличе setSprinting(false) перед
+        // передачею керування, а цей Goal ніколи не вмикав його назад - тобто
+        // isSprinting()==false всю дорогу через CHARGING/RETREATING і в момент самого
+        // jump(). А ванільний LivingEntity#jumpFromGround() додає горизонтальний поштовх
+        // ~0.2 бл/тік (за напрямком погляду) ТІЛЬКИ коли isSprinting()==true в момент
+        // стрибка - той самий механізм, який цей мод уже враховує і свідомо вимикає в
+        // TowerClimbGoal (там потрібен суто вертикальний стрибок). Тут навпаки: це рівно
+        // той безкоштовний поштовх, який гравець отримує при sprint-стрибку і який
+        // дозволяє йому перекрити 3 блоки без спеціального розбігу. Вмикаємо назад.
+        this.mob.setSprinting(true);
+
         this.debugJumpInfoPrinted = false;
         this.debugRetreatPrinted = false;
         this.debugRunupPrinted = false;
@@ -144,20 +170,6 @@ public class GapJumpAssistGoal extends Goal {
                         + "\nФаза: " + this.phase
                         + "\n================================"
         );
-    }
-
-    // === ФІКС (дебаг2 "падає на 3-4 прижок", дебаг1 "перебіг через пустоту без стрибка") ===
-    // За замовчуванням Goal.requiresUpdateEveryTick()==false, і GoalSelector тоді звіряє
-    // canUse() для НЕзапущених Goal-ів не щотіку, а десь раз на ~3 тіки (newGoalRate).
-    // Платформи тут по 1 блоку завширшки: поки в ці "сліпі" 1-3 тіки PursuitEnemyMeleeBehavior
-    // (який про розриви нічого не знає) продовжує вести моба звичайним ходом на біговій
-    // швидкості (~0.15 бл/тік), цього достатньо, щоб проскочити всю вузьку платформу
-    // наскрізь - і GapJumpAssistGoal просто не встигає перехопити керування на краю
-    // взагалі (СТРИБОК! у логах для такого переходу відсутній). Повертаємо true, щоб
-    // canUse() перевірявся щотіку - ловимо момент якнайраніше.
-    @Override
-    public boolean requiresUpdateEveryTick() {
-        return true;
     }
 
     @Override
@@ -324,10 +336,19 @@ public class GapJumpAssistGoal extends Goal {
             return;
         }
 
+        // === ФІКС (дебаг1, малий зомби пробігає повз без жодного СТРИБОК!) === EDGE_RADIUS
+        // фіксований 0.7 не залежав від живої швидкості. Малі зомбі і швидші, і мають
+        // менший хітбокс (менше "звисання" з краю, перш ніж onGround стане false) - на
+        // швидкості ~0.4 бл/тік моб фізично встигає перетнути ВЕСЬ ловчий коридор між
+        // двома сусідніми тіками, і КРАЙ жодного разу не спрацьовує (canUse() тепер і так
+        // щотіку - справа не в частоті перевірки, а в самому розмірі вікна). Розширюємо
+        // ловчий радіус під живу швидкість, з 0.7 як мінімумом для повільних мобів.
+        double effectiveEdgeRadius = Math.max(EDGE_RADIUS, currentSpeed * 3.0);
+
         // ---------------------------------------------------------
         // Моб ще далеко від краю
         // ---------------------------------------------------------
-        if (distToEdge > EDGE_RADIUS) {
+        if (distToEdge > effectiveEdgeRadius) {
 
             steerTo(this.jump.landing());
 
@@ -469,8 +490,7 @@ public class GapJumpAssistGoal extends Goal {
                             + " | requiredSpeed=" + String.format("%.3f", requiredSpeed)
             );
 
-            steerTo(this.jump.landing());
-            this.mob.getJumpControl().jump();
+            jumpWithCurrentSpeedTowardLanding(currentSpeed);
             return;
         }
 
@@ -512,8 +532,7 @@ public class GapJumpAssistGoal extends Goal {
                             + " | requiredSpeed=" + String.format("%.3f", requiredSpeed)
             );
 
-            steerTo(this.jump.landing());
-            this.mob.getJumpControl().jump();
+            jumpWithCurrentSpeedTowardLanding(currentSpeed);
             return;
         }
 
@@ -544,7 +563,40 @@ public class GapJumpAssistGoal extends Goal {
         this.jump = null;
         this.retreatTarget = null;
 
+        this.mob.setSprinting(false);
         this.mob.getNavigation().stop();
+    }
+
+    // === ФІКС (дебаг3 "стрибнув у протилежному напрямку") === Усі три fallback-гілки
+    // нижче ("немає місця", "упираємось у те саме місце", "спроби вичерпано") раніше
+    // просто кликали steerTo(landing) і одразу jump() в ОДИН і той самий тік. Якщо перед
+    // цим Goal встиг побути у RETREATING (відхід НАЗАД, у протилежний бік), жива
+    // швидкість моба на цей момент ще й досі спрямована туди - один виклик steerTo()
+    // фізично не встигає розвернути moveControl за один тік, а jumpFromGround() бере
+    // X/Z швидкість ТОЧНО такою, якою вона є просто зараз. Результат - стрибок летить
+    // назад, у бік відходу, а не до landing (видно в дебаг3: X зростає весь політ замість
+    // спадати). Лишаємо ЖИВУ величину швидкості (currentSpeed - чесно відображає, що моб
+    // реально наздогнав), але примусово переспрямовуємо її на landing тим самим прийомом
+    // explicit setDeltaMovement(), що й у розрахованому стрибку.
+    private void jumpWithCurrentSpeedTowardLanding(double currentSpeed) {
+
+        double dx = this.jump.landing().x - this.mob.getX();
+        double dz = this.jump.landing().z - this.mob.getZ();
+        Vec3 launchDir = new Vec3(dx, 0.0, dz).normalize();
+
+        Vec3 vel = this.mob.getDeltaMovement();
+        this.mob.setDeltaMovement(
+                launchDir.x * currentSpeed,
+                vel.y,
+                launchDir.z * currentSpeed
+        );
+
+        Vec3 herePos = this.mob.position();
+        this.mob.getMoveControl().setWantedPosition(herePos.x, herePos.y, herePos.z, 0.0);
+        this.mob.getLookControl().setLookAt(
+                this.jump.landing().x, this.jump.landing().y, this.jump.landing().z, 30.0F, 30.0F);
+
+        this.mob.getJumpControl().jump();
     }
 
     private void steerTo(Vec3 target) {

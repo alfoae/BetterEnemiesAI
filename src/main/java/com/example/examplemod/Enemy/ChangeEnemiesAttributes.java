@@ -38,7 +38,7 @@ public class ChangeEnemiesAttributes {
         // ==========================================
         // МОНСТРИ
         // ==========================================
-        RUN_SPEED_MULTIPLIERS.put(EntityType.ZOMBIE, 1.4);
+        RUN_SPEED_MULTIPLIERS.put(EntityType.ZOMBIE, 1.5);
         RUN_SPEED_MULTIPLIERS.put(EntityType.HUSK, 1.4);
         RUN_SPEED_MULTIPLIERS.put(EntityType.ZOMBIE_VILLAGER, 1.4);
         RUN_SPEED_MULTIPLIERS.put(EntityType.DROWNED, 1.0);
