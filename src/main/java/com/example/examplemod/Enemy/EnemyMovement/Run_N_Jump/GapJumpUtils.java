@@ -9,7 +9,7 @@ import net.minecraft.world.level.pathfinder.Path;
 import net.minecraft.world.phys.Vec3;
 
 /**
- * Спільна фізика стрибка + читання "цей сегмент шляху вимагає стрибка" з реального Path.
+ * Спільні утиліти стрибка + читання "цей сегмент шляху вимагає стрибка" з реального Path.
  * <p>
  * v4 — виявлення розриву більше НЕ робить свій скан наперед. Цим тепер займається
  * {@link GapJumpNodeEvaluator} прямо всередині pathfinding-графа (через
@@ -20,21 +20,24 @@ import net.minecraft.world.phys.Vec3;
  * не повертає unreachable, і {@code isPathBlocked} для НЬОГО просто перестає бути true — тож
  * BuildPathGoal сам по собі туди більше не претендує, без жодної спеціальної умови.
  * <p>
- * Лишається тут: фізика стрибка (потрібна і NodeEvaluator-у для межі сканування, і Goal-у для
- * живої перевірки швидкості) та {@link #findSafeRetreatPoint} (виконання все ще саме тут -
- * NodeEvaluator тільки каже "маршрут існує", а розгін/стрибок виконує GapJumpAssistGoal).
+ * v5 — ФІЗИКА ПОЛЬОТУ винесена в {@link GapJumpPhysics} (точна ванільна модель, звірена з
+ * незалежною реалізацією). Тут лишилась лише ОЦІНКА дальності для NodeEvaluator-а
+ * ({@link #estimateMaxJumpRangeBlocks}) та читання Path.
  */
 public final class GapJumpUtils {
 
-    static final double JUMP_VERTICAL_VELOCITY = 0.42;
-    static final double GRAVITY_PER_TICK = 0.08;
-    static final double DRAG_PER_TICK = 0.98;
-    static final int JUMP_AIRTIME_TICKS = computeAirTimeTicks();
-
     /**
-     * Один запас на всі похідні розрахунки - тримає межу сканування і потрібну швидкість узгодженими.
+     * Калібрувальний коефіцієнт ОЦІНКИ "на скільки блоків взагалі варто вважати розрив прохідним":
+     * {@code maxGap = floor(topSpeed * RANGE_ESTIMATE_FACTOR)}. Це ДОРІВНЮЄ старому
+     * {@code 10 тіків * 0.85} — навмисно лишив ті самі числа, щоб не змінювати, які розриви
+     * NodeEvaluator вважає прохідними (зомбі в спринті → 3 блоки, як і було).
+     * <p>
+     * УВАГА: це НЕ модель польоту. Раніше цей самий коефіцієнт використовувався ще й для
+     * обчислення швидкості відриву ({@code відстань / 8.5}) — і саме це ламало стрибок на 3 блоки:
+     * реальна дальність польоту = швидкість × {@link GapJumpPhysics#FLIGHT_FACTOR_TO_LANDING} ≈ ×4.92,
+     * а не ×8.5. Швидкість відриву тепер рахує лише {@link GapJumpPhysics#launchSpeedForDistance}.
      */
-    static final double SAFETY_MARGIN = 0.85;
+    static final double RANGE_ESTIMATE_FACTOR = 8.5;
 
     /**
      * Горизонтальна відстань між сусідніми вузлами шляху, з якої вважаємо сегмент "стрибком", а не звичайним кроком.
@@ -44,41 +47,18 @@ public final class GapJumpUtils {
     private GapJumpUtils() {
     }
 
-    static int computeAirTimeTicks() {
-        double y = 0.0;
-        double vy = JUMP_VERTICAL_VELOCITY;
-        int ticks = 0;
-        do {
-            vy = (vy - GRAVITY_PER_TICK) * DRAG_PER_TICK;
-            y += vy;
-            ticks++;
-        } while (y > 0.0 && ticks < 40); // запобіжник від нескінченного циклу
-        return ticks;
+    /**
+     * Швидкість-уставка бігу моба (те, що MoveControl множить на прискорення): атрибут швидкості
+     * (зі спринтом, якщо він увімкнений) × множник бігу. Спільна для оцінки дальності та для
+     * передбачення кроку в GapJumpAssistGoal.
+     */
+    public static double runSpeedSetpoint(Mob mob) {
+        return mob.getAttributeValue(Attributes.MOVEMENT_SPEED) * Run_N_JumpUtils.getRunSpeedModifier(mob);
     }
 
     /** Теоретична максимальна дальність стрибка цього моба на повній швидкості (не поточній). */
     public static int estimateMaxJumpRangeBlocks(Mob mob) {
-        double topSpeed = mob.getAttributeValue(Attributes.MOVEMENT_SPEED) * Run_N_JumpUtils.getRunSpeedModifier(mob);
-        return (int) Math.floor(topSpeed * JUMP_AIRTIME_TICKS * SAFETY_MARGIN);
-    }
-
-    /** Яку живу горизонтальну швидкість (mob.getDeltaMovement()) треба мати прямо перед відривом. */
-    public static double requiredTakeoffSpeed(int gapBlocks) {
-        return gapBlocks / (JUMP_AIRTIME_TICKS * SAFETY_MARGIN);
-    }
-
-    /**
-     * Те саме, що {@link #requiredTakeoffSpeed(int)}, але від РЕАЛЬНОЇ живої горизонтальної
-     * відстані до landing замість дискретизованого gapBlocks. gapBlocks - ціле число, округлене
-     * від довжини сегмента шляху; фактична точка, де GapJumpAssistGoal ловить моба в межах
-     * EDGE_RADIUS, від стрибка до стрибка трохи гуляє (платформи по 1 блоку - "зловити" можна і
-     * за 0.05 блока від edge, і майже впритул до самого landing). requiredTakeoffSpeed(gapBlocks)
-     * лишається для порогу "чи взагалі варто пробувати", а фактичну швидкість відриву варто
-     * рахувати цим методом - інакше дальність польоту стала (та сама швидкість = та сама
-     * дистанція), а реально потрібна щоразу різна, звідси зростаючий переліт/недоліт.
-     */
-    public static double requiredTakeoffSpeedForDistance(double horizontalDistance) {
-        return horizontalDistance / (JUMP_AIRTIME_TICKS * SAFETY_MARGIN);
+        return (int) Math.floor(runSpeedSetpoint(mob) * RANGE_ESTIMATE_FACTOR);
     }
 
     /**
@@ -113,6 +93,9 @@ public final class GapJumpUtils {
     }
 
     /**
+     * (v5: GapJumpAssistGoal більше не відходить для розгону — швидкість відриву задається явно, тож
+     * розбіг на дальність не впливає. Метод лишений на випадок, якщо розгін знадобиться знову.)
+     * <p>
      * Йде по прямій у напрямку {@code dir} від моба, шукаючи найдальшу БЕЗПЕЧНУ точку в межах
      * {@code desiredBlocks} — якщо позаду теж обрив (чи стіна), зупиняється на останньому
      * твердому й прохідному блоці перед ним, навіть якщо це менше за {@code desiredBlocks}.
