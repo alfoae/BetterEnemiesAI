@@ -42,7 +42,7 @@ public final class GapJumpUtils {
     /**
      * Горизонтальна відстань між сусідніми вузлами шляху, з якої вважаємо сегмент "стрибком", а не звичайним кроком.
      */
-    private static final double JUMP_SEGMENT_THRESHOLD = 1.5;
+    private static final double JUMP_SEGMENT_THRESHOLD = GapJumpRays.MIN_JUMP_DISTANCE;
 
     private GapJumpUtils() {
     }
@@ -121,6 +121,8 @@ public final class GapJumpUtils {
 
     /**
      * Край (останній твердий вузол перед стрибком), точка приземлення і ширина розриву в блоках.
+     * Для косого/діагонального стрибка {@code gapBlocks} лише наближене (округлена відстань між
+     * центрами мінус 1) і потрібне тільки для логів; уся геометрія береться з {@code edge}/{@code landing}.
      */
     public record GapJump(BlockPos edge, Vec3 landing, int gapBlocks) {
     }

@@ -30,6 +30,20 @@ import java.util.EnumSet;
  * моб стрибав "з тим, що є" — і падав. Sprint-поштовх ванільного jumpFromGround() теж вимкнений на
  * момент відриву: швидкість задаємо повністю самі, без залежності від напрямку погляду.
  * <p>
+ * <b>v6 — напрямок стрибка будь-який.</b> Раніше моб стрибав лише вздовж 4 осей (це було зашито в
+ * {@link GapJumpNodeEvaluator}); тепер там будь-які зміщення (діагоналі, "коні" тощо), а тут уся
+ * геометрія відриву рахується вздовж ВЛАСНОЇ осі стрибка (від центру блока-краю до центру приземлення):
+ * передня межа блока = {@link GapJumpPhysics#frontBorder} (0.5 по осі, 0.707 по діагоналі), моб "на краї",
+ * коли його хітбокс перекриває блок-край по обох осях, а розбіг іде спершу на центр краю, потім уздовж
+ * стрибка (пряма "моб -> landing" по діагоналі зрізала б повз вузький місток). Сама фізика польоту від
+ * напрямку не залежить: тертя ізотропне, тож швидкість відриву = відстань / {@link GapJumpPhysics#FLIGHT_FACTOR_TO_LANDING}.
+ * <p>
+ * <b>v7 — стійкість до запізнілого керування.</b> Ціль отримує керування не одразу: Pursuit спершу сам
+ * рухає моба ~2 тіки. Швидкий малий зомбі (прискорення ~0.44 за тік) за цей час проходить понад блок і
+ * на платформі 1x1 сходить з краю ще до першого тіку цієї цілі. Тепер (1) відрив дозволений і тоді,
+ * коли моб уже за передньою межею, доки onGround ще true, а (2) якщо він уже сповз на 1-2 тіки — рятувальний
+ * стрибок із повітря ({@link #tryRescueJump}); {@link #canUse} для цього пропускає й моба, що щойно зійшов.
+ * <p>
  * Той самий набір флагів (MOVE+LOOK+JUMP), що й TowerClimbGoal/BuildPathGoal — АЛЕ тригер для
  * {@code PursuitEnemyMeleeBehavior.shouldYieldToTerraforming()} (isPathBlocked) більше НЕ спрацьовує
  * для прохідних-через-стрибок розривів, бо createPath() тепер для них реально знаходить шлях. Тому в
@@ -56,10 +70,14 @@ public class GapJumpAssistGoal extends Goal {
      */
     private static final double MAX_LAUNCH_EXTRA_BLOCKS = 2.0;
 
-    /**
-     * Допуск (частка від потрібної швидкості), в межах якого корекцію польоту вважаємо непотрібною.
-     */
+    /** Допуск (частка від потрібної швидкості), в межах якого корекцію польоту вважаємо непотрібною. */
     private static final double CORRECTION_TOLERANCE = 0.01;
+
+    /**
+     * Наскільки (у блоках) моб міг просісти нижче рівня краю, щоб його ще можна було врятувати
+     * рятувальним стрибком ({@link #tryRescueJump}). 1 тік падіння = 0.078, 2 тіки = 0.23.
+     */
+    private static final double RESCUE_MAX_DROP = 0.3;
 
     private final Mob mob;
     private GapJumpUtils.GapJump jump;
@@ -73,20 +91,6 @@ public class GapJumpAssistGoal extends Goal {
     private boolean debugRunupPrinted = false;
     // =========================================
 
-    @Override
-    public boolean canUse() {
-        if (!PursuitEnemyBehavior.isMemoryChasing(this.mob) || !this.mob.onGround()) {
-            return false;
-        }
-        this.jump = GapJumpUtils.findUpcomingJumpSegment(this.mob);
-        return this.jump != null;
-    }
-
-    public GapJumpAssistGoal(Mob mob) {
-        this.mob = mob;
-        this.setFlags(EnumSet.of(Flag.MOVE, Flag.LOOK, Flag.JUMP));
-    }
-
     /**
      * Суто горизонтальна відстань (Y тут взагалі не має впливати - mob.position() на рівні "ніг").
      */
@@ -94,6 +98,20 @@ public class GapJumpAssistGoal extends Goal {
         double dx = a.x - b.x;
         double dz = a.z - b.z;
         return Math.sqrt(dx * dx + dz * dz);
+    }
+
+    public GapJumpAssistGoal(Mob mob) {
+        this.mob = mob;
+        this.setFlags(EnumSet.of(Flag.MOVE, Flag.LOOK, Flag.JUMP));
+    }
+
+    private static String formatVec(Vec3 v) {
+        return String.format(
+                "(%.3f, %.3f, %.3f)",
+                v.x,
+                v.y,
+                v.z
+        );
     }
 
     private static final java.util.Set<Mob> ACTIVE_MOBS =
@@ -123,13 +141,27 @@ public class GapJumpAssistGoal extends Goal {
         return result;
     }
 
-    private static String formatVec(Vec3 v) {
-        return String.format(
-                "(%.3f, %.3f, %.3f)",
-                v.x,
-                v.y,
-                v.z
-        );
+    @Override
+    public boolean canUse() {
+        if (!PursuitEnemyBehavior.isMemoryChasing(this.mob)) {
+            return false;
+        }
+        GapJumpUtils.GapJump segment = GapJumpUtils.findUpcomingJumpSegment(this.mob);
+        if (segment == null) {
+            return false;
+        }
+        // Звичайно моб на землі. Виняток - ЗАПІЗНІЛЕ керування: між стартом Pursuit і першим тіком цієї цілі
+        // проходить ~2 тіки (yield перевіряється лише на парних тіках і лише коли Pursuit сам поклав Path у
+        // навігатор), а швидкий моб за цей час може вже зійти з краю. Поки він просів менше ніж на
+        // RESCUE_MAX_DROP і не летить угору, його ще можна врятувати - див. tryRescueJump().
+        if (!this.mob.onGround()) {
+            double drop = segment.edge().getY() - this.mob.getY();
+            if (drop < -0.05 || drop > RESCUE_MAX_DROP || this.mob.getDeltaMovement().y > 0.1) {
+                return false;
+            }
+        }
+        this.jump = segment;
+        return true;
     }
 
     // Тікаємо щотіку: відрив, політ і приземлення мають ловитись покроково (платформи по 1 блоку,
@@ -163,7 +195,9 @@ public class GapJumpAssistGoal extends Goal {
 
         Vec3 edgeCenter = Vec3.atBottomCenterOf(this.jump.edge());
         double axisLength = horizontalDistance(edgeCenter, this.jump.landing());
-        double fromEdgeFront = axisLength - GapJumpPhysics.EDGE_FRONT;
+        double startDirX = (this.jump.landing().x - edgeCenter.x) / Math.max(axisLength, 1.0E-6);
+        double startDirZ = (this.jump.landing().z - edgeCenter.z) / Math.max(axisLength, 1.0E-6);
+        double fromEdgeFront = axisLength - GapJumpPhysics.frontBorder(startDirX, startDirZ);
 
         System.out.println(
                 "[DEBUG GAP JUMP] ==============================="
@@ -171,6 +205,9 @@ public class GapJumpAssistGoal extends Goal {
                         + "\nПоточні координати: " + formatVec(this.mob.position())
                         + "\nБлок краю: " + this.jump.edge()
                         + "\nТочка приземлення: " + formatVec(this.jump.landing())
+                        + "\nЗміщення край->приземлення (dx,dz): ("
+                        + (int) Math.round(this.jump.landing().x - edgeCenter.x) + ", "
+                        + (int) Math.round(this.jump.landing().z - edgeCenter.z) + ")"
                         + "\nРозрив: " + this.jump.gapBlocks() + " блок."
                         + "\nЦентр краю -> центр приземлення: " + String.format("%.3f", axisLength)
                         + "\nШвидкість відриву з самого краю (розрахунок): "
@@ -190,13 +227,16 @@ public class GapJumpAssistGoal extends Goal {
         // =========================================================
         if (!this.mob.onGround()) {
             if (!this.hasBeenAirborne && !this.jumpFired) {
-                // Ніколи не мало б траплятись: моб втратив опору, так і не отримавши команди на стрибок.
-                System.out.println(
-                        "[DEBUG GAP JUMP] !!! МОБ ЗІЙШОВ З КРАЮ БЕЗ СТРИБКА"
-                                + " | pos=" + formatVec(this.mob.position())
-                                + " | edge=" + this.jump.edge()
-                                + " | speed=" + String.format("%.3f", this.mob.getDeltaMovement().horizontalDistance())
-                );
+                // Моб втратив опору, так і не отримавши команди на стрибок - майже завжди через ЗАПІЗНІЛЕ
+                // керування (див. canUse). Поки він просів зовсім небагато, стрибаємо просто з повітря.
+                if (!tryRescueJump()) {
+                    System.out.println(
+                            "[DEBUG GAP JUMP] !!! МОБ ЗІЙШОВ З КРАЮ БЕЗ СТРИБКА (врятувати вже не можна)"
+                                    + " | pos=" + formatVec(this.mob.position())
+                                    + " | edge=" + this.jump.edge()
+                                    + " | speed=" + String.format("%.3f", this.mob.getDeltaMovement().horizontalDistance())
+                    );
+                }
             }
             this.hasBeenAirborne = true;
 
@@ -307,11 +347,18 @@ public class GapJumpAssistGoal extends Goal {
         double halfWidth = this.mob.getBbWidth() * 0.5;
         double groundAccel = GapJumpPhysics.estimateGroundAccel(GapJumpUtils.runSpeedSetpoint(this.mob));
 
-        // Стрибаємо лише коли моб справді над колонкою краю: збоку від неї опора може тривати далі
-        // (широка платформа) - тоді відрив звідти приземлив би моба на цій же платформі, а не за розривом.
-        boolean overEdgeColumn = across <= 0.5 + halfWidth;
-        boolean atEdge = overEdgeColumn
-                && GapJumpPhysics.shouldTakeOff(along, speedAlong, halfWidth, groundAccel);
+        // Передня межа блока-краю ВЗДОВЖ напрямку стрибка: 0.5 по осі, 0.707 по діагоналі (кут блока).
+        double front = GapJumpPhysics.frontBorder(dirX, dirZ);
+
+        // Моб має бути поблизу ОСІ стрибка (на смузі блока-краю), а не збоку на широкій платформі: звідти
+        // відрив приземлив би його на цій же платформі, а не за розривом. ВЗДОВЖ осі обмеження навмисно
+        // НЕМАЄ: якщо керування прийшло запізно й моб уже пробіг за передню межу (навіть повис над
+        // проваллям), прапор onGround ще тік лишається true - стрибок ще виконається, і швидкість
+        // відриву все одно рахується від ПОТОЧНОЇ позиції. Забороняти відрив тут = зіштовхнути моба.
+        double lateralLimit = (0.5 + halfWidth) * (Math.abs(dirX) + Math.abs(dirZ));
+        boolean nearAxis = across <= lateralLimit;
+        boolean atEdge = nearAxis
+                && GapJumpPhysics.shouldTakeOff(relX, relZ, dirX, dirZ, speedAlong, halfWidth, groundAccel);
 
         // ---------------------------------------------------------
         // Ще не час: біжимо далі до краю
@@ -329,14 +376,14 @@ public class GapJumpAssistGoal extends Goal {
                 return;
             }
 
-            steerTo(landing);
+            steerTowardTakeoff(edgeCenter, dirX, dirZ, relX, relZ);
 
             if (!this.debugRunupPrinted || this.chargeTicks % 5 == 0) {
                 System.out.println(
                         "[DEBUG GAP JUMP] РОЗБІГ"
                                 + " | pos=" + formatVec(this.mob.position())
                                 + " | along=" + String.format("%+.3f", along)
-                                + " (край блока = +" + GapJumpPhysics.EDGE_FRONT + ")"
+                                + " (край блока = +" + String.format("%.3f", front) + ")"
                                 + " | across=" + String.format("%.3f", across)
                                 + " | speed=" + String.format("%.3f", speedAlong)
                 );
@@ -348,7 +395,7 @@ public class GapJumpAssistGoal extends Goal {
         // ---------------------------------------------------------
         // Моб на краю — СТРИБАЄМО
         // ---------------------------------------------------------
-        launch(landing, along, across, speedAlong);
+        launch(landing, along, across, speedAlong, front);
     }
 
     /**
@@ -356,13 +403,13 @@ public class GapJumpAssistGoal extends Goal {
      * округленого gapBlocks) за точною ванільною моделлю польоту, тож моб приземляється рівно на
      * центр блока незалежно від того, на якому саме тіку й де саме на краю його "піймали".
      */
-    private void launch(Vec3 landing, double along, double across, double speedAlong) {
+    private void launch(Vec3 landing, double along, double across, double speedAlong, double front) {
         double dx = landing.x - this.mob.getX();
         double dz = landing.z - this.mob.getZ();
         double realDistance = Math.sqrt(dx * dx + dz * dz);
 
         double exactSpeed = GapJumpPhysics.launchSpeedForDistance(realDistance);
-        double speedCap = GapJumpPhysics.launchSpeedForDistance(this.jump.gapBlocks() + 1.0 + MAX_LAUNCH_EXTRA_BLOCKS);
+        double speedCap = GapJumpPhysics.launchSpeedForDistance(segmentLength() + MAX_LAUNCH_EXTRA_BLOCKS);
         double launchSpeed = Math.min(exactSpeed, speedCap);
 
         Vec3 launchDir = new Vec3(dx, 0.0, dz).normalize();
@@ -394,23 +441,71 @@ public class GapJumpAssistGoal extends Goal {
                         + " | edge=" + this.jump.edge()
                         + " | landing=" + formatVec(landing)
                         + " | along=" + String.format("%+.3f", along)
-                        + " (край блока = +" + GapJumpPhysics.EDGE_FRONT + ")"
+                        + " (край блока = +" + String.format("%.3f", front) + ")"
                         + " | across=" + String.format("%.3f", across)
                         + " | швидкість до відриву=" + String.format("%.3f", speedAlong)
                         + " | realDistance=" + String.format("%.3f", realDistance)
                         + " | launchSpeed=" + String.format("%.3f", launchSpeed)
                         + (exactSpeed > speedCap ? " (ОБМЕЖЕНО стелею, точна=" + String.format("%.3f", exactSpeed) + ")" : "")
                         + " | очікувана дальність польоту=" + String.format("%.3f", GapJumpPhysics.flightDistance(launchSpeed))
+                        + (this.chargeTicks == 0 && along > front + 0.1
+                        ? " | ЗАПІЗНІЛЕ КЕРУВАННЯ: моб уже за краєм у перший тік цілі" : "")
         );
 
         this.jumpFired = true;
         this.mob.getJumpControl().jump();
     }
 
-    private void steerTo(Vec3 target) {
-        this.mob.getLookControl().setLookAt(target.x, target.y, target.z, 30.0F, 30.0F);
-        this.mob.getMoveControl().setWantedPosition(
-                target.x, target.y, target.z, Run_N_JumpUtils.getRunSpeedModifier(this.mob));
+    /**
+     * Рятувальний стрибок: моб уже зійшов з краю (прапор onGround став false), а стрибок ми так і не
+     * скомандували. Це буває, коли керування прийшло запізно (див. {@link #canUse}), а моб швидкий - малий
+     * зомбі з прискоренням ~0.44 за тік проходить за 2 тіки понад блок, тобто всю платформу 1x1.
+     * <p>
+     * Поки моб просів зовсім небагато ({@link #RESCUE_MAX_DROP}) і не летить угору, даємо йому той самий
+     * імпульс стрибка, що й на землі (вертикальна швидкість 0.42), а горизонтальну рахуємо з ФАКТИЧНОГО
+     * стану (висота, вертикальна швидкість) — так само, як {@link #correctFlight}: за решту польоту
+     * повітряне тертя 0.91 донесе його рівно до центру landing. Візуально це виглядає як "підстрибнув
+     * на самому краю". Для мобів, що зійшли з краю без цілі (нокбек, падіння), не спрацьовує: ціль
+     * запускається лише коли попереду в Path є стрибковий сегмент і моб на рівні його краю.
+     *
+     * @return true, якщо стрибок було дано
+     */
+    private boolean tryRescueJump() {
+        Vec3 landing = this.jump.landing();
+        Vec3 vel = this.mob.getDeltaMovement();
+        double heightAbove = this.mob.getY() - landing.y;
+        double dx = landing.x - this.mob.getX();
+        double dz = landing.z - this.mob.getZ();
+        double dist = Math.sqrt(dx * dx + dz * dz);
+
+        boolean falling = vel.y <= 0.1;
+        boolean nearLevel = heightAbove >= -RESCUE_MAX_DROP && heightAbove <= 0.2;
+        // Нижньої межі відстані навмисно нема: моб міг уже опинитись НАД блоком приземлення, просівши на
+        // 0.078 нижче його верху - тоді йому якраз потрібен маленький підскок, щоб виповзти на блок.
+        boolean inRange = dist <= segmentLength() + 1.0;
+        if (!falling || !nearLevel || !inRange || dist < 1.0E-6) {
+            return false;
+        }
+
+        double jumpVy = GapJumpPhysics.JUMP_VERTICAL_VELOCITY;
+        double factor = GapJumpPhysics.remainingAirFactor(heightAbove, jumpVy);
+        double cap = GapJumpPhysics.launchSpeedForDistance(segmentLength() + MAX_LAUNCH_EXTRA_BLOCKS);
+        double needed = Math.min(dist / factor, cap);
+
+        this.mob.setSprinting(false);
+        this.mob.setDeltaMovement(dx / dist * needed, jumpVy, dz / dist * needed);
+        this.jumpFired = true;
+        this.airCorrected = true; // швидкість уже розрахована з фактичного стану - друга корекція не потрібна
+
+        System.out.println(
+                "[DEBUG GAP JUMP] РЯТІВНИЙ СТРИБОК (керування прийшло запізно)"
+                        + " | pos=" + formatVec(this.mob.position())
+                        + " | просів на=" + String.format("%.3f", -heightAbove)
+                        + " | до landing=" + String.format("%.3f", dist)
+                        + " | швидкість=" + String.format("%.3f", needed)
+                        + " | повітряний множник дальності=x" + String.format("%.2f", factor)
+        );
+        return true;
     }
 
     /**
@@ -449,7 +544,7 @@ public class GapJumpAssistGoal extends Goal {
         double needed = dist / factor;
         // Стеля від абсурду (нормальна швидкість тут = 0.546 * launchSpeed).
         double cap = GapJumpPhysics.GROUND_FRICTION
-                * GapJumpPhysics.launchSpeedForDistance(this.jump.gapBlocks() + 1.0 + MAX_LAUNCH_EXTRA_BLOCKS) * 2.0;
+                * GapJumpPhysics.launchSpeedForDistance(segmentLength() + MAX_LAUNCH_EXTRA_BLOCKS) * 2.0;
         needed = Math.min(needed, cap);
 
         double along = vel.x * dirX + vel.z * dirZ;
@@ -479,5 +574,37 @@ public class GapJumpAssistGoal extends Goal {
 
         this.mob.setSprinting(false);
         this.mob.getNavigation().stop();
+    }
+
+    /**
+     * Розбіг ДО КРАЮ, а не одразу на точку приземлення. Для стрибка вздовж осі це та сама пряма, а от
+     * для діагоналі/косого напрямку пряма "моб -> landing" зрізає повз блок-край (з вузького містка
+     * моб просто зісковзнув би вбік ще до краю). Тому: поки центр моба не над блоком-краєм - біжимо на
+     * ЦЕНТР цього блока, а вже над ним - уздовж напрямку стрибка, трохи за передню межу (щоб не
+     * гальмував біля краю; сам відрив вирішує {@link GapJumpPhysics#shouldTakeOff}).
+     */
+    private void steerTowardTakeoff(Vec3 edgeCenter, double dirX, double dirZ, double relX, double relZ) {
+        Vec3 target;
+        if (Math.abs(relX) <= 0.5 && Math.abs(relZ) <= 0.5) {
+            double reach = GapJumpPhysics.frontBorder(dirX, dirZ) + 0.5;
+            target = new Vec3(edgeCenter.x + dirX * reach, edgeCenter.y, edgeCenter.z + dirZ * reach);
+        } else {
+            target = edgeCenter;
+        }
+        steerTo(target);
+    }
+
+    /**
+     * Відстань між центром блока-краю і центром приземлення (для осі це gap + 1).
+     */
+    private double segmentLength() {
+        Vec3 edgeCenter = Vec3.atBottomCenterOf(this.jump.edge());
+        return horizontalDistance(edgeCenter, this.jump.landing());
+    }
+
+    private void steerTo(Vec3 target) {
+        this.mob.getLookControl().setLookAt(target.x, target.y, target.z, 30.0F, 30.0F);
+        this.mob.getMoveControl().setWantedPosition(
+                target.x, target.y, target.z, Run_N_JumpUtils.getRunSpeedModifier(this.mob));
     }
 }
