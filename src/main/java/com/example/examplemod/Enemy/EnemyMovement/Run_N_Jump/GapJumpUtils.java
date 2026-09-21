@@ -1,5 +1,6 @@
 package com.example.examplemod.Enemy.EnemyMovement.Run_N_Jump;
 
+import com.example.examplemod.Enemy.EnemyBehavior.EnemyPursuit_N_Search.PursuitBehavior.PursuitEnemyBehavior;
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.entity.Mob;
@@ -48,12 +49,32 @@ public final class GapJumpUtils {
     }
 
     /**
-     * Швидкість-уставка бігу моба (те, що MoveControl множить на прискорення): атрибут швидкості
-     * (зі спринтом, якщо він увімкнений) × множник бігу. Спільна для оцінки дальності та для
-     * передбачення кроку в GapJumpAssistGoal.
+     * Ванільний множник спринту: {@code LivingEntity.setSprinting(true)} додає до атрибута швидкості
+     * тимчасовий модифікатор +0.3 (MULTIPLY_TOTAL), тобто ×1.3. Тільки поки прапор спринту увімкнений.
+     */
+    static final double SPRINT_SPEED_FACTOR = 1.3;
+
+    /**
+     * Швидкість-уставка бігу моба (те, що MoveControl множить на прискорення): атрибут швидкості ×
+     * множник бігу. Спільна для оцінки дальності та для передбачення кроку в GapJumpAssistGoal.
+     * <p>
+     * <b>Спринт рахується "як увімкнений" завжди, коли моб у погоні.</b> Раніше атрибут читався як є, тож
+     * оцінка залежала від того, чи прапор спринту ввімкнений САМЕ ЗАРАЗ — а він вимикається на кожному
+     * {@code stop()} ({@code PursuitEnemyMeleeBehavior}, ця ціль) і вмикається лише в
+     * {@code applyDefaultRun}, який у {@code PursuitEnemyMeleeBehavior.tick()} стоїть ПІСЛЯ
+     * {@code getOrComputePath}. У результаті шлях, з яким моб їде в кожен стрибок, завжди рахувався при
+     * sprint=false: для зомбі {@code 0.23 * 1.5 * 8.5 = 2.9 -> 2}, і перестрибування (відстань 4)
+     * у графі просто не з'являлось, хоча пізніші перерахунки (вже в спринті: {@code 3.8 -> 3}) його мали —
+     * моб їхав "блок за блоком" по шляху першого, короткозорого розрахунку.
+     * Правило спринту одне на всіх ({@code Run_N_JumpUtils.applyDefaultRun}: sprint = isMemoryChasing),
+     * тож у погоні множник додаємо самі; поза погонею (блукання) нічого не змінюється.
      */
     public static double runSpeedSetpoint(Mob mob) {
-        return mob.getAttributeValue(Attributes.MOVEMENT_SPEED) * Run_N_JumpUtils.getRunSpeedModifier(mob);
+        double speed = mob.getAttributeValue(Attributes.MOVEMENT_SPEED);
+        if (!mob.isSprinting() && PursuitEnemyBehavior.isMemoryChasing(mob)) {
+            speed *= SPRINT_SPEED_FACTOR;
+        }
+        return speed * Run_N_JumpUtils.getRunSpeedModifier(mob);
     }
 
     /** Теоретична максимальна дальність стрибка цього моба на повній швидкості (не поточній). */

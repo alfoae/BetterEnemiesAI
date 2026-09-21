@@ -8,9 +8,9 @@ import java.util.*;
  * РАНІШЕ {@link GapJumpNodeEvaluator} шукав стрибки лише вздовж 4 осей (вліво/вправо/вгору/вниз).
  * Тепер напрямок — будь-який: кожна цілочисельна пара (dx, dz) — потенційне приземлення відносно
  * блока-краю. Пари групуються в ПРОМЕНІ за "примітивним" кроком (p, q), gcd(|p|,|q|)=1: наприклад
- * (2,2), (3,3) — це той самий промінь (1,1), а (2,1) і (4,2) — промінь (2,1). Вздовж променя беремо
- * лише ПЕРШЕ придатне приземлення (далі по ньому моб усе одно йшов би ногами / це була б
- * дублікат) — так само, як робив старий код для кожної з 4 осей.
+ * (2,2), (3,3) — це той самий промінь (1,1), а (2,1) і (4,2) — промінь (2,1). Вздовж променя перше
+ * придатне приземлення — звичайний стрибок; далі, якщо платформа закінчується проваллям, а за ним є
+ * наступна в межах дальності, додається ще й ПЕРЕСТРИБУВАННЯ (див. {@link GapJumpNodeEvaluator}).
  * <p>
  * <b>Межа дальності однакова у всіх напрямках.</b> Складність стрибка визначає не відстань між
  * ЦЕНТРАМИ блоків, а відстань польоту від точки відриву (передня межа блока-краю ВЗДОВЖ стрибка)
@@ -27,31 +27,34 @@ import java.util.*;
  */
 final class GapJumpRays {
 
+    private GapJumpRays() {
+    }
+
     /**
      * Допуск до межі дальності (блоки польоту). Дає рівно ті самі осьові стрибки, що й раніше
      * (step <= maxGap + 1), і пропускає діагональ (3,3) та (4,1) при maxGap = 3.
      */
     static final double FLIGHT_TOLERANCE = 0.15;
+
     /**
      * Мінімальна відстань між центрами, з якої це вже "стрибок", а не звичайний крок. МАЄ збігатись з
      * {@code GapJumpUtils.JUMP_SEGMENT_THRESHOLD}, за яким Goal розпізнає стрибковий сегмент у Path.
      * Клітинки ближче (1,0), (1,1) — це ванільні кроки, ними займається WalkNodeEvaluator.
      */
     static final double MIN_JUMP_DISTANCE = 1.5;
+
     /**
      * Півширина хітбокса, з якою рахується коридор (зомбі = 0.3).
      */
     private static final double CORRIDOR_HALF_WIDTH = 0.3;
+
     private static final double CORRIDOR_SAMPLE_STEP = 0.2;
+
     private static final int MAX_CACHED_GAP = 12;
+
     private static final Ray[][] CACHE = new Ray[MAX_CACHED_GAP + 1][];
 
-    private GapJumpRays() {
-    }
-
-    /**
-     * Промені для моба з цим "теоретичним максимумом розриву" ({@code estimateMaxJumpRangeBlocks}).
-     */
+    /** Промені для моба з цим "теоретичним максимумом розриву" ({@code estimateMaxJumpRangeBlocks}). */
     static synchronized Ray[] forMaxGap(int maxGap) {
         int gap = Math.max(1, Math.min(maxGap, MAX_CACHED_GAP));
         if (CACHE[gap] == null) {
@@ -60,9 +63,7 @@ final class GapJumpRays {
         return CACHE[gap];
     }
 
-    /**
-     * Складність стрибка: відстань польоту від передньої межі блока-краю до центру приземлення.
-     */
+    /** Складність стрибка: відстань польоту від передньої межі блока-краю до центру приземлення. */
     static double flightDistance(int dx, int dz) {
         int m = Math.max(Math.abs(dx), Math.abs(dz));
         if (m == 0) {
@@ -70,6 +71,18 @@ final class GapJumpRays {
         }
         double d = Math.sqrt((double) dx * dx + (double) dz * dz);
         return d * (1.0 - 0.5 / m);
+    }
+
+    /**
+     * Один промінь: примітивний крок, перша клітинка на шляху (вона ж перевіряється на "чи є тут
+     * край"), діапазон k придатних приземлень і коридори польоту.
+     *
+     * @param frontX          Перша клітинка, у яку заходить центральна лінія, відносно блока-краю.
+     * @param corridor        corridor[k] — клітинки {dx, dz} коридору для приземлення k*(stepX, stepZ); індекси kMin..kMax.
+     * @param nearestDistance Відстань між центрами для найближчого придатного приземлення (для сортування).
+     */
+        record Ray(int stepX, int stepZ, int frontX, int frontZ, int kMin, int kMax, int[][][] corridor,
+                   double nearestDistance) {
     }
 
     static double maxFlight(int maxGap) {
@@ -195,17 +208,5 @@ final class GapJumpRays {
             b = t;
         }
         return a;
-    }
-
-    /**
-     * Один промінь: примітивний крок, перша клітинка на шляху (вона ж перевіряється на "чи є тут
-     * край"), діапазон k придатних приземлень і коридори польоту.
-     *
-     * @param frontX          Перша клітинка, у яку заходить центральна лінія, відносно блока-краю.
-     * @param corridor        corridor[k] — клітинки {dx, dz} коридору для приземлення k*(stepX, stepZ); індекси kMin..kMax.
-     * @param nearestDistance Відстань між центрами для найближчого придатного приземлення (для сортування).
-     */
-        record Ray(int stepX, int stepZ, int frontX, int frontZ, int kMin, int kMax, int[][][] corridor,
-                   double nearestDistance) {
     }
 }

@@ -22,12 +22,23 @@ import net.minecraft.world.level.pathfinder.WalkNodeEvaluator;
  *   <li><b>Тут край саме в цьому напрямку:</b> перша клітинка на шляху НЕ прохідна (нема підлоги).
  *       Інакше моб просто зробить звичайний крок, а стрибок згенерується вже з наступної клітинки
  *       (з реального краю) — як і раніше робив старий код для кожної осі.</li>
- *   <li><b>Перше придатне приземлення вздовж променя</b> — підлога під ним тверда, на рівні ніг і
- *       голови вільно.</li>
+ *   <li><b>Придатне приземлення вздовж променя</b> — підлога під ним тверда, на рівні ніг і
+ *       голови вільно. Перше таке — звичайний стрибок; далі промінь скануємо ще: якщо платформа
+ *       закінчується проваллям і ще далі (у межах дальності) є нова — додається ПЕРЕСТРИБУВАННЯ
+ *       (див. нижче).</li>
  *   <li><b>Коридор польоту вільний:</b> клітинки, які зачепить хітбокс моба на шляху, на рівні ніг
  *       і голови не блокують рух. Раніше цього не перевірялось — стрибок "крізь" стовп вважався
  *       прохідним.</li>
  * </ol>
+ * <b>Перестрибування проміжних платформ.</b> {@code ▣▢▣▢▣}: з 1-го блока моб тепер може стрибнути не на 2-й, а
+ * одразу на 3-й, пролетівши НАД 2-м. Якщо на промені після першого приземлення знову провалля, а за ним
+ * ще одна платформа в межах тієї ж дальності, вона теж стає сусідом вузла — з дешевшою вартістю за блок
+ * ({@link #SKIP_MALUS_PER_BLOCK}), щоб A* віддавав перевагу одному довгому стрибку над двома короткими.
+ * Політ над проміжним блоком безпечний: після тіку відриву ноги моба вже вище 0.42 над верхом платформи,
+ * а коридор польоту (клітинки на рівні ніг і голови, у тому числі над самою проміжною платформою)
+ * перевіряється так само, як для звичайного стрибка. Продовження тієї ж платформи (наступна клітинка
+ * теж має підлогу) перестрибуванням НЕ вважається — ногами й так дійдемо.
+ * <p>
  * Навмисно НЕ заводить окремий {@code PathType} (типу "PARKOUR_JUMP") — це вимагало б
  * NeoForge-механізму enum extensions (окремий JSON + запис у neoforge.mods.toml) заради самого
  * лише маркування. Замість цього "цей сегмент - стрибок" визначається геометрично: у
@@ -57,20 +68,25 @@ public class GapJumpNodeEvaluator extends WalkNodeEvaluator {
     private static final int ALL_NORMAL_NEIGHBORS = 8;
 
     /**
-     * Стан клітинки перед краєм (для кешу на вузол).
+     * Вартість звичайного стрибка за блок відстані: дорожче за крок - A* бере лише коли це реально коротший шлях.
      */
+    private static final float JUMP_MALUS_PER_BLOCK = 1.5F;
+
+    /**
+     * Вартість ПЕРЕСТРИБУВАННЯ за блок відстані (див. {@link #tryRay}). Один довгий стрибок над проміжною
+     * платформою має бути СТРОГО дешевшим за ланцюг коротких: ланцюг із двох стрибків на сумарну відстань D
+     * коштує D + 1.5D = 2.5D, а перестрибування - D + 1.25D = 2.25D. Без знижки при однаковій відстані
+     * вони були б у нічиїй (вартість лінійна), і A* обирав би той чи інший випадково.
+     */
+    private static final float SKIP_MALUS_PER_BLOCK = 1.25F;
+
+    /** Стан клітинки перед краєм (для кешу на вузол). */
     private static final byte UNKNOWN = 0;
-    /**
-     * Є підлога й вільно на рівні ніг: моб просто зробить крок, стрибок звідси в цей бік не потрібен.
-     */
+    /** Є підлога й вільно на рівні ніг: моб просто зробить крок, стрибок звідси в цей бік не потрібен. */
     private static final byte WALKABLE = 1;
-    /**
-     * Немає підлоги й на рівні ніг вільно: справжнє провалля - лише крізь нього має сенс стрибати.
-     */
+    /** Немає підлоги й на рівні ніг вільно: справжнє провалля - лише крізь нього має сенс стрибати. */
     private static final byte VOID = 2;
-    /**
-     * На рівні ніг стіна/блок (або світ недоступний): крізь неї стрибок не йде.
-     */
+    /** На рівні ніг стіна/блок (або світ недоступний): крізь неї стрибок не йде. */
     private static final byte BLOCKED = 3;
 
     @Override
@@ -107,26 +123,51 @@ public class GapJumpNodeEvaluator extends WalkNodeEvaluator {
             return count;
         }
 
-        // 2. Перше придатне приземлення вздовж променя.
+        // 2. Приземлення вздовж променя. ПЕРШЕ придатне - звичайний стрибок. Далі сканування ТРИВАЄ: якщо
+        //    за цією платформою знову провалля, а ще далі (у межах дальності) - нова платформа, то це
+        //    ПЕРЕСТРИБУВАННЯ: один довгий стрибок НАД проміжною платформою замість двох коротких
+        //    (▣▢▣▢▣ - з 1-го блока одразу на 3-й). Раніше цикл робив return на першому ж приземленні, і
+        //    проміжну платформу перестрибнути було неможливо.
+        boolean landed = false;      // на цьому промені вже додано хоча б одне приземлення
+        boolean voidBehind = false;  // після останньої придатної клітинки на промені була порожнеча
         for (int k = ray.kMin(); k <= ray.kMax(); k++) {
             int dx = ray.stepX() * k;
             int dz = ray.stepZ() * k;
             if (!isStandable(origin, dx, dz)) {
+                if (landed) {
+                    voidBehind = true; // (це може бути й стіна - коридор наступного кандидата її відсіче)
+                }
                 continue;
             }
-            // 3. Приземлення є - коридор польоту має бути вільний. Якщо ні, то й далі по променю заблоковано.
-            if (!isCorridorClear(origin, ray.corridor()[k])) {
-                return count;
+            // Придатна клітинка. Кандидат - якщо це перше приземлення, або перед нею була порожнеча
+            // (інакше це просто продовження тієї ж платформи, ногами й так дійдемо).
+            if (!landed || voidBehind) {
+                // Коридор польоту (разом із проміжною платформою й проваллями між) має бути вільний.
+                // Якщо ні - то й далі по променю заблоковано.
+                if (!isCorridorClear(origin, ray.corridor()[k])) {
+                    return count;
+                }
+                if (count >= nodes.length) {
+                    return count;
+                }
+                nodes[count++] = jumpNode(origin, dx, dz, landed);
+                landed = true;
             }
-            BlockPos landing = origin.offset(dx, 0, dz);
-            Node jumpNode = new Node(landing.getX(), landing.getY(), landing.getZ());
-            jumpNode.type = PathType.WALKABLE;
-            double distance = Math.sqrt((double) dx * dx + (double) dz * dz);
-            jumpNode.costMalus = (float) (distance * 1.5); // дорожче за звичайний крок - A* бере тільки якщо це реально коротший шлях
-            nodes[count] = jumpNode;
-            return count + 1;
+            // Чи закінчується тут платформа (одразу за нею провалля)? Тільки тоді наступну придатну
+            // клітинку на промені можна перестрибнути. Для променів із кроком >1 клітинки "клітинка за"
+            // береться тією самою відносною позицією, що й перша клітинка від краю (лінія періодична).
+            voidBehind = classifyFront(origin, dx + ray.frontX(), dz + ray.frontZ()) == VOID;
         }
         return count;
+    }
+
+    private Node jumpNode(BlockPos origin, int dx, int dz, boolean skip) {
+        BlockPos landing = origin.offset(dx, 0, dz);
+        Node jumpNode = new Node(landing.getX(), landing.getY(), landing.getZ());
+        jumpNode.type = PathType.WALKABLE;
+        double distance = Math.sqrt((double) dx * dx + (double) dz * dz);
+        jumpNode.costMalus = (float) (distance * (skip ? SKIP_MALUS_PER_BLOCK : JUMP_MALUS_PER_BLOCK));
+        return jumpNode;
     }
 
     private byte classifyFront(BlockPos origin, int dx, int dz) {
@@ -149,9 +190,7 @@ public class GapJumpNodeEvaluator extends WalkNodeEvaluator {
         return true;
     }
 
-    /**
-     * Клітинка на рівні ніг чи голови моба не має бути суцільною.
-     */
+    /** Клітинка на рівні ніг чи голови моба не має бути суцільною. */
     private boolean blocksBody(BlockPos feet) {
         BlockState feetState = getBlockStateAt(feet);
         BlockState headState = getBlockStateAt(feet.above());
@@ -161,9 +200,7 @@ public class GapJumpNodeEvaluator extends WalkNodeEvaluator {
         return feetState.blocksMotion() || headState.blocksMotion();
     }
 
-    /**
-     * Підлога тверда, а на рівні ніг вільно.
-     */
+    /** Підлога тверда, а на рівні ніг вільно. */
     private boolean hasFloorAt(BlockPos origin, int dx, int dz) {
         BlockPos column = origin.offset(dx, 0, dz);
         BlockPos floorPos = column.below();
@@ -179,9 +216,7 @@ public class GapJumpNodeEvaluator extends WalkNodeEvaluator {
         return floorState.blocksMotion() && !feetState.blocksMotion();
     }
 
-    /**
-     * Придатне для приземлення: підлога, а над нею вільно і на рівні ніг, і на рівні голови.
-     */
+    /** Придатне для приземлення: підлога, а над нею вільно і на рівні ніг, і на рівні голови. */
     private boolean isStandable(BlockPos origin, int dx, int dz) {
         if (!hasFloorAt(origin, dx, dz)) {
             return false;
