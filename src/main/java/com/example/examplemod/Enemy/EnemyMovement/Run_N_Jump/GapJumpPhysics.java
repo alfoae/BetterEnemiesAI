@@ -17,6 +17,12 @@ package com.example.examplemod.Enemy.EnemyMovement.Run_N_Jump;
  *   <li>Політ на рівному місці триває N = 12 тіків. Y-колізія приземлення на N-му тіку рахується
  *       ПЕРШОЮ і по позиції, яка була ПІСЛЯ (N-1)-го тіку — тому для приземлення важлива саме вона.</li>
  * </ul>
+ * <b>v9:</b> ціль більше не покладається на цю балістичну модель для ВІДРИВУ (див. розділ "ПРОФІЛЬ ПОЛЬОТУ"
+ * нижче: горизонтальний крок щотіку = відстань / тіків до приземлення). {@link #launchSpeedForDistance},
+ * {@link #flightDistance}, {@link #remainingAirFactor} та константи {@code FLIGHT_FACTOR_*} лишені як
+ * опис ванільної фізики (на них зведені тести й звірка з еталоном); вертикаль (гравітація, опір, тривалість
+ * 12 тіків) і {@link #GROUND_FRICTION} використовуються й далі.
+ * <p>
  * Звідси головне: горизонтальна відстань польоту ЛІНІЙНА за стартовою швидкістю s:
  * {@code distance = s * FLIGHT_FACTOR_TO_LANDING} (≈ 4.917), а не {@code s * 10 * 0.85 = s * 8.5}, як
  * було в старій моделі (та вважала швидкість сталою весь політ і не знала ні про тертя відриву,
@@ -24,7 +30,9 @@ package com.example.examplemod.Enemy.EnemyMovement.Run_N_Jump;
  */
 final class GapJumpPhysics {
 
-    /** Скільки тіків моб у повітрі на рівному місці (включно з тіком відриву та тіком приземлення). */
+    /**
+     * Скільки тіків моб у повітрі на рівному місці (включно з тіком відриву та тіком приземлення).
+     */
     static final int AIRTIME_TICKS;
 
     static final double JUMP_VERTICAL_VELOCITY = 0.42;
@@ -42,7 +50,9 @@ final class GapJumpPhysics {
      * Горизонтальний множник тертя на тіку відриву (наземний). Він же зв'язує швидкість і крок за тік.
      */
     static final double GROUND_FRICTION = DEFAULT_BLOCK_FRICTION * AIR_FRICTION;
-    /** Σ множників за тіки 1..N — повна горизонтальна дальність польоту до точки приземлення. */
+    /**
+     * Σ множників за тіки 1..N — повна горизонтальна дальність польоту до точки приземлення.
+     */
     static final double FLIGHT_FACTOR_TO_LANDING;
 
     /**
@@ -51,9 +61,9 @@ final class GapJumpPhysics {
      */
     static final double FLIGHT_FACTOR_BEFORE_TOUCHDOWN;
     /**
-     * Відстань від центру блока до його межі по осі (для стрибка вздовж осі це і є "передній край").
+     * Найкоротший політ, який плануємо (тіків разом із тіком відриву): нижчу дугу за ~0.43 блока вже не робимо.
      */
-    static final double EDGE_FRONT = 0.5;
+    static final int MIN_PLANNED_AIRTIME = 5;
 
     static {
         double y = 0.0;
@@ -87,9 +97,9 @@ final class GapJumpPhysics {
         return horizontalDistance / FLIGHT_FACTOR_TO_LANDING;
     }
     /**
-     * Запас, щоб не чекати до самого моменту, коли моб уже втратив опору.
+     * Запас до краю зони опори блока приземлення (блоків): див. {@link #maxFlightStep}.
      */
-    static final double GROUND_LOSS_MARGIN = 0.05;
+    static final double LANDING_STEP_MARGIN = 0.10;
 
     /**
      * Σ горизонтальних множників на решту польоту з ПОТОЧНОГО стану: {@code v * factor} = скільки ще
@@ -119,11 +129,20 @@ final class GapJumpPhysics {
     }
 
     // =====================================================================================
-    // КОЛИ ВІДРИВАТИСЬ (геометрія краю) — для БУДЬ-ЯКОГО напрямку стрибка
+    // ПРОФІЛЬ ПОЛЬОТУ: рівномірна швидкість замість "стрибок-поштовх + затухання"
     // =====================================================================================
-    // Позиція моба задається відносно ЦЕНТРУ блока-краю: (relX, relZ). Напрямок стрибка — одиничний
-    // вектор (dirX, dirZ) від центру краю до центру приземлення. Стоїть моб на блоці-краю, доки його
-    // хітбокс (півширина hw) перекриває клітинку [-0.5, 0.5] по ОБОХ осях.
+    // Стара модель ("задати швидкість відриву й летіти балістично") приземляла моба ТОЧНО, але політ
+    // виглядав так: перший тік ривок (0.7-0.8 бл/тік), далі швидкість падає на x0.91 за тік і на
+    // приземленні лишається 0.06 бл/тік (~1 бл/с) - моб "повзе" й майже зупиняється перед наступним
+    // стрибком. Тепер горизонтальна швидкість виставляється ЩОТІКУ як
+    // {@code відстань_до_центру / тіків_до_приземлення}: моб летить рівномірно й приземляється на
+    // крейсерській швидкості. Точність та сама (замкнений контур перераховує щотіку).
+    /** Відстань від центру блока до його межі по осі (для стрибка вздовж осі це і є "передній край"). */
+    static final double EDGE_FRONT = 0.5;
+    /**
+     * Запас, щоб не чекати до самого моменту, коли моб уже втратив опору.
+     */
+    static final double GROUND_LOSS_MARGIN = 0.05;
     /**
      * Запас на прискорення моба (реальний крок за наступний тік трохи більший за попередній).
      */
@@ -138,9 +157,47 @@ final class GapJumpPhysics {
     private GapJumpPhysics() {
     }
 
-    /** Зворотне до {@link #launchSpeedForDistance}: куди долетить моб зі швидкістю {@code launchSpeed}. */
+    /**
+     * Зворотне до {@link #launchSpeedForDistance}: куди долетить моб зі швидкістю {@code launchSpeed}.
+     */
     static double flightDistance(double launchSpeed) {
         return launchSpeed * FLIGHT_FACTOR_TO_LANDING;
+    }
+
+    /**
+     * Скільки тіків лишилось до торкання рівня приземлення з поточного стану (включно з поточним
+     * тіком). Ті самі формули, що й {@link #remainingAirFactor}: рух, потім гравітація й опір.
+     */
+    static int remainingAirTicks(double heightAboveLanding, double verticalVelocity) {
+        double y = heightAboveLanding;
+        double vy = verticalVelocity;
+        for (int tick = 1; tick <= 60; tick++) {
+            y += vy;
+            vy = (vy - GRAVITY_PER_TICK) * VERTICAL_DRAG_PER_TICK;
+            if (y <= 0.0) {
+                return tick;
+            }
+        }
+        return 60;
+    }
+
+    // =====================================================================================
+    // КОЛИ ВІДРИВАТИСЬ (геометрія краю) — для БУДЬ-ЯКОГО напрямку стрибка
+    // =====================================================================================
+    // Позиція моба задається відносно ЦЕНТРУ блока-краю: (relX, relZ). Напрямок стрибка — одиничний
+    // вектор (dirX, dirZ) від центру краю до центру приземлення. Стоїть моб на блоці-краю, доки його
+    // хітбокс (півширина hw) перекриває клітинку [-0.5, 0.5] по ОБОХ осях.
+
+    /**
+     * Найбільший зсув за тік, при якому моб ще встигає приземлитись НА блок. Ванільна Y-колізія
+     * приземлення на N-му тіку рахується ПЕРШОЮ й по позиції, що була після (N-1)-го тіку, тобто ДО
+     * останнього горизонтального зсуву. Хітбокс має вже перекривати блок приземлення на тій позиції, а
+     * вона лежить за один крок до центру: крок має бути меншим за радіус опори {@code 0.5 + halfWidth}.
+     * (Стара модель із затуханням цього не потребувала: останній крок був ~0.15. При РІВНОМІРНОМУ польоті
+     * малий зомбі з кроком 0.8 приземлявся б у порожнечу перед блоком і бився об його стінку.)
+     */
+    static double maxFlightStep(double halfWidth) {
+        return EDGE_FRONT + halfWidth - LANDING_STEP_MARGIN;
     }
 
     /**
@@ -153,6 +210,52 @@ final class GapJumpPhysics {
     }
 
     /**
+     * Скільки тіків летіти, щоб швидкість польоту була ~крейсерською (швидкістю бігу): відстань / крок,
+     * але не менше, ніж потрібно, щоб крок не перевищив {@code maxStep} ({@link #maxFlightStep}).
+     * Обмежено знизу {@link #MIN_PLANNED_AIRTIME} (нижча дуга) і зверху природним польотом
+     * {@link #AIRTIME_TICKS} (вища й довша - неможлива без зайвої висоти).
+     */
+    static int plannedAirtime(double distance, double cruiseStepPerTick, double maxStep) {
+        double step = Math.min(Math.max(cruiseStepPerTick, 1.0E-3), Math.max(maxStep, 1.0E-3));
+        long ticks = Math.round(distance / step);
+        long minTicks = (long) Math.ceil(distance / Math.max(maxStep, 1.0E-3) - 1.0E-9);
+        return (int) Math.max(MIN_PLANNED_AIRTIME, Math.min(AIRTIME_TICKS, Math.max(ticks, minTicks)));
+    }
+
+    /**
+     * Найменша вертикальна швидкість (не нижча за поточну), при якій до торкання лишиться щонайменше
+     * {@code targetTicks} тіків. Потрібна, коли контуру доводиться подовжити політ ("зависнути"), щоб
+     * крок не перевищив {@link #maxFlightStep}. {@code currentVy}, якщо й так вистачає тіків.
+     */
+    static double verticalVelocityForRemainingTicks(double heightAboveLanding, double currentVy, int targetTicks) {
+        for (double vy = currentVy; vy <= 0.5; vy += 0.005) {
+            if (remainingAirTicks(heightAboveLanding, vy) >= targetTicks) {
+                return vy;
+            }
+        }
+        return 0.5;
+    }
+
+    /**
+     * Вертикальна швидкість, яку треба виставити на ДРУГОМУ тіку польоту (1-й тік - ванільний підйом
+     * 0.42, його не чіпаємо), щоб політ тривав рівно {@code totalTicks} (разом із тіком відриву). Це
+     * найвища дуга з тих, що дають таку тривалість. {@code NaN} - природна фізика (політ не скорочуємо).
+     */
+    static double verticalVelocityForAirtime(int totalTicks) {
+        if (totalTicks >= AIRTIME_TICKS) {
+            return Double.NaN;
+        }
+        double heightAfterTakeoffTick = JUMP_VERTICAL_VELOCITY;
+        double natural = (JUMP_VERTICAL_VELOCITY - GRAVITY_PER_TICK) * VERTICAL_DRAG_PER_TICK;
+        for (double vy = natural; vy > -0.6; vy -= 0.002) {
+            if (1 + remainingAirTicks(heightAfterTakeoffTick, vy) <= totalTicks) {
+                return vy;
+            }
+        }
+        return Double.NaN;
+    }
+
+    /**
      * Наземне прискорення моба за тік при бігу до краю. У ванілі мобу {@code MoveControl} ставить
      * {@code speed = множник * атрибут}, а {@code Mob.setSpeed} кладе те саме число ще й у вхід
      * {@code zza}, тож прискорення = speed * (speed * 0.98) — квадратичне за швидкістю. Це лише ОЦІНКА
@@ -160,6 +263,16 @@ final class GapJumpPhysics {
      */
     static double estimateGroundAccel(double runSpeedSetpoint) {
         return runSpeedSetpoint * runSpeedSetpoint * 0.98;
+    }
+
+    /**
+     * Усталений зсув моба за тік при бігу (блоків): на землі швидкість встановлюється там, де щотіку
+     * прибавка {@code a} дорівнює втраті на терті, тобто {@code v = 0.546 * (v + a)} і зсув за тік
+     * {@code v + a = a / (1 - 0.546)}. Природна швидкість бігу моба - вище за неї він сам не біжить, тож
+     * і політ не має бути швидшим (інакше ланцюжок стрибків розганяється сам від себе).
+     */
+    static double steadyRunStep(double runSpeedSetpoint) {
+        return estimateGroundAccel(runSpeedSetpoint) / (1.0 - GROUND_FRICTION);
     }
 
     /**

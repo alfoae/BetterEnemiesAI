@@ -1,5 +1,6 @@
 package com.example.examplemod.Enemy.EnemyMovement.Run_N_Jump;
 
+import com.example.examplemod.Enemy.EnemyBehavior.EnemyBreak_N_Build.EnemyBreak_N_BuildUtils;
 import com.example.examplemod.Enemy.EnemyBehavior.EnemyPursuit_N_Search.PursuitBehavior.PursuitEnemyBehavior;
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerLevel;
@@ -96,7 +97,35 @@ public final class GapJumpUtils {
         if (path == null) {
             return null;
         }
-        int from = Math.max(0, path.getNextNodeIndex() - 1);
+        return findJumpSegmentInPath(path, Math.max(0, path.getNextNodeIndex() - 1));
+    }
+
+    /**
+     * Те саме, що {@link #findUpcomingJumpSegment}, але від ПОТОЧНОГО положення моба й по СВІЖОМУ шляху:
+     * бере спільний кеш {@code EnemyBreak_N_BuildUtils.getOrComputePath} (той самий, з якого їде
+     * Pursuit; рахується не більше разу на тік на моба, тож додаткового createPath() це не дає).
+     * Потрібне для ланцюжка стрибків: у тіку приземлення навігатор моба порожній (ціль його зупиняє на
+     * старті), тож {@link #findUpcomingJumpSegment} нічого не бачить, і наступний стрибок мусив би чекати,
+     * поки Pursuit заново покладе шлях у навігатор (~2 тіки, поки моб "повзе" без керування).
+     *
+     * @return наступний стрибок від поточного положення, або {@code null}, якщо шляху нема чи поруч лише кроки
+     */
+    public static GapJump findFreshJumpSegment(Mob mob) {
+        Vec3 chasePos = PursuitEnemyBehavior.getChasePosition(mob);
+        if (chasePos == null) {
+            return null;
+        }
+        Path path = EnemyBreak_N_BuildUtils.getOrComputePath(mob, chasePos);
+        if (path == null || path.getNodeCount() < 2) {
+            return null;
+        }
+        return findJumpSegmentInPath(path, 0);
+    }
+
+    /**
+     * Шукає стрибковий сегмент серед 2-3 пар вузлів Path, починаючи з індексу {@code from}.
+     */
+    static GapJump findJumpSegmentInPath(Path path, int from) {
         int lookahead = Math.min(path.getNodeCount() - 1, from + 3); // дивимось на 2-3 вузли вперед, не на весь шлях
         for (int i = from; i < lookahead; i++) {
             Node a = path.getNode(i);
