@@ -4,6 +4,7 @@ import com.example.examplemod.Enemy.EnemyBehavior.EnemyPursuit_N_Search.PursuitB
 import net.minecraft.core.BlockPos;
 import net.minecraft.world.entity.Mob;
 import net.minecraft.world.entity.ai.goal.Goal;
+import net.minecraft.world.level.Level;
 import net.minecraft.world.phys.Vec3;
 
 import java.util.EnumSet;
@@ -113,6 +114,9 @@ public class GapJumpAssistGoal extends Goal {
      * {@code old/2 + поштовх*сила} - величина й напрямок інші. Такий тік ми не перезаписуємо.
      * Допуск: проекція на виставлений напрямок у частках {@code [MIN, MAX]}, бічна складова не більше
      * {@code FRACTION * швидкість + MIN_ABS} (дрібні штовхання сусідніх мобів імпульсом не вважаємо).
+     * <p>
+     * {@code IMPULSE_MIN_RATIO} - межа для ЗВИЧАЙНОГО блока (тертя 0.546). Пісок душ, мед, слайм і блоки з модів
+     * гальмують сильніше, тож для них межа знижується - див. {@link #impulseMinRatio}.
      */
     private static final double IMPULSE_MIN_RATIO = 0.30;
     private static final double IMPULSE_MAX_RATIO = 1.05;
@@ -147,6 +151,12 @@ public class GapJumpAssistGoal extends Goal {
      */
     private double lastSetX;
     private double lastSetZ;
+    /**
+     * Де моб був у мить, коли ми виставляли швидкість (гальмо блока діє за позицією до й після руху).
+     */
+    private double lastSetPosX;
+    private double lastSetPosY;
+    private double lastSetPosZ;
     private boolean hasLastSet;
 
     // =========================================
@@ -620,51 +630,11 @@ public class GapJumpAssistGoal extends Goal {
     }
 
     /**
-     * Щотіку в польоті: горизонтальна швидкість = відстань до центру landing / тіків до приземлення.
-     * <p>
-     * Це замкнений контур: на кожному тіку ми знаємо, де моб (позиція, висота, вертикальна швидкість), тож
-     * тіків до торкання рівня landing ({@link GapJumpPhysics#remainingAirTicks}) і, відповідно, який
-     * крок за тік приведе його рівно в центр. Наслідки:
-     * <ul>
-     *   <li>політ РІВНОМІРНИЙ (замість "ривок + затухання x0.91"), моб приземляється на швидкості бігу;</li>
-     *   <li>точність не залежить від тертя блока під ногами, чи виконався стрибок у той самий тік тощо -
-     *       модель відриву більше нічого не гарантує, а лише задає перший крок;</li>
-     *   <li>бічні збурення (штовхнули) гасяться самі.</li>
-     * </ul>
-     * Вертикаль НЕ чіпаємо (ванільна дуга) - крім аварійного випадку: якщо крок вийшов би більшим за радіус опори
-     * блока, політ подовжується "зависанням" (див. {@link GapJumpPhysics#maxFlightStep}).
+     * Чи схожа зміна швидкості на ТЕРТЯ: та сама пряма, частка в {@code [minRatio, IMPULSE_MAX_RATIO]}.
      */
-    private void controlFlight() {
-        Vec3 landing = this.jump.landing();
-        Vec3 vel = this.mob.getDeltaMovement();
-
-        double vy = vel.y;
-
-        double heightAbove = this.mob.getY() - landing.y;
-        double dx = landing.x - this.mob.getX();
-        double dz = landing.z - this.mob.getZ();
-        double dist = Math.sqrt(dx * dx + dz * dz);
-        // Моб уже нижче рівня landing (промахнувся повз платформу) - керувати нічим, хай падає за фізикою.
-        if (dist < 1.0E-6 || heightAbove < -0.05) {
-            return;
-        }
-
-        double planDist = Math.min(dist, segmentLength() + MAX_LAUNCH_EXTRA_BLOCKS);
-        int ticks = GapJumpPhysics.remainingAirTicks(heightAbove, vy);
-
-        // Крок за тік не має перевищувати радіус опори блока приземлення (див. maxFlightStep): інакше на
-        // тіку торкання хітбокс іще не над блоком, і моб пролітає повз. Зазвичай план це вже гарантує; тут
-        // лише страховка (запізніле керування, збурення): якщо тіків лишилось замало - трохи зависаємо.
-        double maxStep = GapJumpPhysics.maxFlightStep(this.mob.getBbWidth() * 0.5);
-        int needed = (int) Math.ceil(planDist / maxStep - 1.0E-9);
-        if (needed > ticks) {
-            vy = GapJumpPhysics.verticalVelocityForRemainingTicks(heightAbove, vy, needed);
-            ticks = GapJumpPhysics.remainingAirTicks(heightAbove, vy);
-        }
-
-        double perTick = planDist / ticks;
-        this.mob.setDeltaMovement(dx / dist * perTick, vy, dz / dist * perTick);
-        recordSetVelocity(dx / dist * perTick, dz / dist * perTick);
+    private static boolean withinFrictionEnvelope(double ratio, double lateral, double setLen, double minRatio) {
+        return ratio >= minRatio && ratio <= IMPULSE_MAX_RATIO
+                && Math.abs(lateral) <= IMPULSE_LATERAL_FRACTION * setLen + IMPULSE_LATERAL_MIN_ABS;
     }
 
     /**
@@ -699,19 +669,73 @@ public class GapJumpAssistGoal extends Goal {
         return true;
     }
 
+    /**
+     * Щотіку в польоті: горизонтальна швидкість = відстань до центру landing / тіків до приземлення.
+     * <p>
+     * Це замкнений контур: на кожному тіку ми знаємо, де моб (позиція, висота, вертикальна швидкість), тож
+     * тіків до торкання рівня landing ({@link GapJumpPhysics#remainingAirTicks}) і, відповідно, який
+     * крок за тік приведе його рівно в центр. Наслідки:
+     * <ul>
+     *   <li>політ РІВНОМІРНИЙ (замість "ривок + затухання x0.91"), моб приземляється на швидкості бігу;</li>
+     *   <li>точність не залежить від тертя блока під ногами, чи виконався стрибок у той самий тік тощо -
+     *       модель відриву більше нічого не гарантує, а лише задає перший крок;</li>
+     *   <li>бічні збурення (штовхнули) гасяться самі.</li>
+     * </ul>
+     * Вертикаль НЕ чіпаємо (ванільна дуга) - крім аварійного випадку: якщо крок вийшов би більшим за радіус опори
+     * блока, політ подовжується "зависанням" (див. {@link GapJumpPhysics#maxFlightStep}).
+     */
+    private void controlFlight() {
+        Vec3 landing = this.jump.landing();
+        Vec3 vel = this.mob.getDeltaMovement();
+
+        double vy = vel.y;
+
+        // TODO(Y): landing.y - ЦІЛА координата вузла, а не реальна висота підлоги (пісок душ на 0.125 нижче, плита на
+        // 0.5 тощо), тож heightAbove/remainingAirTicks трохи хибять. Повний список блоків - у GapJumpNodeEvaluator.
+        double heightAbove = this.mob.getY() - landing.y;
+        double dx = landing.x - this.mob.getX();
+        double dz = landing.z - this.mob.getZ();
+        double dist = Math.sqrt(dx * dx + dz * dz);
+        // Моб уже нижче рівня landing (промахнувся повз платформу) - керувати нічим, хай падає за фізикою.
+        if (dist < 1.0E-6 || heightAbove < -0.05) {
+            return;
+        }
+
+        double planDist = Math.min(dist, segmentLength() + MAX_LAUNCH_EXTRA_BLOCKS);
+        int ticks = GapJumpPhysics.remainingAirTicks(heightAbove, vy);
+
+        // Крок за тік не має перевищувати радіус опори блока приземлення (див. maxFlightStep): інакше на
+        // тіку торкання хітбокс іще не над блоком, і моб пролітає повз. Зазвичай план це вже гарантує; тут
+        // лише страховка (запізніле керування, збурення): якщо тіків лишилось замало - трохи зависаємо.
+        double maxStep = GapJumpPhysics.maxFlightStep(this.mob.getBbWidth() * 0.5);
+        int needed = (int) Math.ceil(planDist / maxStep - 1.0E-9);
+        if (needed > ticks) {
+            vy = GapJumpPhysics.verticalVelocityForRemainingTicks(heightAbove, vy, needed);
+            ticks = GapJumpPhysics.remainingAirTicks(heightAbove, vy);
+        }
+
+        double perTick = planDist / ticks;
+        this.mob.setDeltaMovement(dx / dist * perTick, vy, dz / dist * perTick);
+        recordSetVelocity(dx / dist * perTick, dz / dist * perTick);
+    }
+
     private void recordSetVelocity(double vx, double vz) {
         this.lastSetX = vx;
         this.lastSetZ = vz;
+        this.lastSetPosX = this.mob.getX();
+        this.lastSetPosY = this.mob.getY();
+        this.lastSetPosZ = this.mob.getZ();
         this.hasLastSet = true;
     }
 
     /**
      * Порівнює поточну швидкість моба з тією, що ми виставили на попередньому тіку. Тертя (0.546 на землі, 0.91 в
      * повітрі, на льоду/слаймі інакше) лишає швидкість на тій самій прямій, змінюючи лише величину в межах
-     * {@code [IMPULSE_MIN_RATIO, IMPULSE_MAX_RATIO]}. Ванільне відкидання ({@code old/2 + поштовх*сила}), вибух чи
-     * сильний поштовх це порушують - тоді {@link #impulseDetected}: швидкість більше не перезаписуємо (політ далі
-     * балістичний, збереження швидкості на землі вимкнено), а після приземлення ланцюжок не продовжується,
-     * керування повертається Pursuit.
+     * {@code [межа, IMPULSE_MAX_RATIO]}; нижня межа - {@link #IMPULSE_MIN_RATIO}, а для блоків, що гальмують сильніше
+     * (пісок душ, мед, слайм, блоки з модів), нижча - {@link #impulseMinRatio}. Ванільне відкидання
+     * ({@code old/2 + поштовх*сила}), вибух чи сильний поштовх це порушують - тоді {@link #impulseDetected}: швидкість
+     * більше не перезаписуємо (політ далі балістичний, збереження швидкості на землі вимкнено), а після
+     * приземлення ланцюжок не продовжується, керування повертається Pursuit.
      */
     private void checkExternalImpulse() {
         if (!this.hasLastSet) {
@@ -729,8 +753,15 @@ public class GapJumpAssistGoal extends Goal {
         double along = (v.x * this.lastSetX + v.z * this.lastSetZ) / setLen;
         double lateral = (v.x * this.lastSetZ - v.z * this.lastSetX) / setLen;
         double ratio = along / setLen;
-        boolean friction = ratio >= IMPULSE_MIN_RATIO && ratio <= IMPULSE_MAX_RATIO
-                && Math.abs(lateral) <= IMPULSE_LATERAL_FRACTION * setLen + IMPULSE_LATERAL_MIN_ABS;
+        double minRatio = IMPULSE_MIN_RATIO;
+        boolean friction = withinFrictionEnvelope(ratio, lateral, setLen, minRatio);
+        if (!friction && ratio < IMPULSE_MIN_RATIO) {
+            // Швидкість впала сильніше, ніж від звичайного тертя. Це ще не обов'язково удар: пісок душ, мед, слайм і
+            // блоки з інших модів гальмують сильніше за звичайний блок. Перевіряємо ще раз - з межею під блоки,
+            // на яких моб стоїть (для звичайного блока межа та сама, тож там результат не змінюється).
+            minRatio = impulseMinRatio();
+            friction = withinFrictionEnvelope(ratio, lateral, setLen, minRatio);
+        }
         if (!friction) {
             this.impulseDetected = true;
             this.carryStep = 0.0;
@@ -738,9 +769,52 @@ public class GapJumpAssistGoal extends Goal {
                     "[DEBUG GAP JUMP] ЗОВНІШНІЙ ІМПУЛЬС (відкидання/поштовх): керування швидкістю знято"
                             + " | виставляли=(" + String.format("%.3f, %.3f", this.lastSetX, this.lastSetZ) + ")"
                             + " | стало=(" + String.format("%.3f, %.3f", v.x, v.z) + ")"
+                            + " | частка=" + String.format("%.3f", ratio)
+                            + " (межа тертя з урахуванням блоків: " + String.format("%.3f", minRatio) + ")"
                             + " | pos=" + formatVec(this.mob.position())
             );
         }
+    }
+
+    /**
+     * Нижня межа частки швидкості, яку ще вважаємо ТЕРТЯМ, а не ударом, з урахуванням блоків під мобом.
+     * <p>
+     * <b>Баг, який це виправляє.</b> Межа була фіксована (0.30 - під тертя звичайного блока, 0.546). Але пісок душ і
+     * мед гальмують ще й через speedFactor 0.4 (за тік лишається 0.6 * 0.91 * 0.4 = 0.22), слайм - через
+     * {@code SlimeBlock.stepOn} (~0.29): на такому блоці КОЖЕН наш крок (збереження швидкості після приземлення)
+     * виглядав як удар. Ціль знімала керування швидкістю, і стрибок ланцюжка, що йшов слідом, летів БАЛІСТИЧНО
+     * (0.22 * 0.546 за тік відриву, далі x0.91) та недолітав: на паркурі з піску душ стрибок у 1 блок виходив, а
+     * наступний у 2 блоки - падіння. Сам розрахунок дальності тут ні до чого: політ просто не керувався.
+     * <p>
+     * Межа знижується ПРОПОРЦІЙНО до того, наскільки блок гальмує сильніше за звичайний. Для звичайного блока
+     * лишається {@link #IMPULSE_MIN_RATIO}. Беремо найгальмівніший блок під хітбоксом моба і в точці, де він був, коли
+     * виставляли швидкість (тертя береться ДО руху), і там, де він зараз (speedFactor діє ПІСЛЯ руху).
+     */
+    private double impulseMinRatio() {
+        double retention = Math.min(
+                minGroundRetentionUnder(this.lastSetPosX, this.lastSetPosY, this.lastSetPosZ),
+                minGroundRetentionUnder(this.mob.getX(), this.mob.getY(), this.mob.getZ()));
+        return IMPULSE_MIN_RATIO * Math.min(1.0, retention / GapJumpPhysics.GROUND_FRICTION);
+    }
+
+    /**
+     * Найменша частка швидкості за наземний тік серед блоків під хітбоксом моба (центр і 4 кути) у цій точці.
+     * Проба - на 0.5 нижче ніг, як у ванільному {@code getBlockPosBelowThatAffectsMyMovement()}. Блоки, що не
+     * гальмують, дають звичайні 0.546 (межу не знижують). Кути потрібні, бо моб на самому краї ще стоїть на блоці,
+     * навіть коли його ЦЕНТР уже над проваллям.
+     */
+    private double minGroundRetentionUnder(double x, double y, double z) {
+        Level level = this.mob.level();
+        double half = this.mob.getBbWidth() * 0.5;
+        double probeY = y - 0.500001;
+        double min = GapJumpPhysics.GROUND_FRICTION;
+        for (int i = 0; i < 5; i++) {
+            double px = i == 4 ? x : x + ((i & 1) == 0 ? -half : half);
+            double pz = i == 4 ? z : z + ((i & 2) == 0 ? -half : half);
+            BlockPos pos = BlockPos.containing(px, probeY, pz);
+            min = Math.min(min, GapJumpUtils.groundRetention(level.getBlockState(pos), level, pos, this.mob));
+        }
+        return min;
     }
 
     @Override

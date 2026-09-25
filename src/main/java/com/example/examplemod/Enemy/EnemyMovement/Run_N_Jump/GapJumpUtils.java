@@ -85,13 +85,6 @@ public final class GapJumpUtils {
     }
 
     /**
-     * Ванільний {@code SlimeBlock.stepOn}: щотіку, поки моб іде по слайму, горизонтальна швидкість множиться на
-     * {@code 0.4 + 0.2 * |vy|} (при ходьбі |vy| майже 0). Це НЕ властивість блока (як speedFactor), тож із
-     * самого блока його не прочитати - тому слайм (і нащадки {@code SlimeBlock} з модів) розпізнається окремо.
-     */
-    static final double SLIME_STEP_SLOWDOWN = 0.4;
-
-    /**
      * Теоретична максимальна дальність стрибка цього моба на повній швидкості (не поточній) для ЗВИЧАЙНОГО
      * блока під ногами. Дальність із урахуванням блока відриву - {@link #estimateMaxJumpRangeBlocks(Mob, double)}.
      */
@@ -107,6 +100,13 @@ public final class GapJumpUtils {
     public static int estimateMaxJumpRangeBlocks(Mob mob, double blockRangeFactor) {
         return (int) Math.floor(runSpeedSetpoint(mob) * RANGE_ESTIMATE_FACTOR * blockRangeFactor);
     }
+
+    /**
+     * Ванільний {@code SlimeBlock.stepOn}: щотіку, поки моб іде по слайму, горизонтальна швидкість множиться на
+     * {@code 0.4 + 0.2 * |vy|} (при ходьбі |vy| майже 0). Це НЕ властивість блока (як speedFactor), тож із
+     * самого блока його не прочитати - тому слайм (і нащадки {@code SlimeBlock} з модів) розпізнається окремо.
+     */
+    static final double SLIME_STEP_SLOWDOWN = 0.4;
 
     /**
      * Множник дальності стрибка для блока, З ЯКОГО моб відривається. Береться з САМОГО блока, тож працює й
@@ -130,11 +130,26 @@ public final class GapJumpUtils {
     public static double blockRangeFactor(BlockState floor, LevelReader level, BlockPos floorPos, Entity entity) {
         Block block = floor.getBlock();
         double friction = floor.getFriction(level, floorPos, entity);
-        double runSlowdown = block.getSpeedFactor();
-        if (block instanceof SlimeBlock) {
-            runSlowdown *= SLIME_STEP_SLOWDOWN;
-        }
-        return GapJumpPhysics.blockRangeFactor(friction, runSlowdown, block.getJumpFactor());
+        return GapJumpPhysics.blockRangeFactor(friction, runSlowdown(block), block.getJumpFactor());
+    }
+
+    /**
+     * Гальмо ходьби по блоку за тік: {@code speedFactor} (пісок душ, мед = 0.4; блоки з модів - будь-яке) і для
+     * слайма ще {@link #SLIME_STEP_SLOWDOWN}. 1.0 - без гальма.
+     */
+    private static double runSlowdown(Block block) {
+        double slowdown = block.getSpeedFactor();
+        return block instanceof SlimeBlock ? slowdown * SLIME_STEP_SLOWDOWN : slowdown;
+    }
+
+    /**
+     * Яку частку горизонтальної швидкості лишає ОДИН наземний тік на цьому блоці (ванільна фізика):
+     * {@code тертя * 0.91 * гальмо ходьби}. Звичайний блок - 0.546, лід - 0.89, слайм - 0.29, пісок душ і
+     * мед - 0.22. Береться з САМОГО блока (тертя через хук NeoForge), тож працює й для блоків з інших модів.
+     * Потрібно, щоб відрізняти гальмо блока від удару (див. {@code GapJumpAssistGoal.checkExternalImpulse}).
+     */
+    public static double groundRetention(BlockState floor, LevelReader level, BlockPos floorPos, Entity entity) {
+        return floor.getFriction(level, floorPos, entity) * GapJumpPhysics.AIR_FRICTION * runSlowdown(floor.getBlock());
     }
 
     /**
