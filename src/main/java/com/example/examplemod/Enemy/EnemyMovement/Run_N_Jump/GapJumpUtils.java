@@ -3,9 +3,15 @@ package com.example.examplemod.Enemy.EnemyMovement.Run_N_Jump;
 import com.example.examplemod.Enemy.EnemyBehavior.EnemyBreak_N_Build.EnemyBreak_N_BuildUtils;
 import com.example.examplemod.Enemy.EnemyBehavior.EnemyPursuit_N_Search.PursuitBehavior.PursuitEnemyBehavior;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.server.level.ServerLevel;
+import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.Mob;
 import net.minecraft.world.entity.ai.attributes.Attributes;
+import net.minecraft.world.level.LevelReader;
+import net.minecraft.world.level.block.Block;
+import net.minecraft.world.level.block.SlimeBlock;
+import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.pathfinder.Node;
 import net.minecraft.world.level.pathfinder.Path;
 import net.minecraft.world.phys.Vec3;
@@ -78,9 +84,74 @@ public final class GapJumpUtils {
         return speed * Run_N_JumpUtils.getRunSpeedModifier(mob);
     }
 
-    /** Теоретична максимальна дальність стрибка цього моба на повній швидкості (не поточній). */
+    /**
+     * Ванільний {@code SlimeBlock.stepOn}: щотіку, поки моб іде по слайму, горизонтальна швидкість множиться на
+     * {@code 0.4 + 0.2 * |vy|} (при ходьбі |vy| майже 0). Це НЕ властивість блока (як speedFactor), тож із
+     * самого блока його не прочитати - тому слайм (і нащадки {@code SlimeBlock} з модів) розпізнається окремо.
+     */
+    static final double SLIME_STEP_SLOWDOWN = 0.4;
+
+    /**
+     * Теоретична максимальна дальність стрибка цього моба на повній швидкості (не поточній) для ЗВИЧАЙНОГО
+     * блока під ногами. Дальність із урахуванням блока відриву - {@link #estimateMaxJumpRangeBlocks(Mob, double)}.
+     */
     public static int estimateMaxJumpRangeBlocks(Mob mob) {
         return (int) Math.floor(runSpeedSetpoint(mob) * RANGE_ESTIMATE_FACTOR);
+    }
+
+    /**
+     * Те саме, але для моба, що відривається з блока з множником дальності {@code blockRangeFactor}
+     * ({@link #blockRangeFactor}). Для звичайного блока множник рівно 1.0 - тоді результат збігається зі
+     * старим {@link #estimateMaxJumpRangeBlocks(Mob)}.
+     */
+    public static int estimateMaxJumpRangeBlocks(Mob mob, double blockRangeFactor) {
+        return (int) Math.floor(runSpeedSetpoint(mob) * RANGE_ESTIMATE_FACTOR * blockRangeFactor);
+    }
+
+    /**
+     * Множник дальності стрибка для блока, З ЯКОГО моб відривається. Береться з САМОГО блока, тож працює й
+     * для блоків з інших модів:
+     * <ul>
+     *   <li><b>тертя</b> - через {@code BlockState.getFriction(level, pos, entity)} (хук NeoForge, той самий
+     *       виклик, що й у ванільному {@code LivingEntity.travel}); блоки з модів перевизначають саме його;</li>
+     *   <li><b>speedFactor</b> - гальмо ходьби (пісок душ, мед = 0.4): у ванілі вони мають ЗВИЧАЙНЕ тертя 0.6,
+     *       а липкими їх робить саме це;</li>
+     *   <li><b>jumpFactor</b> - мед = 0.5 (стрибок нижчий і коротший); ванільну висоту стрибка ми не чіпаємо,
+     *       лише знаємо, що з цього блока далеко не долетіти.</li>
+     * </ul>
+     * Приблизні значення для ванільних блоків (детальніше - {@link GapJumpPhysics#blockRangeFactor}):
+     * звичайний 1.00, лід 1.45, блакитний лід 1.54, пісок душ 0.58, мед 0.43, слайм 0.34.
+     *
+     * @param floor    стан блока під ногами (блок відриву)
+     * @param level    світ (для хука тертя; у навігації - {@code mob.level()})
+     * @param floorPos позиція цього блока
+     * @param entity   моб, для якого рахуємо (передається в хук тертя; може бути {@code null})
+     */
+    public static double blockRangeFactor(BlockState floor, LevelReader level, BlockPos floorPos, Entity entity) {
+        Block block = floor.getBlock();
+        double friction = floor.getFriction(level, floorPos, entity);
+        double runSlowdown = block.getSpeedFactor();
+        if (block instanceof SlimeBlock) {
+            runSlowdown *= SLIME_STEP_SLOWDOWN;
+        }
+        return GapJumpPhysics.blockRangeFactor(friction, runSlowdown, block.getJumpFactor());
+    }
+
+    /**
+     * Рядок для логу: блок під краєм, його коефіцієнти, множник і дальність звідти. Лише діагностика.
+     */
+    public static String describeTakeoffBlock(Mob mob, BlockPos feet) {
+        BlockPos floorPos = feet.below();
+        BlockState floor = mob.level().getBlockState(floorPos);
+        Block block = floor.getBlock();
+        double factor = blockRangeFactor(floor, mob.level(), floorPos, mob);
+        return BuiltInRegistries.BLOCK.getKey(block)
+                + " | тертя=" + String.format("%.3f", floor.getFriction(mob.level(), floorPos, mob))
+                + " speedFactor=" + String.format("%.2f", block.getSpeedFactor())
+                + " jumpFactor=" + String.format("%.2f", block.getJumpFactor())
+                + (block instanceof SlimeBlock ? " (слайм: гальмо ходьби x" + SLIME_STEP_SLOWDOWN + ")" : "")
+                + " | множник дальності=" + String.format("%.3f", factor)
+                + " | макс. розрив звідси=" + estimateMaxJumpRangeBlocks(mob, factor);
     }
 
     /**

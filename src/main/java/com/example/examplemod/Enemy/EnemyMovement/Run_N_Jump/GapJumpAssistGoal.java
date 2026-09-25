@@ -285,7 +285,8 @@ public class GapJumpAssistGoal extends Goal {
                         + (int) Math.round(this.jump.landing().x - edgeCenter.x) + ", "
                         + (int) Math.round(this.jump.landing().z - edgeCenter.z) + ")"
                         + "\nРозрив: " + this.jump.gapBlocks() + " блок."
-                        + "\nОцінка дальності моба (макс. розрив): " + GapJumpUtils.estimateMaxJumpRangeBlocks(this.mob) + " блок."
+                        + "\nОцінка дальності моба (макс. розрив, звичайний блок): " + GapJumpUtils.estimateMaxJumpRangeBlocks(this.mob) + " блок."
+                        + "\nБлок відриву: " + GapJumpUtils.describeTakeoffBlock(this.mob, this.jump.edge())
                         + platformsNote(edgeCenter)
                         + "\nЦентр краю -> центр приземлення: " + String.format("%.3f", axisLength)
                         + "\nПоточна швидкість: " + String.format("%.3f", this.mob.getDeltaMovement().horizontalDistance())

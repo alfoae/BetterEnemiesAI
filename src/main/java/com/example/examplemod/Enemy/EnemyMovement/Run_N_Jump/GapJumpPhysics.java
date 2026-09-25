@@ -41,8 +41,9 @@ final class GapJumpPhysics {
     static final double AIR_FRICTION = 0.91;
 
     /**
-     * Тертя блока під ногами (0.6 — усі звичайні блоки). Лід/слайм/мед мають інше — модель тоді
-     * трохи неточна, але для звичайних платформ це саме так.
+     * Тертя ЗВИЧАЙНОГО блока під ногами (0.6). Константи польоту нижче ({@link #GROUND_FRICTION},
+     * {@code FLIGHT_FACTOR_*}) описують саме його. Як на ДАЛЬНІСТЬ ПЛАНУВАННЯ впливають лід/слайм/мед та
+     * блоки з інших модів (тертя, speedFactor, jumpFactor) - див. {@link #blockRangeFactor}.
      */
     static final double DEFAULT_BLOCK_FRICTION = 0.6;
 
@@ -313,5 +314,116 @@ final class GapJumpPhysics {
         boolean loseX = (dirX > 1.0E-6 && nextX >= limit) || (dirX < -1.0E-6 && -nextX >= limit);
         boolean loseZ = (dirZ > 1.0E-6 && nextZ >= limit) || (dirZ < -1.0E-6 && -nextZ >= limit);
         return loseX || loseZ;
+    }
+
+    // =====================================================================================
+    // БЛОК ПІД НОГАМИ: як тертя / speedFactor / jumpFactor міняють ДАЛЬНІСТЬ стрибка
+    // =====================================================================================
+    // Оцінка дальності (GapJumpUtils.estimateMaxJumpRangeBlocks) раніше була однаковою для будь-якого блока
+    // відриву - як для звичайного. Тепер вона множиться на blockRangeFactor: це відношення "скільки блоків
+    // пролетить моб, що біжить на повній швидкості ПО ЦЬОМУ блоку й відривається з нього" до того ж самого
+    // для ЗВИЧАЙНОГО блока (тертя 0.6, speedFactor 1, jumpFactor 1). Для звичайного блока множник РІВНО 1.0,
+    // тож там усе лишається як було. Фізика польоту й висота стрибка НЕ змінюються - це лише оцінка для
+    // ПОБУДОВИ ШЛЯХУ (див. GapJumpNodeEvaluator.getNeighbors), а не втручання в рух моба.
+    //
+    // Ванільні формули (LivingEntity.travel / getFrictionInfluencedSpeed / Entity.move), f = тертя блока:
+    //   * прискорення бігу за тік на землі:   a ~ 0.216 / f^3   (слизький блок - розганяє повільніше)
+    //   * швидкість після тіку лишається:     F = f * 0.91      (слизький блок - довше тримає швидкість)
+    //   * гальмо блока s (speedFactor, слайм): горизонтальна швидкість множиться на s щотіку на землі
+    //   * усталений зсув за тік при бігу:     d = a / (1 - s * F)
+    //   * політ: тік відриву ще НАЗЕМНИЙ (x F), далі повітря x 0.91; тривалість польоту задає вертикальна
+    //     швидкість 0.42 * jumpFactor (мед 0.5 -> 7 тіків замість 12)
+    //   * дальність = d * (сума горизонтальних множників польоту)
+    // Спрощення: гальмо блока в самому польоті не враховується (моб на відриві вже за межею блока), а розбіг
+    // вважається достатнім для усталеної швидкості - як і в "теоретичному максимумі" оцінки дальності.
+    /**
+     * Стеля множника: навіть найслизькіший блок не дає більше x2 до дальності.
+     */
+    static final double MAX_BLOCK_RANGE_FACTOR = 2.0;
+    /**
+     * Довіра до тертя блока: захист від сміття з чужих модів (0, NaN, >1 тощо).
+     */
+    private static final double MIN_BLOCK_FRICTION = 0.1;
+    private static final double MAX_BLOCK_FRICTION = 1.0;
+    /**
+     * Гальмо блока (speedFactor) вище 1 теж можливе (блок-прискорювач із моду), але не безмежне.
+     */
+    private static final double MAX_RUN_SLOWDOWN = 2.0;
+    private static final double MAX_JUMP_FACTOR = 4.0;
+    /**
+     * Захист від ділення на ~0, якщо {@code s * F} наближається до 1.
+     */
+    private static final double MIN_RUN_DENOMINATOR = 0.02;
+    /**
+     * Допуск, у межах якого блок вважається ЗВИЧАЙНИМ (float 0.6F != 0.6 у double).
+     */
+    private static final double NEUTRAL_EPSILON = 1.0E-4;
+    /**
+     * Дальність для звичайного блока в тих самих відносних одиницях - знаменник множника.
+     */
+    private static final double ORDINARY_BLOCK_RANGE = blockJumpRange(DEFAULT_BLOCK_FRICTION, 1.0, 1.0);
+
+    /**
+     * Множник до оцінки дальності стрибка для моба, що відривається з блока з такими властивостями.
+     * {@code 1.0} - звичайний блок (оцінка не змінюється), {@code <1} - блок ближчий (слайм, пісок душ, мед),
+     * {@code >1} - далі (лід). Значення береться з САМОГО блока, тож працює й для блоків з інших модів.
+     *
+     * @param blockFriction тертя блока ({@code BlockState.getFriction}); 0.6 - звичайний, 0.98 - лід
+     * @param runSlowdown   гальмо ходьби по блоку за тік: {@code speedFactor} (пісок душ / мед = 0.4),
+     *                      для слайма ще й {@code SlimeBlock.stepOn} (x0.4); 1.0 - без гальма
+     * @param jumpFactor    {@code Block.getJumpFactor()}: мед = 0.5, інакше 1.0
+     */
+    static double blockRangeFactor(double blockFriction, double runSlowdown, double jumpFactor) {
+        if (!Double.isFinite(blockFriction) || !Double.isFinite(runSlowdown) || !Double.isFinite(jumpFactor)
+                || blockFriction <= 0.0) {
+            return 1.0; // некоректні значення з чужого моду - поводимось як зі звичайним блоком
+        }
+        if (Math.abs(blockFriction - DEFAULT_BLOCK_FRICTION) < NEUTRAL_EPSILON
+                && Math.abs(runSlowdown - 1.0) < NEUTRAL_EPSILON
+                && Math.abs(jumpFactor - 1.0) < NEUTRAL_EPSILON) {
+            return 1.0; // звичайний блок: нічого не міняємо, без жодних обчислень
+        }
+        double friction = clamp(blockFriction, MIN_BLOCK_FRICTION, MAX_BLOCK_FRICTION);
+        double slowdown = clamp(runSlowdown, 0.0, MAX_RUN_SLOWDOWN);
+        double jump = clamp(jumpFactor, 0.0, MAX_JUMP_FACTOR);
+        return clamp(blockJumpRange(friction, slowdown, jump) / ORDINARY_BLOCK_RANGE, 0.0, MAX_BLOCK_RANGE_FACTOR);
+    }
+
+    /**
+     * Відносна дальність (одиниця - прискорення звичайного блока): усталений зсув за тік на блоці, помножений
+     * на суму горизонтальних множників польоту після відриву з нього.
+     */
+    private static double blockJumpRange(double friction, double runSlowdown, double jumpFactor) {
+        double retention = friction * AIR_FRICTION;                        // F: що лишається від швидкості за тік
+        double accel = Math.pow(DEFAULT_BLOCK_FRICTION / friction, 3.0);   // a відносно звичайного (0.216 / f^3)
+        double denominator = Math.max(1.0 - runSlowdown * retention, MIN_RUN_DENOMINATOR);
+        double steadyStep = accel / denominator;                           // d = a / (1 - s * F)
+        return steadyStep * flightSum(retention, JUMP_VERTICAL_VELOCITY * jumpFactor);
+    }
+
+    /**
+     * Сума горизонтальних множників польоту: тік відриву = 1, після нього швидкість множиться на
+     * {@code takeoffRetention} (тертя блока відриву), далі на 0.91 за тік, доки моб не торкнеться рівня відриву.
+     * Той самий цикл, що й у статичному блоці цього класу, тільки з довільною вертикальною швидкістю відриву.
+     */
+    private static double flightSum(double takeoffRetention, double jumpVelocity) {
+        double y = 0.0;
+        double vy = jumpVelocity;
+        double factor = 1.0;
+        double sum = 0.0;
+        for (int tick = 1; tick <= 60; tick++) {
+            y += vy;
+            sum += factor;
+            factor *= (tick == 1 ? takeoffRetention : AIR_FRICTION);
+            vy = (vy - GRAVITY_PER_TICK) * VERTICAL_DRAG_PER_TICK;
+            if (tick > 1 && y <= 0.0) {
+                break;
+            }
+        }
+        return sum;
+    }
+
+    private static double clamp(double value, double min, double max) {
+        return Math.max(min, Math.min(max, value));
     }
 }

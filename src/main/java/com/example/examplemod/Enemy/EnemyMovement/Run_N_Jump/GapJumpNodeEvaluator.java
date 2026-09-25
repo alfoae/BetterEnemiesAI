@@ -47,6 +47,12 @@ import net.minecraft.world.level.pathfinder.WalkNodeEvaluator;
  * кут, (1,1), стрибком не вважається (відстань 1.41 < 1.5) — це ванільний діагональний крок; 0.6-ширний
  * хітбокс моба перекриває обидва блоки біля спільного кута, тож там і не потрібно стрибати.
  * <p>
+ * <b>v3 — дальність залежить від блока відриву.</b> Максимальний розрив рахується для КОЖНОГО вузла окремо за
+ * властивостями блока під ним ({@link GapJumpUtils#blockRangeFactor}: тертя, speedFactor, jumpFactor): з льоду моб
+ * планує стрибки далі, зі слайма / піску душ / меду - ближче (повільному мобу з меду стрибків може не лишитись
+ * зовсім). Висота й фізика
+ * стрибка не змінюються - це лише те, які ребра потрапляють у граф. На звичайних блоках усе як раніше.
+ * <p>
  * ПРО ПРОДУКТИВНІСТЬ: getNeighbors викликається на КОЖЕН вузол під час КОЖНОГО пошуку шляху, тож
  * додатковий скан не повинен бути безумовним. Ванільний WalkNodeEvaluator дає максимум 8 сусідів
  * (4 сторони + 4 діагоналі); якщо вийшли всі 8 — довкола суцільна підлога, стрибок звідси ніколи
@@ -95,12 +101,15 @@ public class GapJumpNodeEvaluator extends WalkNodeEvaluator {
         if (count >= ALL_NORMAL_NEIGHBORS) {
             return count; // повністю відкрита клітинка - тут стрибок ніколи не потрібен, не скануємо
         }
-        int maxGap = GapJumpUtils.estimateMaxJumpRangeBlocks(this.mob);
+        BlockPos origin = new BlockPos(node.x, node.y, node.z);
+        // Дальність залежить від блока, З ЯКОГО моб відривається (тертя / speedFactor / jumpFactor): лід - далі,
+        // слайм, пісок душ, мед - ближче. Тому рахуємо її тут, для КОЖНОГО вузла під час побудови шляху, а не
+        // одним числом на всього моба й не перед самим стрибком.
+        int maxGap = estimateMaxGapFrom(origin);
         if (maxGap < 1) {
-            return count;
+            return count; // з цього блока (дуже липкого для цього моба) стрибнути не вдасться - стрибкових ребер звідси нема
         }
 
-        BlockPos origin = new BlockPos(node.x, node.y, node.z);
         byte[] frontCache = new byte[9]; // стан 8 клітинок перед краєм (прохідна/провалля/заблокована); ключ (dx+1)*3+(dz+1)
         for (GapJumpRays.Ray ray : GapJumpRays.forMaxGap(maxGap)) {
             if (count >= nodes.length) {
@@ -109,6 +118,22 @@ public class GapJumpNodeEvaluator extends WalkNodeEvaluator {
             count = tryRay(nodes, count, origin, ray, frontCache);
         }
         return count;
+    }
+
+    /**
+     * Скільки блоків розриву моб здатен перестрибнути, відриваючись саме з цього вузла. Блок відриву - підлога
+     * ПІД вузлом (той самий, на якому моб стоятиме на краю); його коефіцієнти беруться з самого блока (тертя через
+     * хук NeoForge, тож і для блоків з інших модів), див. {@link GapJumpUtils#blockRangeFactor}. Для звичайного
+     * блока множник рівно 1.0 - результат такий самий, як був.
+     */
+    private int estimateMaxGapFrom(BlockPos origin) {
+        double blockFactor = 1.0;
+        BlockPos floorPos = origin.below();
+        BlockState floor = getBlockStateAt(floorPos);
+        if (floor != null && this.mob != null) {
+            blockFactor = GapJumpUtils.blockRangeFactor(floor, this.mob.level(), floorPos, this.mob);
+        }
+        return GapJumpUtils.estimateMaxJumpRangeBlocks(this.mob, blockFactor);
     }
 
     private int tryRay(Node[] nodes, int count, BlockPos origin, GapJumpRays.Ray ray, byte[] frontCache) {
