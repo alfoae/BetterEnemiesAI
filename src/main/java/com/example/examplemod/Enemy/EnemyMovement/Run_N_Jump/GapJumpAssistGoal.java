@@ -516,11 +516,22 @@ public class GapJumpAssistGoal extends Goal {
     }
 
     /**
-     * Відрив. Стрибок завжди ВАНІЛЬНИЙ, як натискання пробілу: підйом 0.42, 12 тіків, висота ~1.25 блока -
-     * незалежно від відстані. Горизонталь рівномірна: {@code відстань до центру landing / 12} за тік (далі щотіку
-     * {@link #controlFlight} це підтримує й підганяє). Довгий стрибок - ~0.29 бл/тік (~5.8 бл/с, як спринт
-     * гравця), короткий - повільніший ("швидкість ходьби"): так само, як гравець відпускає спринт чи тисне S,
-     * щоб не перелетіти. Швидкість задає ДОВЖИНА стрибка, а не максимальна швидкість моба.
+     * Чи схожа зміна швидкості на ТЕРТЯ: та сама пряма, частка в {@code [minRatio, IMPULSE_MAX_RATIO]}.
+     */
+    private static boolean withinFrictionEnvelope(double ratio, double lateral, double setLen, double minRatio) {
+        return ratio >= minRatio && ratio <= IMPULSE_MAX_RATIO
+                && Math.abs(lateral) <= IMPULSE_LATERAL_FRACTION * setLen + IMPULSE_LATERAL_MIN_ABS;
+    }
+
+    /**
+     * Відрив. Стрибок завжди ВАНІЛЬНИЙ, як натискання пробілу: підйом {@code 0.42*jumpFactor}, висота
+     * ~1.25 блока (менше з нижчим jumpFactor) - незалежно від відстані. Тривалість польоту (і, відповідно,
+     * рівномірна горизонтальна швидкість "відстань до центру landing / тіків") залежить від Δy ЦЬОГО
+     * стрибка: рівно - 12 тіків (як і завжди), вгору - НАБАГАТО менше (вузьке вікно на підйом), вниз -
+     * більше (довше падати нижче). Далі щотіку {@link #controlFlight} це підтримує й підганяє. Довгий
+     * рівний стрибок - ~0.29 бл/тік (~5.8 бл/с, як спринт гравця), короткий - повільніший ("швидкість
+     * ходьби"): так само, як гравець відпускає спринт чи тисне S, щоб не перелетіти. Швидкість задає
+     * ДОВЖИНА стрибка (і Δy), а не максимальна швидкість моба.
      * Відстань беремо від ЖИВОЇ позиції до центру landing (а не від округленого gapBlocks), тож моб приземляється
      * рівно на центр незалежно від того, де саме на краю його "піймали".
      */
@@ -530,7 +541,18 @@ public class GapJumpAssistGoal extends Goal {
         double realDistance = Math.sqrt(dx * dx + dz * dz);
         double planDistance = Math.min(realDistance, segmentLength() + MAX_LAUNCH_EXTRA_BLOCKS);
 
-        int airtime = GapJumpPhysics.AIRTIME_TICKS;
+        // Δy цього стрибка (landing.y - блок відриву): 0 - рівно, +1 - вгору, -1 - вниз (наразі - GapJumpPhysics.
+        // JUMP_UP_LIMIT_BLOCKS/JUMP_DOWN_LIMIT_BLOCKS). jumpFactor блока відриву впливає на ТЕ, ЯКОЇ висоти
+        // реально досягне стрибок (мед - нижче), тож і на тривалість польоту для Δy>0.
+        int deltaYBlocks = (int) Math.round(landing.y - this.jump.edge().getY());
+        float takeoffJumpFactor = this.mob.level().getBlockState(this.jump.edge().below()).getBlock().getJumpFactor();
+        int airtime = GapJumpPhysics.naturalAirtime(deltaYBlocks, takeoffJumpFactor);
+        if (airtime <= 0) {
+            // Не мало статись - граф уже відсіяв недосяжні Δy для цього блока (GapJumpNodeEvaluator), але світ
+            // міг змінитись між побудовою шляху й виконанням (хтось зламав/поставив блок). Рівний запасний
+            // варіант - керування все одно щотіку підганяє (controlFlight), а не сліпо летить по плану.
+            airtime = GapJumpPhysics.AIRTIME_TICKS;
+        }
         double perTick = planDistance / airtime;
         this.lastFlightStep = perTick;
 
@@ -563,6 +585,7 @@ public class GapJumpAssistGoal extends Goal {
                         + " | pos=" + formatVec(this.mob.position())
                         + " | edge=" + this.jump.edge()
                         + " | landing=" + formatVec(landing)
+                        + " | Δy=" + (deltaYBlocks > 0 ? "+" + deltaYBlocks + " (вгору)" : deltaYBlocks < 0 ? deltaYBlocks + " (вниз)" : "0 (рівно)")
                         + " | along=" + String.format("%+.3f", along)
                         + " (край блока = +" + String.format("%.3f", front) + ")"
                         + " | across=" + String.format("%.3f", across)
@@ -611,6 +634,9 @@ public class GapJumpAssistGoal extends Goal {
 
         double jumpVy = GapJumpPhysics.JUMP_VERTICAL_VELOCITY;
         int ticks = GapJumpPhysics.remainingAirTicks(heightAbove, jumpVy);
+        if (ticks <= 0) {
+            return false; // у межах RESCUE_MAX_DROP такого практично не буває, але про всяк випадок
+        }
         double perTick = Math.min(dist, segmentLength() + MAX_LAUNCH_EXTRA_BLOCKS) / ticks;
 
         this.mob.setSprinting(false);
@@ -630,11 +656,74 @@ public class GapJumpAssistGoal extends Goal {
     }
 
     /**
-     * Чи схожа зміна швидкості на ТЕРТЯ: та сама пряма, частка в {@code [minRatio, IMPULSE_MAX_RATIO]}.
+     * Щотіку в польоті: горизонтальна швидкість = відстань до центру landing / тіків до приземлення.
+     * <p>
+     * Це замкнений контур: на кожному тіку ми знаємо, де моб (позиція, висота, вертикальна швидкість), тож
+     * тіків до торкання рівня landing ({@link GapJumpPhysics#remainingAirTicks}) і, відповідно, який
+     * крок за тік приведе його рівно в центр. Наслідки:
+     * <ul>
+     *   <li>політ РІВНОМІРНИЙ (замість "ривок + затухання x0.91"), моб приземляється на швидкості бігу;</li>
+     *   <li>точність не залежить від тертя блока під ногами, чи виконався стрибок у той самий тік тощо -
+     *       модель відриву більше нічого не гарантує, а лише задає перший крок;</li>
+     *   <li>бічні збурення (штовхнули) гасяться самі.</li>
+     * </ul>
+     * Вертикаль НЕ чіпаємо (ванільна дуга) - крім аварійного випадку: якщо крок вийшов би більшим за радіус опори
+     * блока, політ подовжується "зависанням" (див. {@link GapJumpPhysics#maxFlightStep}).
      */
-    private static boolean withinFrictionEnvelope(double ratio, double lateral, double setLen, double minRatio) {
-        return ratio >= minRatio && ratio <= IMPULSE_MAX_RATIO
-                && Math.abs(lateral) <= IMPULSE_LATERAL_FRACTION * setLen + IMPULSE_LATERAL_MIN_ABS;
+    private void controlFlight() {
+        Vec3 landing = this.jump.landing();
+        Vec3 vel = this.mob.getDeltaMovement();
+
+        double vy = vel.y;
+
+        // TODO(Y): landing.y - ЦІЛА координата вузла, а не реальна висота підлоги (пісок душ на 0.125 нижче, плита на
+        // 0.5 тощо), тож heightAbove/remainingAirTicks трохи хибять. Повний список блоків - у GapJumpNodeEvaluator.
+        double heightAbove = this.mob.getY() - landing.y;
+        double dx = landing.x - this.mob.getX();
+        double dz = landing.z - this.mob.getZ();
+        double dist = Math.sqrt(dx * dx + dz * dz);
+        if (dist < 1.0E-6) {
+            return;
+        }
+        // Δy: для стрибка ВГОРУ heightAbove СТАРТУЄ від'ємним (ціль ще вища за моба) - це нормальний стан
+        // у середині польоту, не "промах". Раніше тут була проста межа heightAbove < -0.05, яка мала на увазі
+        // лише рівний/спадний стрибок (промахнувся повз платформу, впав нижче за неї). Тепер про "промах" каже
+        // сама фізика: remainingAirTicks поверне -1, тільки якщо рівня landing ЗА ВЕСЬ ПОЛІТ уже не досягти
+        // (для рівного/спадного - впав нижче й не підскочить назад; для висхідного - забракло висоти) - в обох
+        // випадках керувати нічим, хай моб падає за ванільною фізикою.
+        int ticks = GapJumpPhysics.remainingAirTicks(heightAbove, vy);
+        if (ticks <= 0) {
+            return;
+        }
+
+        double planDist = Math.min(dist, segmentLength() + MAX_LAUNCH_EXTRA_BLOCKS);
+
+        // Крок за тік не має перевищувати радіус опори блока приземлення (див. maxFlightStep): інакше на
+        // тіку торкання хітбокс іще не над блоком, і моб пролітає повз. Зазвичай план це вже гарантує; тут
+        // лише страховка (запізніле керування, збурення): якщо тіків лишилось замало - трохи зависаємо.
+        double maxStep = GapJumpPhysics.maxFlightStep(this.mob.getBbWidth() * 0.5);
+        int needed = (int) Math.ceil(planDist / maxStep - 1.0E-9);
+        if (needed > ticks) {
+            double extendedVy = GapJumpPhysics.verticalVelocityForRemainingTicks(heightAbove, vy, needed);
+            int extendedTicks = GapJumpPhysics.remainingAirTicks(heightAbove, extendedVy);
+            if (extendedTicks > 0) {
+                vy = extendedVy;
+                ticks = extendedTicks;
+            } // інакше не вдалось продовжити політ (рідкість) - летимо з тим, що вже порахували вище
+        }
+
+        double perTick = planDist / ticks;
+        this.mob.setDeltaMovement(dx / dist * perTick, vy, dz / dist * perTick);
+        recordSetVelocity(dx / dist * perTick, dz / dist * perTick);
+    }
+
+    private void recordSetVelocity(double vx, double vz) {
+        this.lastSetX = vx;
+        this.lastSetZ = vz;
+        this.lastSetPosX = this.mob.getX();
+        this.lastSetPosY = this.mob.getY();
+        this.lastSetPosZ = this.mob.getZ();
+        this.hasLastSet = true;
     }
 
     /**
@@ -667,65 +756,6 @@ public class GapJumpAssistGoal extends Goal {
         this.jump = next;
         beginSegment(true);
         return true;
-    }
-
-    /**
-     * Щотіку в польоті: горизонтальна швидкість = відстань до центру landing / тіків до приземлення.
-     * <p>
-     * Це замкнений контур: на кожному тіку ми знаємо, де моб (позиція, висота, вертикальна швидкість), тож
-     * тіків до торкання рівня landing ({@link GapJumpPhysics#remainingAirTicks}) і, відповідно, який
-     * крок за тік приведе його рівно в центр. Наслідки:
-     * <ul>
-     *   <li>політ РІВНОМІРНИЙ (замість "ривок + затухання x0.91"), моб приземляється на швидкості бігу;</li>
-     *   <li>точність не залежить від тертя блока під ногами, чи виконався стрибок у той самий тік тощо -
-     *       модель відриву більше нічого не гарантує, а лише задає перший крок;</li>
-     *   <li>бічні збурення (штовхнули) гасяться самі.</li>
-     * </ul>
-     * Вертикаль НЕ чіпаємо (ванільна дуга) - крім аварійного випадку: якщо крок вийшов би більшим за радіус опори
-     * блока, політ подовжується "зависанням" (див. {@link GapJumpPhysics#maxFlightStep}).
-     */
-    private void controlFlight() {
-        Vec3 landing = this.jump.landing();
-        Vec3 vel = this.mob.getDeltaMovement();
-
-        double vy = vel.y;
-
-        // TODO(Y): landing.y - ЦІЛА координата вузла, а не реальна висота підлоги (пісок душ на 0.125 нижче, плита на
-        // 0.5 тощо), тож heightAbove/remainingAirTicks трохи хибять. Повний список блоків - у GapJumpNodeEvaluator.
-        double heightAbove = this.mob.getY() - landing.y;
-        double dx = landing.x - this.mob.getX();
-        double dz = landing.z - this.mob.getZ();
-        double dist = Math.sqrt(dx * dx + dz * dz);
-        // Моб уже нижче рівня landing (промахнувся повз платформу) - керувати нічим, хай падає за фізикою.
-        if (dist < 1.0E-6 || heightAbove < -0.05) {
-            return;
-        }
-
-        double planDist = Math.min(dist, segmentLength() + MAX_LAUNCH_EXTRA_BLOCKS);
-        int ticks = GapJumpPhysics.remainingAirTicks(heightAbove, vy);
-
-        // Крок за тік не має перевищувати радіус опори блока приземлення (див. maxFlightStep): інакше на
-        // тіку торкання хітбокс іще не над блоком, і моб пролітає повз. Зазвичай план це вже гарантує; тут
-        // лише страховка (запізніле керування, збурення): якщо тіків лишилось замало - трохи зависаємо.
-        double maxStep = GapJumpPhysics.maxFlightStep(this.mob.getBbWidth() * 0.5);
-        int needed = (int) Math.ceil(planDist / maxStep - 1.0E-9);
-        if (needed > ticks) {
-            vy = GapJumpPhysics.verticalVelocityForRemainingTicks(heightAbove, vy, needed);
-            ticks = GapJumpPhysics.remainingAirTicks(heightAbove, vy);
-        }
-
-        double perTick = planDist / ticks;
-        this.mob.setDeltaMovement(dx / dist * perTick, vy, dz / dist * perTick);
-        recordSetVelocity(dx / dist * perTick, dz / dist * perTick);
-    }
-
-    private void recordSetVelocity(double vx, double vz) {
-        this.lastSetX = vx;
-        this.lastSetZ = vz;
-        this.lastSetPosX = this.mob.getX();
-        this.lastSetPosY = this.mob.getY();
-        this.lastSetPosZ = this.mob.getZ();
-        this.hasLastSet = true;
     }
 
     /**

@@ -27,6 +27,14 @@ package com.example.examplemod.Enemy.EnemyMovement.Run_N_Jump;
  * {@code distance = s * FLIGHT_FACTOR_TO_LANDING} (≈ 4.917), а не {@code s * 10 * 0.85 = s * 8.5}, як
  * було в старій моделі (та вважала швидкість сталою весь політ і не знала ні про тертя відриву,
  * ні про 0.91 у повітрі — тому переоцінювала дальність майже вдвічі).
+ * <p>
+ * <b>Δy (сходинки).</b> Усе вище - опис приземлення НА ТОМУ САМОМУ рівні (Δy=0, N=12). Для приземлення
+ * вище/нижче рівня відриву формули узагальнені під довільний цілий Δy: {@link #naturalAirtime} (кількість
+ * тіків), {@link #remainingAirTicks} (те саме, але з живих координат під час польоту) і
+ * {@link #blockRangeFactor} (дальність). Вгору - тіків МЕНШЕ (вузьке вікно, ловимо момент, коли моб ще
+ * ПІДНІМАЄТЬСЯ до потрібної висоти, а не спускається до неї), і недосяжно, якщо апекс стрибка (≈1.25 блока
+ * при jumpFactor=1, менше з нижчим) нижчий за Δy. Вниз - тіків більше (довше падати). {@link #AIRTIME_TICKS}
+ * і {@code FLIGHT_FACTOR_*} лишаються як були - це просто {@code naturalAirtime(0, 1.0)} і супутні суми.
  */
 final class GapJumpPhysics {
 
@@ -88,6 +96,19 @@ final class GapJumpPhysics {
         FLIGHT_FACTOR_BEFORE_TOUCHDOWN = sumBefore;
         FLIGHT_FACTOR_TO_LANDING = sumTotal;
     }
+
+    // =====================================================================================
+    // Δy: СХОДИНКИ (стрибок одночасно вгору/вниз і через розрив)
+    // =====================================================================================
+    // Ліміт наскільки поточна версія готова ПРОПОНУВАТИ стрибки в графі шляхів (не плутати з тим, ЩО ВМІЄ
+    // порахувати фізика нижче - вона генералізована під БУДЬ-ЯКИЙ цілий Δy). Підняти WALKUP чи WALKDOWN пізніше
+    // (зілля стрибка вище, довші спуски) - зміна одного числа тут, більше нічого чіпати не треба.
+    static final int JUMP_UP_LIMIT_BLOCKS = 1;
+    static final int JUMP_DOWN_LIMIT_BLOCKS = 1;
+    /**
+     * Стеля множника: навіть найслизькіший блок не дає більше x2 до дальності.
+     */
+    static final double MAX_BLOCK_RANGE_FACTOR = 2.0;
 
     /**
      * Стартова горизонтальна швидкість (deltaMovement перед тіком відриву, БЕЗ sprint-поштовху),
@@ -164,23 +185,8 @@ final class GapJumpPhysics {
     static double flightDistance(double launchSpeed) {
         return launchSpeed * FLIGHT_FACTOR_TO_LANDING;
     }
-
-    /**
-     * Скільки тіків лишилось до торкання рівня приземлення з поточного стану (включно з поточним
-     * тіком). Ті самі формули, що й {@link #remainingAirFactor}: рух, потім гравітація й опір.
-     */
-    static int remainingAirTicks(double heightAboveLanding, double verticalVelocity) {
-        double y = heightAboveLanding;
-        double vy = verticalVelocity;
-        for (int tick = 1; tick <= 60; tick++) {
-            y += vy;
-            vy = (vy - GRAVITY_PER_TICK) * VERTICAL_DRAG_PER_TICK;
-            if (y <= 0.0) {
-                return tick;
-            }
-        }
-        return 60;
-    }
+    /** Гальмо блока (speedFactor) вище 1 теж можливе (блок-прискорювач із моду), але не безмежне. */
+    private static final double MAX_RUN_SLOWDOWN = 2.0;
 
     // =====================================================================================
     // КОЛИ ВІДРИВАТИСЬ (геометрія краю) — для БУДЬ-ЯКОГО напрямку стрибка
@@ -336,91 +342,152 @@ final class GapJumpPhysics {
     //   * дальність = d * (сума горизонтальних множників польоту)
     // Спрощення: гальмо блока в самому польоті не враховується (моб на відриві вже за межею блока), а розбіг
     // вважається достатнім для усталеної швидкості - як і в "теоретичному максимумі" оцінки дальності.
-    /**
-     * Стеля множника: навіть найслизькіший блок не дає більше x2 до дальності.
-     */
-    static final double MAX_BLOCK_RANGE_FACTOR = 2.0;
+
     /**
      * Довіра до тертя блока: захист від сміття з чужих модів (0, NaN, >1 тощо).
      */
     private static final double MIN_BLOCK_FRICTION = 0.1;
     private static final double MAX_BLOCK_FRICTION = 1.0;
-    /**
-     * Гальмо блока (speedFactor) вище 1 теж можливе (блок-прискорювач із моду), але не безмежне.
-     */
-    private static final double MAX_RUN_SLOWDOWN = 2.0;
-    private static final double MAX_JUMP_FACTOR = 4.0;
-    /**
-     * Захист від ділення на ~0, якщо {@code s * F} наближається до 1.
-     */
+    /** Захист від ділення на ~0, якщо {@code s * F} наближається до 1. */
     private static final double MIN_RUN_DENOMINATOR = 0.02;
-    /**
-     * Допуск, у межах якого блок вважається ЗВИЧАЙНИМ (float 0.6F != 0.6 у double).
-     */
+    private static final double MAX_JUMP_FACTOR = 4.0;
+    /** Допуск, у межах якого блок вважається ЗВИЧАЙНИМ (float 0.6F != 0.6 у double). */
     private static final double NEUTRAL_EPSILON = 1.0E-4;
     /**
-     * Дальність для звичайного блока в тих самих відносних одиницях - знаменник множника.
+     * Дальність для звичайного блока НА РІВНОМУ (Δy=0) в тих самих відносних одиницях - знаменник УСІХ множників,
+     * і рівних, і вгору/вниз: усе завжди відносно "звичайний блок, рівний стрибок" = 1.0.
      */
-    private static final double ORDINARY_BLOCK_RANGE = blockJumpRange(DEFAULT_BLOCK_FRICTION, 1.0, 1.0);
+    private static final double ORDINARY_BLOCK_RANGE = blockJumpRange(DEFAULT_BLOCK_FRICTION, 1.0, 1.0, 0.0);
 
     /**
-     * Множник до оцінки дальності стрибка для моба, що відривається з блока з такими властивостями.
-     * {@code 1.0} - звичайний блок (оцінка не змінюється), {@code <1} - блок ближчий (слайм, пісок душ, мед),
-     * {@code >1} - далі (лід). Значення береться з САМОГО блока, тож працює й для блоків з інших модів.
+     * Скільки тіків триває ПРИРОДНИЙ (ванільний, підйом {@code 0.42*jumpFactor}) політ до перетину висоти
+     * {@code deltaY} відносно точки відриву. {@code deltaY=0} - рівний стрибок ({@code == AIRTIME_TICKS} при
+     * {@code jumpFactor=1}); {@code deltaY>0} - вгору (шукаємо перший тік, коли моб ПІДНЯВСЯ до потрібної
+     * висоти - так само, як ванільна колізія ловить гравця на верх вищого блока в момент дотику знизу);
+     * {@code deltaY<0} - вниз (як і раніше: перший тік, коли моб ОПУСТИВСЯ до потрібної висоти).
+     * <p>
+     * Тертя/speedFactor блока відриву тут НЕ беруть участі - вертикаль від них не залежить, лише від
+     * {@code jumpFactor} (початкова вертикальна швидкість) і ванільних гравітації/опору (фіксовані).
+     *
+     * @return тіків, або {@code -1}, якщо апекс нижчий за {@code deltaY} (мед і подібні дуже низькі
+     * стрибки з дуже похилими jumpFactor - вгору на повний блок фізично не дістати).
+     */
+    static int naturalAirtime(double deltaY, double jumpFactor) {
+        double y = 0.0;
+        double vy = JUMP_VERTICAL_VELOCITY * jumpFactor;
+        boolean ascending = deltaY > 0.0;
+        for (int tick = 1; tick <= 60; tick++) {
+            y += vy;
+            vy = (vy - GRAVITY_PER_TICK) * VERTICAL_DRAG_PER_TICK;
+            boolean crossed = ascending ? y >= deltaY : (tick > 1 && y <= deltaY);
+            if (crossed) {
+                return tick;
+            }
+        }
+        return -1;
+    }
+
+    /**
+     * Скільки тіків лишилось до торкання рівня приземлення з поточного стану (включно з поточним
+     * тіком). Ті самі формули, що й {@link #remainingAirFactor}: рух, потім гравітація й опір.
+     * <p>
+     * <b>Δy: вгору й вниз.</b> {@code heightAboveLanding} — це "наскільки моб ЗАРАЗ вище за рівень
+     * приземлення" (від'ємне — ціль ще ВИЩЕ моба, тобто це стрибок ВГОРУ і потрібного рівня ще не
+     * досягнуто). Напрямок пошуку визначає ЗНАК на вході: {@code < 0} — чекаємо, поки моб підніметься
+     * ДО цілі ({@code y >= 0}, як гравець застрибує на вищий блок — приземлення ловиться в перший
+     * момент дотику знизу); {@code >= 0} — як і раніше, чекаємо, поки моб ОПУСТИТЬСЯ до цілі
+     * ({@code y <= 0}: рівний стрибок чи стрибок ВНИЗ). Не залежить від того, ЯКИЙ це стрибок за
+     * планом — лише від того, де моб ЗАРАЗ відносно landing, тож коректно обробляє і "проскочив повз".
+     *
+     * @return тіків до приземлення, або {@code -1}, якщо в межах природної дуги (60 тіків - явний
+     *     запобіжник) моб рівня приземлення не досягає (найчастіше — стрибок ВГОРУ, для якого забракло
+     *     висоти: низький {@code jumpFactor} блока відриву чи Δy більший за апекс стрибка).
+     */
+    static int remainingAirTicks(double heightAboveLanding, double verticalVelocity) {
+        double y = heightAboveLanding;
+        double vy = verticalVelocity;
+        boolean ascending = y < 0.0;
+        for (int tick = 1; tick <= 60; tick++) {
+            y += vy;
+            vy = (vy - GRAVITY_PER_TICK) * VERTICAL_DRAG_PER_TICK;
+            if (ascending ? y >= 0.0 : y <= 0.0) {
+                return tick;
+            }
+        }
+        return -1;
+    }
+
+    /**
+     * Множник до оцінки дальності стрибка для моба, що відривається з блока з такими властивостями, ТАКОГО Δy
+     * (вгору/вниз/рівно). {@code 1.0} - звичайний блок І рівний стрибок (нічого не змінюється), {@code <1} -
+     * ближче (слайм/пісок душ/мед; вгору - ЗАВЖДИ менше 1, навіть на звичайному блоці - фізика: вікно для
+     * підйому коротше за рівний політ), {@code >1} - далі (лід; вниз - трохи далі навіть на звичайному блоці).
+     * Значення блока беруться з САМОГО блока, тож працює й для блоків з інших модів.
      *
      * @param blockFriction тертя блока ({@code BlockState.getFriction}); 0.6 - звичайний, 0.98 - лід
      * @param runSlowdown   гальмо ходьби по блоку за тік: {@code speedFactor} (пісок душ / мед = 0.4),
      *                      для слайма ще й {@code SlimeBlock.stepOn} (x0.4); 1.0 - без гальма
      * @param jumpFactor    {@code Block.getJumpFactor()}: мед = 0.5, інакше 1.0
+     * @param deltaY        landing.y - edge.y: {@code 0} рівно, {@code >0} вгору, {@code <0} вниз
+     * @return множник, або {@code 0.0}, якщо з цього блока на таку висоту не піднятись (низький jumpFactor,
+     *     Δy більший за апекс стрибка - наприклад, мед вгору)
      */
-    static double blockRangeFactor(double blockFriction, double runSlowdown, double jumpFactor) {
+    static double blockRangeFactor(double blockFriction, double runSlowdown, double jumpFactor, double deltaY) {
         if (!Double.isFinite(blockFriction) || !Double.isFinite(runSlowdown) || !Double.isFinite(jumpFactor)
-                || blockFriction <= 0.0) {
-            return 1.0; // некоректні значення з чужого моду - поводимось як зі звичайним блоком
+                || !Double.isFinite(deltaY) || blockFriction <= 0.0) {
+            return deltaY == 0.0 ? 1.0 : 0.0; // некоректні дані з чужого моду: рівно - як звичайний, вгору/вниз - обережно 0
         }
-        if (Math.abs(blockFriction - DEFAULT_BLOCK_FRICTION) < NEUTRAL_EPSILON
+        if (deltaY == 0.0
+                && Math.abs(blockFriction - DEFAULT_BLOCK_FRICTION) < NEUTRAL_EPSILON
                 && Math.abs(runSlowdown - 1.0) < NEUTRAL_EPSILON
                 && Math.abs(jumpFactor - 1.0) < NEUTRAL_EPSILON) {
-            return 1.0; // звичайний блок: нічого не міняємо, без жодних обчислень
+            return 1.0; // звичайний блок І рівний стрибок: нічого не міняємо, без жодних обчислень
         }
         double friction = clamp(blockFriction, MIN_BLOCK_FRICTION, MAX_BLOCK_FRICTION);
         double slowdown = clamp(runSlowdown, 0.0, MAX_RUN_SLOWDOWN);
         double jump = clamp(jumpFactor, 0.0, MAX_JUMP_FACTOR);
-        return clamp(blockJumpRange(friction, slowdown, jump) / ORDINARY_BLOCK_RANGE, 0.0, MAX_BLOCK_RANGE_FACTOR);
+        return clamp(blockJumpRange(friction, slowdown, jump, deltaY) / ORDINARY_BLOCK_RANGE, 0.0, MAX_BLOCK_RANGE_FACTOR);
     }
 
     /**
      * Відносна дальність (одиниця - прискорення звичайного блока): усталений зсув за тік на блоці, помножений
-     * на суму горизонтальних множників польоту після відриву з нього.
+     * на суму горизонтальних множників польоту після відриву з нього, для приземлення на висоті {@code deltaY}.
      */
-    private static double blockJumpRange(double friction, double runSlowdown, double jumpFactor) {
+    private static double blockJumpRange(double friction, double runSlowdown, double jumpFactor, double deltaY) {
         double retention = friction * AIR_FRICTION;                        // F: що лишається від швидкості за тік
         double accel = Math.pow(DEFAULT_BLOCK_FRICTION / friction, 3.0);   // a відносно звичайного (0.216 / f^3)
         double denominator = Math.max(1.0 - runSlowdown * retention, MIN_RUN_DENOMINATOR);
         double steadyStep = accel / denominator;                           // d = a / (1 - s * F)
-        return steadyStep * flightSum(retention, JUMP_VERTICAL_VELOCITY * jumpFactor);
+        return steadyStep * flightSum(deltaY, retention, JUMP_VERTICAL_VELOCITY * jumpFactor);
     }
 
     /**
-     * Сума горизонтальних множників польоту: тік відриву = 1, після нього швидкість множиться на
-     * {@code takeoffRetention} (тертя блока відриву), далі на 0.91 за тік, доки моб не торкнеться рівня відриву.
-     * Той самий цикл, що й у статичному блоці цього класу, тільки з довільною вертикальною швидкістю відриву.
+     * Сума горизонтальних множників польоту ДО ПЕРЕТИНУ висоти {@code deltaY}: тік відриву = 1, після нього
+     * швидкість множиться на {@code takeoffRetention} (тертя блока відриву), далі на 0.91 за тік. {@code deltaY}:
+     * {@code 0} чи {@code <0} - як і раніше, чекаємо, поки моб ОПУСТИТЬСЯ до цієї висоти (рівний/спадний стрибок);
+     * {@code >0} - чекаємо, поки моб ПІДНІМЕТЬСЯ до неї (висхідний). Той самий цикл, що й у статичному блоці
+     * класу й у {@link #naturalAirtime}, тільки тут ще й накопичуємо горизонтальну суму.
+     *
+     * @return суму множників, або {@code 0.0}, якщо висота {@code deltaY} за 60 тіків не досягається
+     *     (недосяжно - наприклад, дуже низький {@code jumpFactor} і Δy>0)
      */
-    private static double flightSum(double takeoffRetention, double jumpVelocity) {
+    private static double flightSum(double deltaY, double takeoffRetention, double jumpVelocity) {
         double y = 0.0;
         double vy = jumpVelocity;
         double factor = 1.0;
         double sum = 0.0;
+        boolean ascending = deltaY > 0.0;
         for (int tick = 1; tick <= 60; tick++) {
             y += vy;
             sum += factor;
             factor *= (tick == 1 ? takeoffRetention : AIR_FRICTION);
             vy = (vy - GRAVITY_PER_TICK) * VERTICAL_DRAG_PER_TICK;
-            if (tick > 1 && y <= 0.0) {
-                break;
+            boolean crossed = ascending ? y >= deltaY : (tick > 1 && y <= deltaY);
+            if (crossed) {
+                return sum;
             }
         }
-        return sum;
+        return 0.0; // недосяжно
     }
 
     private static double clamp(double value, double min, double max) {

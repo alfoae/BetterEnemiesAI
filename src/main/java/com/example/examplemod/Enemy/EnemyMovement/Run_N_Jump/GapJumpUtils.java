@@ -109,28 +109,39 @@ public final class GapJumpUtils {
     static final double SLIME_STEP_SLOWDOWN = 0.4;
 
     /**
-     * Множник дальності стрибка для блока, З ЯКОГО моб відривається. Береться з САМОГО блока, тож працює й
-     * для блоків з інших модів:
+     * Множник дальності стрибка для блока, З ЯКОГО моб відривається, ДЛЯ ТАКОГО Δy (вгору/вниз/рівно). Береться
+     * з САМОГО блока, тож працює й для блоків з інших модів:
      * <ul>
      *   <li><b>тертя</b> - через {@code BlockState.getFriction(level, pos, entity)} (хук NeoForge, той самий
      *       виклик, що й у ванільному {@code LivingEntity.travel}); блоки з модів перевизначають саме його;</li>
      *   <li><b>speedFactor</b> - гальмо ходьби (пісок душ, мед = 0.4): у ванілі вони мають ЗВИЧАЙНЕ тертя 0.6,
      *       а липкими їх робить саме це;</li>
      *   <li><b>jumpFactor</b> - мед = 0.5 (стрибок нижчий і коротший); ванільну висоту стрибка ми не чіпаємо,
-     *       лише знаємо, що з цього блока далеко не долетіти.</li>
+     *       лише знаємо, що з цього блока далеко не долетіти (а вгору - може й ЗОВСІМ не піднятись).</li>
      * </ul>
-     * Приблизні значення для ванільних блоків (детальніше - {@link GapJumpPhysics#blockRangeFactor}):
-     * звичайний 1.00, лід 1.45, блакитний лід 1.54, пісок душ 0.58, мед 0.43, слайм 0.34.
+     * Приблизні значення для ванільних блоків, Δy=0 (детальніше - {@link GapJumpPhysics#blockRangeFactor}):
+     * звичайний 1.00, лід 1.45, блакитний лід 1.54, пісок душ 0.58, мед 0.43, слайм 0.34. Для Δy=+1 (вгору)
+     * множник ЗАВЖДИ менший, навіть на звичайному блоці (~0.33 - вузьке вікно на підйом), а з меду вгору
+     * взагалі недосяжно (0.0 - апекс стрибка нижчий за повний блок). Для Δy=-1 (вниз) - трохи більший за
+     * рівний (більше часу на політ).
      *
      * @param floor    стан блока під ногами (блок відриву)
      * @param level    світ (для хука тертя; у навігації - {@code mob.level()})
      * @param floorPos позиція цього блока
      * @param entity   моб, для якого рахуємо (передається в хук тертя; може бути {@code null})
+     * @param deltaY   landing.y - floorPos.getY(): {@code 0} рівно, {@code >0} вгору, {@code <0} вниз
      */
-    public static double blockRangeFactor(BlockState floor, LevelReader level, BlockPos floorPos, Entity entity) {
+    public static double blockRangeFactor(BlockState floor, LevelReader level, BlockPos floorPos, Entity entity, double deltaY) {
         Block block = floor.getBlock();
         double friction = floor.getFriction(level, floorPos, entity);
-        return GapJumpPhysics.blockRangeFactor(friction, runSlowdown(block), block.getJumpFactor());
+        return GapJumpPhysics.blockRangeFactor(friction, runSlowdown(block), block.getJumpFactor(), deltaY);
+    }
+
+    /**
+     * Те саме на рівному (Δy=0) - як до появи сходинок.
+     */
+    public static double blockRangeFactor(BlockState floor, LevelReader level, BlockPos floorPos, Entity entity) {
+        return blockRangeFactor(floor, level, floorPos, entity, 0.0);
     }
 
     /**
@@ -152,9 +163,7 @@ public final class GapJumpUtils {
         return floor.getFriction(level, floorPos, entity) * GapJumpPhysics.AIR_FRICTION * runSlowdown(floor.getBlock());
     }
 
-    /**
-     * Рядок для логу: блок під краєм, його коефіцієнти, множник і дальність звідти. Лише діагностика.
-     */
+    /** Рядок для логу: блок під краєм, його коефіцієнти, множник і дальність звідти. Лише діагностика. */
     public static String describeTakeoffBlock(Mob mob, BlockPos feet) {
         BlockPos floorPos = feet.below();
         BlockState floor = mob.level().getBlockState(floorPos);

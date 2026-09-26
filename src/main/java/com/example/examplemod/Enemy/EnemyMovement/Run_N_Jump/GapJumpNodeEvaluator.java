@@ -37,15 +37,18 @@ import net.minecraft.world.level.pathfinder.WalkNodeEvaluator;
  * Політ над проміжним блоком безпечний: після тіку відриву ноги моба вже вище 0.42 над верхом платформи,
  * а коридор польоту (клітинки на рівні ніг і голови, у тому числі над самою проміжною платформою)
  * перевіряється так само, як для звичайного стрибка. Продовження тієї ж платформи (наступна клітинка
- * теж має підлогу) перестрибуванням НЕ вважається — ногами й так дійдемо.
+ * теж має підлогу) перестрибуванням НЕ вважається — ногами й так дійдемо. Працює так само й для
+ * похилих променів (див. v4 нижче) — проміжна платформа тоді теж на висоті {@code dy}.
  * <p>
  * Навмисно НЕ заводить окремий {@code PathType} (типу "PARKOUR_JUMP") — це вимагало б
  * NeoForge-механізму enum extensions (окремий JSON + запис у neoforge.mods.toml) заради самого
  * лише маркування. Замість цього "цей сегмент - стрибок" визначається геометрично: у
  * {@link GapJumpUtils#findUpcomingJumpSegment} просто дивляться на відстань між сусідніми
- * вузлами готового Path. Простіше і не залежить від зайвої інфраструктури. Зауваж: клітинка через
- * кут, (1,1), стрибком не вважається (відстань 1.41 < 1.5) — це ванільний діагональний крок; 0.6-ширний
- * хітбокс моба перекриває обидва блоки біля спільного кута, тож там і не потрібно стрибати.
+ * вузлами готового Path (лише по X/Z — {@code v4} нижче навмисно нічого тут не міняє, бо гарного
+ * маркера "це похилий стрибок" однаково нема, а сама подія "це стрибок" від Δy не залежить).
+ * Зауваж: клітинка через кут, (1,1), стрибком не вважається (відстань 1.41 < 1.5) — це ванільний
+ * діагональний крок; 0.6-ширний хітбокс моба перекриває обидва блоки біля спільного кута, тож там
+ * і не потрібно стрибати.
  * <p>
  * <b>v3 — дальність залежить від блока відриву.</b> Максимальний розрив рахується для КОЖНОГО вузла окремо за
  * властивостями блока під ним ({@link GapJumpUtils#blockRangeFactor}: тертя, speedFactor, jumpFactor): з льоду моб
@@ -53,9 +56,32 @@ import net.minecraft.world.level.pathfinder.WalkNodeEvaluator;
  * зовсім). Висота й фізика стрибка не змінюються - це лише те, які ребра потрапляють у граф. На звичайних
  * блоках усе як раніше.
  * <p>
- * <b>TODO(Y) — висота блока, з якого стрибаємо / на який приземляємось.</b> Зараз моб стрибає лише по X/Z, а
- * висота підлоги береться як ЦІЛА координата вузла ({@code node.y}). Коли перейдемо до Y (перепад ±1 блок,
- * зілля стрибка вище), для неповних і нестандартних блоків треба рахувати РЕАЛЬНУ висоту, на якій стоїть моб:
+ * <b>v4 — сходинки (Δy).</b> Тепер для кожного вузла пробуємо не лише приземлення на своєму рівні (Δy=0), а й на
+ * {@code +1} (вгору) та {@code -1} (вниз) — {@link GapJumpPhysics#JUMP_UP_LIMIT_BLOCKS} /
+ * {@code JUMP_DOWN_LIMIT_BLOCKS}, свій ліміт на кожен бік (легко підняти чи опустити пізніше, формули physics
+ * узагальнені під будь-який цілий Δy - див. {@link GapJumpPhysics#naturalAirtime}). У БУДЬ-ЯКОМУ напрямку
+ * (діагоналі, "коні" - той самий набір променів {@link GapJumpRays}, що й для рівних стрибків), з
+ * перестрибуванням проміжної платформи так само, як для рівних. Дальність для похилого стрибка - ОКРЕМА від
+ * рівної навіть на звичайному блоці (фізика: вікно на підйом коротше за рівний політ, тож і дальність менша;
+ * вниз - трохи більша), і теж враховує блок відриву ({@link GapJumpUtils#blockRangeFactor} тепер бере Δy як
+ * четвертий параметр) - з дуже липких/низькострибучих блоків стрибок вгору може бути взагалі недосяжний
+ * (дальність виходить 0, промені для цього напрямку просто не пробуємо - той самий шлях, що вже спрацював
+ * для v3: рахуємо ЄДИНОЮ формулою, без окремого "чи вистачить висоти" гейта, а мед і подібне самі відсіюються
+ * нулем).
+ * <p>
+ * Перевірка "тут дійсно провалля" (для кешу {@code frontCache}) завжди на рівні СТАРТУ (Δy=0 відносно
+ * вузла) незалежно від того, який Δy зараз пробуємо — інакше "лесенку" з порожнечею на обох поверхах
+ * evaluator не розпізнав би як провалля. Коридор польоту для похилого стрибка — на 3 клітинки заввишки
+ * замість 2 (від рівня ніг на старті до рівня голови на приземленні чи навпаки): проста, консервативна
+ * оцінка без точного розрахунку, де саме на дузі моб опиниться в кожній проміжній точці.
+ * <p>
+ * НЕ займає (лишається як TODO, разом із неповними блоками приземлення нижче): похилий стрибок, де
+ * приземлення не на повний блок (плита, сходинка тощо) - для нього й рівний Δy=0 вже неточний, а
+ * для похилого додається ще й питання "від якого фактичного рівня рахувати сам Δy".
+ * <p>
+ * <b>TODO(Y) — висота блока, з якого стрибаємо / на який приземляємось, для НЕПОВНИХ блоків.</b> Висота підлоги
+ * зараз завжди береться як ЦІЛА координата вузла ({@code node.y}). Для неповних і нестандартних блоків варто
+ * колись рахувати РЕАЛЬНУ висоту, на якій стоїть моб:
  * <ul>
  *   <li>пісок душ (14/16), мед (15/16), плити (0.5; верхня плита - 1.0), килими, шари снігу, платівки, горщики,
  *       яйця тощо;</li>
@@ -74,7 +100,8 @@ import net.minecraft.world.level.pathfinder.WalkNodeEvaluator;
  * не знадобиться, не скануємо. Раніше поріг був 4, і через це вузол на прямому краї широкої
  * платформи (5 звичайних сусідів) не отримував стрибків узагалі — тільки вузькі платформи.
  * Далі для 9 сусідніх клітинок один раз питаємо світ, чи є там підлога, і відкидаємо всі промені,
- * що починаються з прохідної клітинки.
+ * що починаються з прохідної клітинки. Три проходи (рівно/вгору/вниз) діляться ОДНИМ frontCache
+ * (перевірка на рівні старту від Δy не залежить), тож зайвих запитів до світу через це не додається.
  * <p>
  * ЧЕСНО, найменш перевірений шматок у всій справі: {@code this.mob} і {@code this.currentContext} тут —
  * поля, успадковані від базового {@code NodeEvaluator} (виставляються в {@code prepare(...)}
@@ -101,6 +128,14 @@ public class GapJumpNodeEvaluator extends WalkNodeEvaluator {
      */
     private static final float SKIP_MALUS_PER_BLOCK = 1.25F;
 
+    /**
+     * Стрибок ВГОРУ додатково дорожчий за рівний (той самий дистанційний множник, зверху): вузьке вікно на
+     * підйом (див. {@link GapJumpPhysics#naturalAirtime}) робить його ризикованішим, тож A* бере його лише
+     * коли рівного шляху справді немає, а не як рівноцінну альтернативу. Вниз - не дорожчий (там більше
+     * запасу за часом, а не менше): звичайного {@link #JUMP_MALUS_PER_BLOCK} досить.
+     */
+    private static final float UP_JUMP_EXTRA_MALUS_PER_BLOCK = 0.5F;
+
     /** Стан клітинки перед краєм (для кешу на вузол). */
     private static final byte UNKNOWN = 0;
     /** Є підлога й вільно на рівні ніг: моб просто зробить крок, стрибок звідси в цей бік не потрібен. */
@@ -118,62 +153,83 @@ public class GapJumpNodeEvaluator extends WalkNodeEvaluator {
         }
         BlockPos origin = new BlockPos(node.x, node.y, node.z);
         // Дальність залежить від блока, З ЯКОГО моб відривається (тертя / speedFactor / jumpFactor): лід - далі,
-        // слайм, пісок душ, мед - ближче. Тому рахуємо її тут, для КОЖНОГО вузла під час побудови шляху, а не
-        // одним числом на всього моба й не перед самим стрибком.
-        int maxGap = estimateMaxGapFrom(origin);
-        if (maxGap < 1) {
-            return count; // з цього блока (дуже липкого для цього моба) стрибнути не вдасться - стрибкових ребер звідси нема
+        // слайм, пісок душ, мед - ближче; і від Δy (вгору - вікно коротше, тож і дальність менша, навіть на
+        // звичайному блоці; вниз - трохи більша). Тому рахуємо тут, для КОЖНОГО вузла й для КОЖНОГО з трьох Δy
+        // окремо під час побудови шляху, а не одним числом на всього моба й не перед самим стрибком.
+        int[] maxGaps = estimateMaxGapsFrom(origin); // [рівно, вгору, вниз]
+        if (maxGaps[0] < 1 && maxGaps[1] < 1 && maxGaps[2] < 1) {
+            return count; // з цього блока (дуже липкого для цього моба) стрибнути не вдасться в жоден бік
         }
 
-        byte[] frontCache = new byte[9]; // стан 8 клітинок перед краєм (прохідна/провалля/заблокована); ключ (dx+1)*3+(dz+1)
-        for (GapJumpRays.Ray ray : GapJumpRays.forMaxGap(maxGap)) {
-            if (count >= nodes.length) {
-                break; // буфер сусідів повний - більше нема куди писати (промені відсортовані: спершу найближчі)
+        byte[] frontCache = new byte[9]; // стан 8 клітинок перед краєм НА РІВНІ СТАРТУ; ключ (dx+1)*3+(dz+1)
+        int[] deltaYs = {0, GapJumpPhysics.JUMP_UP_LIMIT_BLOCKS, -GapJumpPhysics.JUMP_DOWN_LIMIT_BLOCKS};
+        for (int i = 0; i < deltaYs.length; i++) {
+            if (maxGaps[i] < 1) {
+                continue; // цей Δy з цього блока недосяжний (напр. вгору з меду) - не пробуємо
             }
-            count = tryRay(nodes, count, origin, ray, frontCache);
+            for (GapJumpRays.Ray ray : GapJumpRays.forMaxGap(maxGaps[i])) {
+                if (count >= nodes.length) {
+                    break; // буфер сусідів повний - більше нема куди писати (промені відсортовані: спершу найближчі)
+                }
+                count = tryRay(nodes, count, origin, ray, frontCache, deltaYs[i]);
+            }
         }
         return count;
     }
 
     /**
-     * Скільки блоків розриву моб здатен перестрибнути, відриваючись саме з цього вузла. Блок відриву - підлога
-     * ПІД вузлом (той самий, на якому моб стоятиме на краю); його коефіцієнти беруться з самого блока (тертя через
-     * хук NeoForge, тож і для блоків з інших модів), див. {@link GapJumpUtils#blockRangeFactor}. Для звичайного
-     * блока множник рівно 1.0 - результат такий самий, як був.
+     * Максимальна дальність стрибка з цього вузла окремо для рівно / вгору / вниз ({@link
+     * GapJumpPhysics#JUMP_UP_LIMIT_BLOCKS} / {@code JUMP_DOWN_LIMIT_BLOCKS}). Блок відриву - підлога ПІД
+     * вузлом (той самий, на якому моб стоятиме на краю); коефіцієнти беруться з самого блока (тертя через
+     * хук NeoForge, тож і для блоків з інших модів), див. {@link GapJumpUtils#blockRangeFactor}. Для
+     * звичайного блока на Δy=0 множник рівно 1.0 - результат такий самий, як був до v3.
+     *
+     * @return {@code [рівно, вгору, вниз]}; {@code 0} на позиції - цей Δy із цього блока недосяжний
      */
-    private int estimateMaxGapFrom(BlockPos origin) {
-        double blockFactor = 1.0;
+    private int[] estimateMaxGapsFrom(BlockPos origin) {
         BlockPos floorPos = origin.below();
         BlockState floor = getBlockStateAt(floorPos);
-        if (floor != null && this.mob != null) {
-            blockFactor = GapJumpUtils.blockRangeFactor(floor, this.mob.level(), floorPos, this.mob);
+        if (floor == null || this.mob == null) {
+            return new int[]{0, 0, 0};
         }
-        return GapJumpUtils.estimateMaxJumpRangeBlocks(this.mob, blockFactor);
+        var level = this.mob.level();
+        double flatFactor = GapJumpUtils.blockRangeFactor(floor, level, floorPos, this.mob, 0.0);
+        double upFactor = GapJumpUtils.blockRangeFactor(floor, level, floorPos, this.mob, GapJumpPhysics.JUMP_UP_LIMIT_BLOCKS);
+        double downFactor = GapJumpUtils.blockRangeFactor(floor, level, floorPos, this.mob, -GapJumpPhysics.JUMP_DOWN_LIMIT_BLOCKS);
+        return new int[]{
+                GapJumpUtils.estimateMaxJumpRangeBlocks(this.mob, flatFactor),
+                GapJumpUtils.estimateMaxJumpRangeBlocks(this.mob, upFactor),
+                GapJumpUtils.estimateMaxJumpRangeBlocks(this.mob, downFactor),
+        };
     }
 
-    private int tryRay(Node[] nodes, int count, BlockPos origin, GapJumpRays.Ray ray, byte[] frontCache) {
-        // 1. Край у цьому напрямку? Перша клітинка має бути справжнім проваллям. Якщо вона прохідна -
-        //    звичайний крок з цього вже впорається (а стрибок згенерується з наступної клітинки); якщо
-        //    там стіна - крізь неї не стрибаємо (раніше стіна теж вважалась "не прохідною" і скан ішов далі).
+    /**
+     * @param dy {@code 0} - рівний стрибок, {@code +1} - вгору, {@code -1} - вниз (землі приземлення
+     *           відносно {@code origin}; наразі завжди одне з цих трьох значень - {@link #getNeighbors})
+     */
+    private int tryRay(Node[] nodes, int count, BlockPos origin, GapJumpRays.Ray ray, byte[] frontCache, int dy) {
+        // 1. Край у цьому напрямку? Перша клітинка має бути справжнім проваллям, ЗАВЖДИ на рівні СТАРТУ
+        //    (dy тут НЕ підставляємо - "лесенка", де порожньо на обох поверхах, інакше не розпізнається як
+        //    провалля). Якщо вона прохідна - звичайний крок з цього вже впорається (а стрибок згенерується
+        //    з наступної клітинки); якщо там стіна - крізь неї не стрибаємо.
         int frontIndex = (ray.frontX() + 1) * 3 + (ray.frontZ() + 1);
         if (frontCache[frontIndex] == UNKNOWN) {
-            frontCache[frontIndex] = classifyFront(origin, ray.frontX(), ray.frontZ());
+            frontCache[frontIndex] = classifyFront(origin, ray.frontX(), ray.frontZ(), 0);
         }
         if (frontCache[frontIndex] != VOID) {
             return count;
         }
 
-        // 2. Приземлення вздовж променя. ПЕРШЕ придатне - звичайний стрибок. Далі сканування ТРИВАЄ: якщо
-        //    за цією платформою знову провалля, а ще далі (у межах дальності) - нова платформа, то це
-        //    ПЕРЕСТРИБУВАННЯ: один довгий стрибок НАД проміжною платформою замість двох коротких
-        //    (▣▢▣▢▣ - з 1-го блока одразу на 3-й). Раніше цикл робив return на першому ж приземленні, і
-        //    проміжну платформу перестрибнути було неможливо.
+        // 2. Приземлення вздовж променя, на рівні origin.y + dy. ПЕРШЕ придатне - звичайний стрибок. Далі
+        //    сканування ТРИВАЄ: якщо за цією платформою знову провалля (на ЇЇ рівні, тобто теж +dy), а ще
+        //    далі (у межах дальності) - нова платформа, то це ПЕРЕСТРИБУВАННЯ: один довгий стрибок НАД
+        //    проміжною платформою замість двох коротких (▣▢▣▢▣ - з 1-го блока одразу на 3-й).
         boolean landed = false;      // на цьому промені вже додано хоча б одне приземлення
         boolean voidBehind = false;  // після останньої придатної клітинки на промені була порожнеча
         for (int k = ray.kMin(); k <= ray.kMax(); k++) {
             int dx = ray.stepX() * k;
             int dz = ray.stepZ() * k;
-            if (!isStandable(origin, dx, dz)) {
+            if (!isStandable(origin, dx, dz, dy)) {
                 if (landed) {
                     voidBehind = true; // (це може бути й стіна - коридор наступного кандидата її відсіче)
                 }
@@ -184,34 +240,42 @@ public class GapJumpNodeEvaluator extends WalkNodeEvaluator {
             if (!landed || voidBehind) {
                 // Коридор польоту (разом із проміжною платформою й проваллями між) має бути вільний.
                 // Якщо ні - то й далі по променю заблоковано.
-                if (!isCorridorClear(origin, ray.corridor()[k])) {
+                if (!isCorridorClear(origin, ray.corridor()[k], dy)) {
                     return count;
                 }
                 if (count >= nodes.length) {
                     return count;
                 }
-                nodes[count++] = jumpNode(origin, dx, dz, landed);
+                nodes[count++] = jumpNode(origin, dx, dz, dy, landed);
                 landed = true;
             }
-            // Чи закінчується тут платформа (одразу за нею провалля)? Тільки тоді наступну придатну
-            // клітинку на промені можна перестрибнути. Для променів із кроком >1 клітинки "клітинка за"
-            // береться тією самою відносною позицією, що й перша клітинка від краю (лінія періодична).
-            voidBehind = classifyFront(origin, dx + ray.frontX(), dz + ray.frontZ()) == VOID;
+            // Чи закінчується тут платформа (одразу за нею провалля, на ЇЇ Ж рівні +dy)? Тільки тоді наступну
+            // придатну клітинку на промені можна перестрибнути. Для променів із кроком >1 клітинки "клітинка
+            // за" береться тією самою відносною позицією, що й перша клітинка від краю (лінія періодична).
+            voidBehind = classifyFront(origin, dx + ray.frontX(), dz + ray.frontZ(), dy) == VOID;
         }
         return count;
     }
 
-    private Node jumpNode(BlockPos origin, int dx, int dz, boolean skip) {
-        BlockPos landing = origin.offset(dx, 0, dz);
+    private Node jumpNode(BlockPos origin, int dx, int dz, int dy, boolean skip) {
+        BlockPos landing = origin.offset(dx, dy, dz);
         Node jumpNode = new Node(landing.getX(), landing.getY(), landing.getZ());
         jumpNode.type = PathType.WALKABLE;
         double distance = Math.sqrt((double) dx * dx + (double) dz * dz);
-        jumpNode.costMalus = (float) (distance * (skip ? SKIP_MALUS_PER_BLOCK : JUMP_MALUS_PER_BLOCK));
+        float malusPerBlock = skip ? SKIP_MALUS_PER_BLOCK : JUMP_MALUS_PER_BLOCK;
+        if (dy > 0) {
+            malusPerBlock += UP_JUMP_EXTRA_MALUS_PER_BLOCK;
+        }
+        jumpNode.costMalus = (float) (distance * malusPerBlock);
         return jumpNode;
     }
 
-    private byte classifyFront(BlockPos origin, int dx, int dz) {
-        BlockPos column = origin.offset(dx, 0, dz);
+    /**
+     * Завжди на рівні {@code origin.y + dy} - викликається або з {@code dy=0} (перевірка "тут провалля" на
+     * рівні старту), або з поточним Δy променя (перевірка "проміжна платформа скінчилась" - на ЇЇ рівні).
+     */
+    private byte classifyFront(BlockPos origin, int dx, int dz, int dy) {
+        BlockPos column = origin.offset(dx, dy, dz);
         BlockState feetState = getBlockStateAt(column);
         BlockState floorState = getBlockStateAt(column.below());
         if (feetState == null || floorState == null || feetState.blocksMotion()) {
@@ -220,29 +284,43 @@ public class GapJumpNodeEvaluator extends WalkNodeEvaluator {
         return floorState.blocksMotion() ? WALKABLE : VOID;
     }
 
-    private boolean isCorridorClear(BlockPos origin, int[][] cells) {
+    /**
+     * Коридор польоту: клітинки на шляху не мають блокувати рух. Для рівного стрибка (dy=0) - 2 клітинки
+     * заввишки (ноги/голова на рівні старту = рівні приземлення), як і раніше. Для похилого - 3 заввишки
+     * (від рівня ніг на нижчому кінці до рівня голови на вищому): моб фізично проходить проміжні висоти
+     * дуги десь між рівнем відриву й рівнем приземлення, а не по прямій лінії, тож перевіряємо весь
+     * можливий діапазон одразу - простіша й безпечніша оцінка, ніж рахувати точну висоту в кожній точці.
+     */
+    private boolean isCorridorClear(BlockPos origin, int[][] cells, int dy) {
         for (int[] cell : cells) {
             BlockPos column = origin.offset(cell[0], 0, cell[1]);
-            if (blocksBody(column)) {
+            if (blocksBody(column, dy)) {
                 return false;
             }
         }
         return true;
     }
 
-    /** Клітинка на рівні ніг чи голови моба не має бути суцільною. */
-    private boolean blocksBody(BlockPos feet) {
-        BlockState feetState = getBlockStateAt(feet);
-        BlockState headState = getBlockStateAt(feet.above());
-        if (feetState == null || headState == null) {
-            return true; // світ недоступний - обережно вважаємо заблокованим
+    /**
+     * Клітинки в діапазоні висот {@code [min(0,dy), max(1,dy+1)]} не мають бути суцільними.
+     */
+    private boolean blocksBody(BlockPos originColumn, int dy) {
+        int low = Math.min(0, dy);
+        int high = Math.max(1, dy + 1);
+        for (int y = low; y <= high; y++) {
+            BlockState state = getBlockStateAt(originColumn.offset(0, y, 0));
+            if (state == null || state.blocksMotion()) {
+                return true; // світ недоступний - обережно вважаємо заблокованим
+            }
         }
-        return feetState.blocksMotion() || headState.blocksMotion();
+        return false;
     }
 
-    /** Підлога тверда, а на рівні ніг вільно. */
-    private boolean hasFloorAt(BlockPos origin, int dx, int dz) {
-        BlockPos column = origin.offset(dx, 0, dz);
+    /**
+     * Підлога тверда, а на рівні ніг вільно - на рівні {@code origin.y + dy}.
+     */
+    private boolean hasFloorAt(BlockPos origin, int dx, int dz, int dy) {
+        BlockPos column = origin.offset(dx, dy, dz);
         BlockPos floorPos = column.below();
 
         BlockState floorState = getBlockStateAt(floorPos);
@@ -256,12 +334,14 @@ public class GapJumpNodeEvaluator extends WalkNodeEvaluator {
         return floorState.blocksMotion() && !feetState.blocksMotion();
     }
 
-    /** Придатне для приземлення: підлога, а над нею вільно і на рівні ніг, і на рівні голови. */
-    private boolean isStandable(BlockPos origin, int dx, int dz) {
-        if (!hasFloorAt(origin, dx, dz)) {
+    /**
+     * Придатне для приземлення: підлога, а над нею вільно і на рівні ніг, і на рівні голови - на {@code origin.y + dy}.
+     */
+    private boolean isStandable(BlockPos origin, int dx, int dz, int dy) {
+        if (!hasFloorAt(origin, dx, dz, dy)) {
             return false;
         }
-        BlockState headState = getBlockStateAt(origin.offset(dx, 1, dz));
+        BlockState headState = getBlockStateAt(origin.offset(dx, dy + 1, dz));
         return headState != null && !headState.blocksMotion();
     }
 

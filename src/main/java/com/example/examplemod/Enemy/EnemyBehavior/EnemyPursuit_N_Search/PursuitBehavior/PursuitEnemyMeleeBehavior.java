@@ -93,11 +93,13 @@ public class PursuitEnemyMeleeBehavior extends Goal {
         if (!result) {
             Player p = PursuitEnemyBehavior.getTrackedPlayer(this.mob);
             if (p != null) {
+                /*
                 PursuitEnemyBehavior.debugMsg(p, "[DEBUG PursuitEnemyMeleeBehavior] canUse()=false. "
                         + "chasePos=" + PursuitEnemyBehavior.getChasePosition(this.mob)
                         + " shouldYield=" + this.shouldYield()
                         + " yieldToTerraforming=" + yieldToTerraforming
                         + " yieldToGapJump=" + yieldToGapJump + " моб=" + this.mob.blockPosition());
+                */
             }
         }
         return result;
