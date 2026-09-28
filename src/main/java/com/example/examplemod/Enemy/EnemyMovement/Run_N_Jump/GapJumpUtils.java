@@ -163,19 +163,53 @@ public final class GapJumpUtils {
         return floor.getFriction(level, floorPos, entity) * GapJumpPhysics.AIR_FRICTION * runSlowdown(floor.getBlock());
     }
 
-    /** Рядок для логу: блок під краєм, його коефіцієнти, множник і дальність звідти. Лише діагностика. */
+    /**
+     * Чи долетить моб до landing (на живій відстані {@code realDistance}, {@code deltaYBlocks} нижче,
+     * завжди {@code <0}) ПРОСТО ЗБІГШИ з краю, без стрибка (без вертикального імпульсу {@code 0.42*jumpFactor}).
+     * <p>
+     * Навпаки, ніж може здатись: САМ СТРИБОК дає БІЛЬШУ дальність, не меншу - підйом ПЕРЕД падінням додає
+     * часу в польоті (спершу вгору, тоді вниз повз рівень відриву і далі до landing), тож без стрибка часу
+     * менше, і природний "долетить" - коротший. Це саме той сенс, у якому перевірка тут "залежить від
+     * швидкості моба" (як і просили): на БЛИЗЬКОМУ спуску навіть коротшого, безстрибкового вікна вистачає -
+     * тоді стрибок не потрібен, і виглядає природніше (без зайвого підскоку на рівному місці перед самим
+     * краєм), так само, як гравець просто збігає з виступу, а не підстрибує щоразу. Стрибок (і, відповідно,
+     * {@link GapJumpAssistGoal#launch}, що його викликає) лишається потрібним, коли: (а) Δy>=0 (вгору чи
+     * рівно - без стрибка НІКУДИ не долетіти), або (б) відстань більша за те, що покриє коротше
+     * безстрибкове падіння - тоді довший висхідно-низхідний політ зі стрибка потрібен саме заради
+     * додаткового часу (і, відповідно, дальності).
+     *
+     * @param runSpeedSetpoint {@link #runSpeedSetpoint(Mob)} моба - швидкість, з якою він біжить до краю
+     */
+    public static boolean reachableWithoutJump(BlockState floor, LevelReader level, BlockPos floorPos, Entity entity,
+                                               double deltaYBlocks, double realDistance, double runSpeedSetpoint) {
+        if (deltaYBlocks >= 0.0) {
+            return false; // вгору чи рівно - без стрибка нікуди не долетіти
+        }
+        double friction = floor.getFriction(level, floorPos, entity);
+        double retention = friction * GapJumpPhysics.AIR_FRICTION;
+        double sum = GapJumpPhysics.flightSum(deltaYBlocks, retention, 0.0); // jumpVelocity=0 - без імпульсу
+        return runSpeedSetpoint * sum >= realDistance;
+    }
+
+    /** Рядок для логу: блок під краєм, його коефіцієнти й дальність в УСІ треті боки (рівно/вгору/вниз).
+     * Раніше показував лише рівну дальність, навіть коли сам стрибок був похилий - через це в лозі
+     * "макс. розрив звідси=3" виглядало так, ніби 4-блоковий розрив вгору мав спрацювати, хоча реальна
+     * (похила) дальність зовсім інша. Лише діагностика. */
     public static String describeTakeoffBlock(Mob mob, BlockPos feet) {
         BlockPos floorPos = feet.below();
         BlockState floor = mob.level().getBlockState(floorPos);
         Block block = floor.getBlock();
-        double factor = blockRangeFactor(floor, mob.level(), floorPos, mob);
+        double flatFactor = blockRangeFactor(floor, mob.level(), floorPos, mob, 0.0);
+        double upFactor = blockRangeFactor(floor, mob.level(), floorPos, mob, GapJumpPhysics.JUMP_UP_LIMIT_BLOCKS);
+        double downFactor = blockRangeFactor(floor, mob.level(), floorPos, mob, -GapJumpPhysics.JUMP_DOWN_LIMIT_BLOCKS);
         return BuiltInRegistries.BLOCK.getKey(block)
                 + " | тертя=" + String.format("%.3f", floor.getFriction(mob.level(), floorPos, mob))
                 + " speedFactor=" + String.format("%.2f", block.getSpeedFactor())
                 + " jumpFactor=" + String.format("%.2f", block.getJumpFactor())
                 + (block instanceof SlimeBlock ? " (слайм: гальмо ходьби x" + SLIME_STEP_SLOWDOWN + ")" : "")
-                + " | множник дальності=" + String.format("%.3f", factor)
-                + " | макс. розрив звідси=" + estimateMaxJumpRangeBlocks(mob, factor);
+                + " | макс.розрив рівно=" + estimateMaxJumpRangeBlocks(mob, flatFactor)
+                + " вгору(+" + GapJumpPhysics.JUMP_UP_LIMIT_BLOCKS + ")=" + estimateMaxJumpRangeBlocks(mob, upFactor)
+                + " вниз(-" + GapJumpPhysics.JUMP_DOWN_LIMIT_BLOCKS + ")=" + estimateMaxJumpRangeBlocks(mob, downFactor);
     }
 
     /**

@@ -152,60 +152,40 @@ public class GapJumpNodeEvaluator extends WalkNodeEvaluator {
             return count; // повністю відкрита клітинка - тут стрибок ніколи не потрібен, не скануємо
         }
         BlockPos origin = new BlockPos(node.x, node.y, node.z);
-        // Дальність залежить від блока, З ЯКОГО моб відривається (тертя / speedFactor / jumpFactor): лід - далі,
-        // слайм, пісок душ, мед - ближче; і від Δy (вгору - вікно коротше, тож і дальність менша, навіть на
-        // звичайному блоці; вниз - трохи більша). Тому рахуємо тут, для КОЖНОГО вузла й для КОЖНОГО з трьох Δy
-        // окремо під час побудови шляху, а не одним числом на всього моба й не перед самим стрибком.
-        int[] maxGaps = estimateMaxGapsFrom(origin); // [рівно, вгору, вниз]
-        if (maxGaps[0] < 1 && maxGaps[1] < 1 && maxGaps[2] < 1) {
-            return count; // з цього блока (дуже липкого для цього моба) стрибнути не вдасться в жоден бік
+        BlockPos floorPos = origin.below();
+        BlockState floor = getBlockStateAt(floorPos);
+        if (floor == null || this.mob == null) {
+            return count;
         }
+        var level = this.mob.level();
 
         byte[] frontCache = new byte[9]; // стан 8 клітинок перед краєм НА РІВНІ СТАРТУ; ключ (dx+1)*3+(dz+1)
-        int[] deltaYs = {0, GapJumpPhysics.JUMP_UP_LIMIT_BLOCKS, -GapJumpPhysics.JUMP_DOWN_LIMIT_BLOCKS};
-        for (int i = 0; i < deltaYs.length; i++) {
-            if (maxGaps[i] < 1) {
-                continue; // цей Δy з цього блока недосяжний (напр. вгору з меду) - не пробуємо
+        // Дальність залежить від блока, З ЯКОГО моб відривається (тертя / speedFactor / jumpFactor): лід - далі,
+        // слайм, пісок душ, мед - ближче; і від Δy (вгору - вікно коротше, тож і дальність менша, навіть на
+        // звичайному блоці; вниз - трохи більша). Тому рахуємо тут, для КОЖНОГО вузла й для КОЖНОГО рівня Δy
+        // окремо під час побудови шляху, а не одним числом на всього моба й не перед самим стрибком.
+        // ПОВНИЙ діапазон -JUMP_DOWN_LIMIT_BLOCKS..+JUMP_UP_LIMIT_BLOCKS (не лише крайні значення): щоб моб
+        // міг приземлитись саме на НАЙБЛИЖЧУ доступну сходинку, а не тільки на найглибшу з можливих (наприклад,
+        // сходи в 3 рівні - Δy=-1 на першу, Δy=-2 на другу, Δy=-3 на третю, кожна свій кандидат).
+        for (int dy = -GapJumpPhysics.JUMP_DOWN_LIMIT_BLOCKS; dy <= GapJumpPhysics.JUMP_UP_LIMIT_BLOCKS; dy++) {
+            double factor = GapJumpUtils.blockRangeFactor(floor, level, floorPos, this.mob, dy);
+            int maxGap = GapJumpUtils.estimateMaxJumpRangeBlocks(this.mob, factor);
+            if (maxGap < 1) {
+                continue; // цей Δy з цього блока недосяжний (напр. вгору з меду, чи просто задалеко) - не пробуємо
             }
-            for (GapJumpRays.Ray ray : GapJumpRays.forMaxGap(maxGaps[i])) {
+            for (GapJumpRays.Ray ray : GapJumpRays.forMaxGap(maxGap)) {
                 if (count >= nodes.length) {
                     break; // буфер сусідів повний - більше нема куди писати (промені відсортовані: спершу найближчі)
                 }
-                count = tryRay(nodes, count, origin, ray, frontCache, deltaYs[i]);
+                count = tryRay(nodes, count, origin, ray, frontCache, dy);
             }
         }
         return count;
     }
 
     /**
-     * Максимальна дальність стрибка з цього вузла окремо для рівно / вгору / вниз ({@link
-     * GapJumpPhysics#JUMP_UP_LIMIT_BLOCKS} / {@code JUMP_DOWN_LIMIT_BLOCKS}). Блок відриву - підлога ПІД
-     * вузлом (той самий, на якому моб стоятиме на краю); коефіцієнти беруться з самого блока (тертя через
-     * хук NeoForge, тож і для блоків з інших модів), див. {@link GapJumpUtils#blockRangeFactor}. Для
-     * звичайного блока на Δy=0 множник рівно 1.0 - результат такий самий, як був до v3.
-     *
-     * @return {@code [рівно, вгору, вниз]}; {@code 0} на позиції - цей Δy із цього блока недосяжний
-     */
-    private int[] estimateMaxGapsFrom(BlockPos origin) {
-        BlockPos floorPos = origin.below();
-        BlockState floor = getBlockStateAt(floorPos);
-        if (floor == null || this.mob == null) {
-            return new int[]{0, 0, 0};
-        }
-        var level = this.mob.level();
-        double flatFactor = GapJumpUtils.blockRangeFactor(floor, level, floorPos, this.mob, 0.0);
-        double upFactor = GapJumpUtils.blockRangeFactor(floor, level, floorPos, this.mob, GapJumpPhysics.JUMP_UP_LIMIT_BLOCKS);
-        double downFactor = GapJumpUtils.blockRangeFactor(floor, level, floorPos, this.mob, -GapJumpPhysics.JUMP_DOWN_LIMIT_BLOCKS);
-        return new int[]{
-                GapJumpUtils.estimateMaxJumpRangeBlocks(this.mob, flatFactor),
-                GapJumpUtils.estimateMaxJumpRangeBlocks(this.mob, upFactor),
-                GapJumpUtils.estimateMaxJumpRangeBlocks(this.mob, downFactor),
-        };
-    }
-
-    /**
-     * @param dy {@code 0} - рівний стрибок, {@code +1} - вгору, {@code -1} - вниз (землі приземлення
-     *           відносно {@code origin}; наразі завжди одне з цих трьох значень - {@link #getNeighbors})
+     * @param dy landing.y - origin.y: {@code 0} - рівний стрибок, {@code >0} - вгору, {@code <0} - вниз
+     *           (у межах {@code -JUMP_DOWN_LIMIT_BLOCKS..+JUMP_UP_LIMIT_BLOCKS} - {@link #getNeighbors})
      */
     private int tryRay(Node[] nodes, int count, BlockPos origin, GapJumpRays.Ray ray, byte[] frontCache, int dy) {
         // 1. Край у цьому напрямку? Перша клітинка має бути справжнім проваллям, ЗАВЖДИ на рівні СТАРТУ
@@ -301,9 +281,7 @@ public class GapJumpNodeEvaluator extends WalkNodeEvaluator {
         return true;
     }
 
-    /**
-     * Клітинки в діапазоні висот {@code [min(0,dy), max(1,dy+1)]} не мають бути суцільними.
-     */
+    /** Клітинки в діапазоні висот {@code [min(0,dy), max(1,dy+1)]} не мають бути суцільними. */
     private boolean blocksBody(BlockPos originColumn, int dy) {
         int low = Math.min(0, dy);
         int high = Math.max(1, dy + 1);
@@ -316,9 +294,7 @@ public class GapJumpNodeEvaluator extends WalkNodeEvaluator {
         return false;
     }
 
-    /**
-     * Підлога тверда, а на рівні ніг вільно - на рівні {@code origin.y + dy}.
-     */
+    /** Підлога тверда, а на рівні ніг вільно - на рівні {@code origin.y + dy}. */
     private boolean hasFloorAt(BlockPos origin, int dx, int dz, int dy) {
         BlockPos column = origin.offset(dx, dy, dz);
         BlockPos floorPos = column.below();
@@ -334,9 +310,7 @@ public class GapJumpNodeEvaluator extends WalkNodeEvaluator {
         return floorState.blocksMotion() && !feetState.blocksMotion();
     }
 
-    /**
-     * Придатне для приземлення: підлога, а над нею вільно і на рівні ніг, і на рівні голови - на {@code origin.y + dy}.
-     */
+    /** Придатне для приземлення: підлога, а над нею вільно і на рівні ніг, і на рівні голови - на {@code origin.y + dy}. */
     private boolean isStandable(BlockPos origin, int dx, int dz, int dy) {
         if (!hasFloorAt(origin, dx, dz, dy)) {
             return false;
