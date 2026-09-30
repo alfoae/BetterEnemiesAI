@@ -20,12 +20,63 @@ import java.util.List;
  */
 public final class ShapeGeometry {
 
+    private ShapeGeometry() {
+    }
+
     /**
      * Допуск на похибку double-порівнянь висот/меж.
      */
     public static final double EPS = 1.0E-5;
 
-    private ShapeGeometry() {
+    /**
+     * Одна коробка колізії в АБСОЛЮТНИХ світових координатах (вже зі зміщенням на позицію блока —
+     * адаптер це робить, тут координати завжди "живі", не відносні 0..1 клітинки).
+     */
+    public record Box(double minX, double minY, double minZ, double maxX, double maxY, double maxZ) {
+
+        public boolean overlapsXZ(Footprint f) {
+            return maxX > f.minX() && minX < f.maxX() && maxZ > f.minZ() && minZ < f.maxZ();
+        }
+
+        /**
+         * Площа перетину горизонтальної проекції коробки з footprint-ом (0, якщо не перетинаються).
+         */
+        public double intersectionAreaXZ(Footprint f) {
+            double dx = Math.min(maxX, f.maxX()) - Math.max(minX, f.minX());
+            double dz = Math.min(maxZ, f.maxZ()) - Math.max(minZ, f.minZ());
+            return Math.max(0.0, dx) * Math.max(0.0, dz);
+        }
+    }
+
+    /**
+     * Горизонтальний "слід" мобу (чи довільна ділянка вибірки) у світових координатах X/Z.
+     */
+    public record Footprint(double minX, double minZ, double maxX, double maxZ) {
+
+        /**
+         * Квадрат заданої ширини, відцентрований у (cx, cz).
+         */
+        public static Footprint centered(double cx, double cz, double width) {
+            double h = width / 2.0;
+            return new Footprint(cx - h, cz - h, cx + h, cz + h);
+        }
+
+        public double area() {
+            return Math.max(0.0, maxX - minX) * Math.max(0.0, maxZ - minZ);
+        }
+    }
+
+    /**
+     * Результат пошуку опори: висота поверхні й яка частка footprint-у реально на ній лежить.
+     * {@link #NONE} — опори взагалі нема (справжня порожнеча в межах footprint-у).
+     */
+    public record Support(double surfaceY, double coverage) {
+
+        public static final Support NONE = new Support(Double.NaN, 0.0);
+
+        public boolean isPresent() {
+            return coverage > 0.0;
+        }
     }
 
     /**
@@ -117,56 +168,5 @@ public final class ShapeGeometry {
             }
         }
         return best;
-    }
-
-    /**
-     * Одна коробка колізії в АБСОЛЮТНИХ світових координатах (вже зі зміщенням на позицію блока —
-     * адаптер це робить, тут координати завжди "живі", не відносні 0..1 клітинки).
-     */
-    public record Box(double minX, double minY, double minZ, double maxX, double maxY, double maxZ) {
-
-        public boolean overlapsXZ(Footprint f) {
-            return maxX > f.minX() && minX < f.maxX() && maxZ > f.minZ() && minZ < f.maxZ();
-        }
-
-        /**
-         * Площа перетину горизонтальної проекції коробки з footprint-ом (0, якщо не перетинаються).
-         */
-        public double intersectionAreaXZ(Footprint f) {
-            double dx = Math.min(maxX, f.maxX()) - Math.max(minX, f.minX());
-            double dz = Math.min(maxZ, f.maxZ()) - Math.max(minZ, f.minZ());
-            return Math.max(0.0, dx) * Math.max(0.0, dz);
-        }
-    }
-
-    /**
-     * Горизонтальний "слід" мобу (чи довільна ділянка вибірки) у світових координатах X/Z.
-     */
-    public record Footprint(double minX, double minZ, double maxX, double maxZ) {
-
-        /**
-         * Квадрат заданої ширини, відцентрований у (cx, cz).
-         */
-        public static Footprint centered(double cx, double cz, double width) {
-            double h = width / 2.0;
-            return new Footprint(cx - h, cz - h, cx + h, cz + h);
-        }
-
-        public double area() {
-            return Math.max(0.0, maxX - minX) * Math.max(0.0, maxZ - minZ);
-        }
-    }
-
-    /**
-     * Результат пошуку опори: висота поверхні й яка частка footprint-у реально на ній лежить.
-     * {@link #NONE} — опори взагалі нема (справжня порожнеча в межах footprint-у).
-     */
-    public record Support(double surfaceY, double coverage) {
-
-        public static final Support NONE = new Support(Double.NaN, 0.0);
-
-        public boolean isPresent() {
-            return coverage > 0.0;
-        }
     }
 }

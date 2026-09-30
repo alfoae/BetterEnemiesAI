@@ -6,6 +6,7 @@ import com.example.examplemod.Enemy.EnemyMovement.TerrainShape.ShapeProbe;
 import net.minecraft.core.BlockPos;
 import net.minecraft.world.level.BlockGetter;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.pathfinder.PathType;
 import net.minecraft.world.level.pathfinder.WalkNodeEvaluator;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
@@ -13,12 +14,14 @@ import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
 /**
- * ЄДИНА ціль цього мексину — {@code WalkNodeEvaluator.getFloorLevel(BlockGetter, BlockPos)}: питання
- * "на якій висоті підлога В ЦІЙ клітинці", яке ванілья задає під час побудови графа для КОЖНОГО
- * наземного моба (не лише мобів цього мода). Свідомо НЕ чіпає {@code getNeighbors} чи
- * {@code getPathTypeFromState} — вони йдуть НАБАГАТО частіше в інші AI-моди, тому саме тут
- * найменший ризик конфлікту з чужим мексином, а сам {@code getFloorLevel} уже повертає {@code double}
- * (ванілья й так рахує НЕ булево) - природний, вузький шов, без переписування алгоритму сусідів.
+ * ДВІ цілі в цьому мексині — обидва методи {@code WalkNodeEvaluator} питають про ОДНУ й ту саму
+ * клітинку під час побудови графа для КОЖНОГО наземного моба (не лише мобів цього мода):
+ * {@code getFloorLevel(BlockGetter, BlockPos)} — "на якій висоті підлога тут", і
+ * {@code getPathTypeFromState(BlockGetter, BlockPos)} — "яка це категорія клітинки". Свідомо НЕ
+ * чіпає {@code getNeighbors} — той метод ідуть НАБАГАТО частіше правити інші AI-моди, тому саме тут
+ * найменший ризик конфлікту з чужим мексином, а обидва цільові методи вже повертають не-булеве
+ * значення (ванілья й так рахує детальніше за просте "блокує/не блокує") - природний, вузький шов,
+ * без переписування алгоритму сусідів.
  * <p>
  * <b>Що саме виправляє.</b> Ванільна реалізація визначає "є підлога" через {@code blocksMotion()} —
  * прапорець "форма ≈ повний куб", порахований один раз при реєстрації blockstate. Він нічого не
@@ -51,6 +54,19 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
  * ({@code mixins.betterenemiesai.terrainshape.json}) свідомо {@code "required": false} — якщо
  * сигнатура не збіжиться, мод далі вантажиться і працює, просто без цього конкретного виправлення
  * (власний стрибковий код мода, {@code GapJumpNodeEvaluator}, від цього мексину НЕ залежить).
+ * <p>
+ * <b>Другий інжект нижче — {@code getPathTypeFromState} — з ІНШОЇ, надійнішої причини.</b>
+ * Перший інжект (на {@code getFloorLevel}) виправляє ВИСОТУ підлоги, але покладається на здогад:
+ * яке саме число цей метод повинен повернути, щоб виклик ВСЕРЕДИНІ {@code WalkNodeEvaluator}
+ * розпізнав "тут підлоги немає взагалі" й не запропонував цю клітинку як звичайний крок. Це не
+ * підтверджено (вихідний код методу-викликача недоступний тут для звірки) — і саме тому відкритий
+ * люк усе ще міг потрапляти в підрахунок сусідів як щось "прохідне на тому ж рівні". Другий інжект
+ * діє на РІВЕНЬ ВИЩЕ й НЕ залежить від цього здогаду: {@code PathType.BLOCKED} — одне з
+ * найфундаментальніших значень усього переліку, і його призначення ("тут не можна бути") не
+ * залежить від внутрішньої реалізації жодного конкретного виклику. Спрацьовує ТІЛЬКИ коли
+ * ванільна відповідь уже {@code TRAPDOOR}/{@code DANGER_TRAPDOOR} (тобто це вже категорія "люк") —
+ * навмисно вузько, щоб не зачепити виклики цього самого методу для ІНШИХ ролей (перевірка місця
+ * над головою тощо), де відповідь ніколи не буде цією категорією.
  */
 @Mixin(WalkNodeEvaluator.class)
 public abstract class WalkNodeEvaluatorFloorMixin {
@@ -63,22 +79,69 @@ public abstract class WalkNodeEvaluatorFloorMixin {
     )
     private static void betterEnemiesAi$shapeAwareFloorLevel(
             BlockGetter level, BlockPos pos, CallbackInfoReturnable<Double> cir) {
-        if (!Config.ENABLE_SHAPE_AWARE_PATHING.get()) {
-            return;
-        }
         BlockState state = level.getBlockState(pos);
         if (state.blocksMotion()) {
             return; // майже повний куб - ванільна відповідь (pos.getY()+1) і так правильна, не чіпаємо
         }
+        boolean enabled = Config.ENABLE_SHAPE_AWARE_PATHING.get();
         double width = ShapeProbe.DEFAULT_MOB_WIDTH; // мобо-агностичний виклик - конкретного Mob тут нема
         ShapeGeometry.Footprint footprint = ShapeProbe.centeredFootprint(pos, width);
         ShapeGeometry.Support support = ShapeProbe.floorSupport(level, pos, footprint);
         if (support.coverage() < ShapeProbe.MIN_FLOOR_COVERAGE) {
-            // Нема реальної опори під центром клітинки (відкритий люк при стінці тощо) - те саме
-            // значення, яке ванілья повертає для звичайної порожньої клітинки без підлоги.
-            cir.setReturnValue((double) pos.getY());
+            // DEBUG (тимчасово - див. чат): рахуємо це НАВІТЬ коли enabled=false, щоб побачити в лозі,
+            // якщо причина взагалі не тут (тумблер вимкнений, чи ця гілка не викликається).
+            System.out.println("[DEBUG TerrainShape] getFloorLevel NO-SUPPORT pos=" + pos
+                    + " state=" + state
+                    + " vanillaAnswer=" + cir.getReturnValue()
+                    + " shapeAwareEnabled=" + enabled
+                    + " coverage=" + support.coverage());
+            if (enabled) {
+                // Нема реальної опори під центром клітинки (відкритий люк при стінці тощо) - те саме
+                // значення, яке ванілья повертає для звичайної порожньої клітинки без підлоги.
+                cir.setReturnValue((double) pos.getY());
+            }
             return;
         }
-        cir.setReturnValue(support.surfaceY());
+        if (enabled) {
+            cir.setReturnValue(support.surfaceY());
+        }
+    }
+
+    /**
+     * Надійніший запобіжник саме для люків — див. javadoc класу вище. Діє на рівень категорії
+     * ({@code PathType}), а не висоти, тому не залежить від того, як саме виклик-джерело трактує
+     * повернене число {@link #betterEnemiesAi$shapeAwareFloorLevel} вище.
+     */
+    @Inject(
+            method = "getPathTypeFromState(Lnet/minecraft/world/level/BlockGetter;Lnet/minecraft/core/BlockPos;)Lnet/minecraft/world/level/pathfinder/PathType;",
+            at = @At("RETURN"),
+            cancellable = true,
+            require = 0
+    )
+    private static void betterEnemiesAi$blockUnsupportedTrapdoor(
+            BlockGetter level, BlockPos pos, CallbackInfoReturnable<PathType> cir) {
+        PathType vanilla = cir.getReturnValue();
+        if (vanilla != PathType.TRAPDOOR && vanilla != PathType.DANGER_TRAPDOOR) {
+            return; // не наш кейс (двері, паркани тощо мають свою окрему логіку) - не логуємо, забагато шуму
+        }
+        // DEBUG (тимчасово - див. чат): якщо ЦЕЙ рядок НЕ з'являється в лозі при тесті біля відкритого
+        // люка - мексин у принципі не застосувався (перевірте лог завантаження на "terrainshape" /
+        // помилки Mixin), і решта цього класу тут ні до чого.
+        boolean enabled = Config.ENABLE_SHAPE_AWARE_PATHING.get();
+        ShapeGeometry.Footprint footprint = ShapeProbe.centeredFootprint(pos, ShapeProbe.DEFAULT_MOB_WIDTH);
+        ShapeGeometry.Support support = enabled
+                ? ShapeProbe.floorSupport(level, pos, footprint)
+                : ShapeGeometry.Support.NONE;
+        boolean overridden = enabled && support.coverage() < ShapeProbe.MIN_FLOOR_COVERAGE;
+        System.out.println("[DEBUG TerrainShape] getPathTypeFromState pos=" + pos
+                + " state=" + level.getBlockState(pos)
+                + " vanillaType=" + vanilla
+                + " shapeAwareEnabled=" + enabled
+                + " coverage=" + support.coverage()
+                + " surfaceY=" + support.surfaceY()
+                + " overriddenToBLOCKED=" + overridden);
+        if (overridden) {
+            cir.setReturnValue(PathType.BLOCKED);
+        }
     }
 }

@@ -149,21 +149,41 @@ public class GapJumpNodeEvaluator extends WalkNodeEvaluator {
     /** На рівні ніг стіна/блок (або світ недоступний): крізь неї стрибок не йде. */
     private static final byte BLOCKED = 3;
 
+    /**
+     * DEBUG-хелпер (тимчасово - див. чат): читабельна назва замість сирого byte.
+     */
+    private static String classificationName(byte value) {
+        return switch (value) {
+            case WALKABLE -> "WALKABLE";
+            case VOID -> "VOID";
+            case BLOCKED -> "BLOCKED";
+            default -> "UNKNOWN(" + value + ")";
+        };
+    }
+
     @Override
     public int getNeighbors(Node[] nodes, Node node) {
         int count = super.getNeighbors(nodes, node);
-        if (count >= ALL_NORMAL_NEIGHBORS) {
-            return count; // повністю відкрита клітинка - тут стрибок ніколи не потрібен, не скануємо
-        }
         BlockPos origin = new BlockPos(node.x, node.y, node.z);
+        byte[] frontCache = new byte[9]; // стан 8 клітинок перед краєм НА РІВНІ СТАРТУ; ключ (dx+1)*3+(dz+1)
+
+        // v11 - НЕ довіряти "count" ваніли наосліп. Люк, відкритий рівно під ногами моба, ванілья могла
+        // порахувати звичайним кроком НА ТОМУ Ж РІВНІ (getFloorLevel повертає ЯКЕСЬ число - який саме
+        // контракт "нема підлоги" очікує виклик ВСЕРЕДИНІ WalkNodeEvaluator, чесно не підтверджено,
+        // про це написано в самому мексині). Якщо просто повірити count>=8, граф "крокує" через
+        // порожнечу, а стрибковий скан нижче НАВІТЬ НЕ ЗАПУСКАЄТЬСЯ - точно баг "падає і навіть не
+        // пригне". Тому за наявності 8 сусідів звіряємось іще раз ВЛАСНОЮ (перевіреною тестами)
+        // класифікацією - дешево для звичайного ландшафту (у classifyFront швидкий шлях на
+        // blocksMotion()), і лише коли є розбіжність - не виходимо рано.
+        if (count >= ALL_NORMAL_NEIGHBORS && !anySuspectDirection(origin, frontCache)) {
+            return count; // справді відкрита клітинка з усіх боків - стрибок тут не потрібен, не скануємо
+        }
         BlockPos floorPos = origin.below();
         BlockState floor = getBlockStateAt(floorPos);
         if (floor == null || this.mob == null) {
             return count;
         }
         var level = this.mob.level();
-
-        byte[] frontCache = new byte[9]; // стан 8 клітинок перед краєм НА РІВНІ СТАРТУ; ключ (dx+1)*3+(dz+1)
         // Дальність залежить від блока, З ЯКОГО моб відривається (тертя / speedFactor / jumpFactor): лід - далі,
         // слайм, пісок душ, мед - ближче; і від Δy (вгору - вікно коротше, тож і дальність менша, навіть на
         // звичайному блоці; вниз - трохи більша). Тому рахуємо тут, для КОЖНОГО вузла й для КОЖНОГО рівня Δy
@@ -188,6 +208,32 @@ public class GapJumpNodeEvaluator extends WalkNodeEvaluator {
     }
 
     /**
+     * Чи є серед 8 напрямків такий, де ВЛАСНА класифікація {@link #classifyFront} НЕ погоджується з
+     * тим, що ванілья вважає звичайним прохідним кроком (WALKABLE) — тобто провалля (люк) чи стовпчик,
+     * який ванілья порахувала відкритим простором. Заповнює {@code frontCache} по дорозі — далі в
+     * {@link #tryRay} та сама перевірка на {@code UNKNOWN} не дасть це перерахувати вдруге.
+     */
+    private boolean anySuspectDirection(BlockPos origin, byte[] frontCache) {
+        for (int dx = -1; dx <= 1; dx++) {
+            for (int dz = -1; dz <= 1; dz++) {
+                if (dx == 0 && dz == 0) {
+                    continue;
+                }
+                int idx = (dx + 1) * 3 + (dz + 1);
+                frontCache[idx] = classifyFront(origin, dx, dz, 0);
+                if (frontCache[idx] != WALKABLE) {
+                    // DEBUG (тимчасово - див. чат): звіряю ваніли й свою класифікацію розійшлись.
+                    System.out.println("[DEBUG GapJumpNodeEvaluator] anySuspectDirection: розбіжність з "
+                            + "ваниллю (count вже було 8) origin=" + origin + " dx=" + dx + " dz=" + dz
+                            + " myClass=" + classificationName(frontCache[idx]));
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /**
      * @param dy landing.y - origin.y: {@code 0} - рівний стрибок, {@code >0} - вгору, {@code <0} - вниз
      *           (у межах {@code -JUMP_DOWN_LIMIT_BLOCKS..+JUMP_UP_LIMIT_BLOCKS} - {@link #getNeighbors})
      */
@@ -203,6 +249,10 @@ public class GapJumpNodeEvaluator extends WalkNodeEvaluator {
         if (frontCache[frontIndex] != VOID) {
             return count;
         }
+        // DEBUG (тимчасово - див. чат): підтверджує, що провалля ВЗАГАЛІ побачене й скан по променю почався.
+        System.out.println("[DEBUG GapJumpNodeEvaluator] tryRay: VOID виявлено, скануємо. origin=" + origin
+                + " front=(" + ray.frontX() + "," + ray.frontZ() + ") dy=" + dy
+                + " kMin=" + ray.kMin() + " kMax=" + ray.kMax());
 
         // 2. Приземлення вздовж променя, на рівні origin.y + dy. ПЕРШЕ придатне - звичайний стрибок. Далі
         //    сканування ТРИВАЄ: якщо за цією платформою знову провалля (на ЇЇ рівні, тобто теж +dy), а ще
@@ -238,6 +288,11 @@ public class GapJumpNodeEvaluator extends WalkNodeEvaluator {
             // за" береться тією самою відносною позицією, що й перша клітинка від краю (лінія періодична).
             voidBehind = classifyFront(origin, dx + ray.frontX(), dz + ray.frontZ(), dy) == VOID;
         }
+        // DEBUG (тимчасово - див. чат): landed=false тут означає "провалля побачили, але НІЯКОГО
+        // придатного приземлення на всьому промені не знайшли" - варто звірити з дальністю (maxGap).
+        System.out.println("[DEBUG GapJumpNodeEvaluator] tryRay: підсумок landed=" + landed
+                + " origin=" + origin + " front=(" + ray.frontX() + "," + ray.frontZ() + ") dy=" + dy
+                + " countAfter=" + count);
         return count;
     }
 

@@ -170,6 +170,10 @@ public class GapJumpAssistGoal extends Goal {
             return false;
         }
         GapJumpUtils.GapJump segment = GapJumpUtils.findUpcomingJumpSegment(this.mob);
+        // DEBUG (тимчасово - див. чат): segment=null тут означає, що готового стрибка в ПОБУДОВАНОМУ
+        // шляху взагалі нема - тобто причина ще ВИЩЕ (GapJumpNodeEvaluator/мексин), не тут.
+        System.out.println("[DEBUG GapJumpAssistGoal] canUse: findUpcomingJumpSegment=" + segment
+                + " pos=" + this.mob.position() + " onGround=" + this.mob.onGround());
         if (segment == null) {
             return false;
         }
