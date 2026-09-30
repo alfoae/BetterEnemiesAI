@@ -1,0 +1,14 @@
+{
+  "required": false,
+  "minVersion": "0.8",
+  "package": "com.example.examplemod.Enemy.EnemyMovement.TerrainShape.Mixin",
+  "compatibilityLevel": "JAVA_17",
+  "refmap": "betterenemiesai.refmap.json",
+  "mixins": [
+    "WalkNodeEvaluatorFloorMixin"
+  ],
+  "client": [],
+  "injectors": {
+    "defaultRequire": 0
+  }
+}

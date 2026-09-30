@@ -81,6 +81,13 @@ side = "BOTH"
 [[mixins]]
 config = "mixins.betterenemiesai.json"
 
+# Окремий конфіг: TerrainShape (форма неповних блоків для ВСІХ наземних мобів, не лише
+# наших) - навмисно окремий пакет/файл від mixins.betterenemiesai.json вище, required=false
+# у самому конфізі (див. WalkNodeEvaluatorFloorMixin) - якщо сигнатура getFloorLevel не
+# збіжиться з реальним 1.21.1, мод далі вантажиться без цього конкретного виправлення.
+[[mixins]]
+config = "mixins.betterenemiesai.terrainshape.json"
+
 # Features are specific properties of the game environment, that you may want to declare you require. This example declares
 # that your mod requires GL version 3.2 or higher. Other features will be added. They are side aware so declaring this won't
 # stop your mod loading on the server for example.

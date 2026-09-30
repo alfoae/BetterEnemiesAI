@@ -35,6 +35,10 @@ public class Config {
     // рахується на рівні самого API постановки блоку (EnemyBreak_N_BuildUtils.placeBlock).
     public static final ModConfigSpec.IntValue MOB_PLACE_DELAY_TICKS;
 
+    // TerrainShape (неповні блоки: горщики/плити/килими/люки/паркани) - див.
+    // Enemy.EnemyMovement.TerrainShape.ShapeProbe та GapJumpNodeEvaluator.*ShapeAware/*Legacy.
+    public static final ModConfigSpec.BooleanValue ENABLE_SHAPE_AWARE_PATHING;
+
     static {
         ModConfigSpec.Builder builder = new ModConfigSpec.Builder();
 
@@ -152,6 +156,17 @@ public class Config {
                 .comment("Мінімальна кількість тіків між постановками блоків ОДНИМ мобом - те ",
                         "саме, що затримка гравця перед установкою блока у ванілі (~4 тіки).")
                 .defineInRange("mobPlaceDelayTicks", 4, 0, 40);
+
+        builder.pop();
+
+        builder.push("Terrain_Shape_Awareness");
+
+        ENABLE_SHAPE_AWARE_PATHING = builder
+                .comment("Увімкнути/Вимкнути врахування РЕАЛЬНОЇ форми неповних блоків (горщики, ",
+                        "плити, килими, люки, паркани - ванільні й з інших модів) у побудові шляху ",
+                        "замість грубого blocksMotion() (true/false). Вимкнення повертає стару ",
+                        "поведінку (GapJumpNodeEvaluator.*Legacy) - для відкату чи порівняння.")
+                .define("enableShapeAwarePathing", true);
 
         builder.pop();
 

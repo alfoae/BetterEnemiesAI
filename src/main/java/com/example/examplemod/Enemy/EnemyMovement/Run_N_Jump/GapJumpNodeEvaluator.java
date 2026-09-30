@@ -1,6 +1,10 @@
 package com.example.examplemod.Enemy.EnemyMovement.Run_N_Jump;
 
+import com.example.examplemod.Config;
+import com.example.examplemod.Enemy.EnemyMovement.TerrainShape.ShapeGeometry;
+import com.example.examplemod.Enemy.EnemyMovement.TerrainShape.ShapeProbe;
 import net.minecraft.core.BlockPos;
+import net.minecraft.world.level.BlockGetter;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.pathfinder.Node;
 import net.minecraft.world.level.pathfinder.PathType;
@@ -253,8 +257,26 @@ public class GapJumpNodeEvaluator extends WalkNodeEvaluator {
     /**
      * Завжди на рівні {@code origin.y + dy} - викликається або з {@code dy=0} (перевірка "тут провалля" на
      * рівні старту), або з поточним Δy променя (перевірка "проміжна платформа скінчилась" - на ЇЇ рівні).
+     * <p>
+     * <b>v6 — форма замість {@code blocksMotion()}.</b> Перемикається {@link Config#ENABLE_SHAPE_AWARE_PATHING}
+     * (типово увімкнено): замість булевого прапорця "≈повний куб" питає РЕАЛЬНУ форму колізії через
+     * {@link ShapeProbe} (розділ {@code TerrainShape}, спільний з ванільним мексином на
+     * {@code WalkNodeEvaluator} — та сама геометрія, той самий поріг покриття). Горщик, килим, нижня/
+     * верхня плита більше не VOID і не BLOCKED — WALKABLE на своїй справжній висоті (закриває частину
+     * TODO(Y) вище: саму КЛАСИФІКАЦІЮ; точна висота Δy для фізики польоту — окремий, ще не зроблений
+     * крок). Відкритий люк (тонка ВЕРТИКАЛЬНА панель при стінці клітинки, не горизонтальна поличка) —
+     * VOID, а не WALKABLE, як було: {@code ShapeProbe.floorSupport} семплить опору по центру клітинки,
+     * де панель узагалі не лежить. Стара {@code blocksMotion()}-логіка лишена поруч
+     * ({@code classifyFrontLegacy}) на випадок, якщо десь знадобиться відкат.
      */
     private byte classifyFront(BlockPos origin, int dx, int dz, int dy) {
+        if (Config.ENABLE_SHAPE_AWARE_PATHING.get()) {
+            return classifyCellShapeAware(origin.offset(dx, dy, dz));
+        }
+        return classifyFrontLegacy(origin, dx, dz, dy);
+    }
+
+    private byte classifyFrontLegacy(BlockPos origin, int dx, int dz, int dy) {
         BlockPos column = origin.offset(dx, dy, dz);
         BlockState feetState = getBlockStateAt(column);
         BlockState floorState = getBlockStateAt(column.below());
@@ -262,6 +284,36 @@ public class GapJumpNodeEvaluator extends WalkNodeEvaluator {
             return BLOCKED;
         }
         return floorState.blocksMotion() ? WALKABLE : VOID;
+    }
+
+    /**
+     * Реальна опора {@code column} — {@link ShapeProbe#floorSupport} рахує форму САМОЇ клітинки
+     * (нуб горщика/килима/нижньої плити ВСЕРЕДИНІ неї) РАЗОМ із формою клітинки під нею (звичайна
+     * підлога чи верхня плита впритул до межі) ОДНІЄЮ геометричною задачею — findSupport сам бере
+     * вищу з двох поверхонь, без жодного спеціального розбору "чи це плита/горщик/килим/люк", тому
+     * працює так само й для блоків з інших модів. Нема реальної опори під заданим {@code footprint}-ом
+     * узагалі (відкритий люк при стінці, справжня порожнеча) — VOID; є опора, але вона впирається в
+     * стелю клітинки (суцільний блок від низу до верху, не тонкий виступ) — BLOCKED; інакше WALKABLE.
+     * <p>
+     * Перевірка "стовпчика" ({@link ShapeProbe#isPillarObstruction}) — ЗАВЖДИ перша, ще до
+     * {@code floorSupport}: паркан (колізія 1.5) ВИЩИЙ за стелю клітинки (1.0), тому
+     * {@code floorSupport} його власний верх у принципі не побачить і піде шукати опору в клітинці
+     * НИЖЧЕ (там зазвичай суцільна земля) — без цієї окремої перевірки клітинка з парканом
+     * помилково вийшла б WALKABLE (опора "знайдена" у сусідній клітинці, а сам стовпчик просто
+     * випав з розрахунку).
+     */
+    private byte classifyCellShapeAware(BlockPos column) {
+        BlockGetter level = levelReader();
+        ShapeGeometry.Footprint footprint = ShapeProbe.centeredFootprint(column, mobFootprintWidth());
+        if (ShapeProbe.isPillarObstruction(level, column, footprint)) {
+            return BLOCKED;
+        }
+        ShapeGeometry.Support support = ShapeProbe.floorSupport(level, column, footprint);
+        if (support.coverage() < ShapeProbe.MIN_FLOOR_COVERAGE) {
+            return VOID;
+        }
+        double clearance = (column.getY() + 1.0) - support.surfaceY();
+        return clearance >= ShapeProbe.MIN_STANDING_CLEARANCE ? WALKABLE : BLOCKED;
     }
 
     /**
@@ -283,6 +335,13 @@ public class GapJumpNodeEvaluator extends WalkNodeEvaluator {
 
     /** Клітинки в діапазоні висот {@code [min(0,dy), max(1,dy+1)]} не мають бути суцільними. */
     private boolean blocksBody(BlockPos originColumn, int dy) {
+        if (Config.ENABLE_SHAPE_AWARE_PATHING.get()) {
+            return blocksBodyShapeAware(originColumn, dy);
+        }
+        return blocksBodyLegacy(originColumn, dy);
+    }
+
+    private boolean blocksBodyLegacy(BlockPos originColumn, int dy) {
         int low = Math.min(0, dy);
         int high = Math.max(1, dy + 1);
         for (int y = low; y <= high; y++) {
@@ -294,8 +353,35 @@ public class GapJumpNodeEvaluator extends WalkNodeEvaluator {
         return false;
     }
 
+    /**
+     * Те саме, форма замість {@code blocksMotion()}: тонкий виступ чи панель скраю клітинки (край
+     * відкритого люка, стовпчик паркану не по центру променя) більше не гасять увесь коридор польоту,
+     * якщо мобу реально є куди пролетіти повз них — {@link ShapeProbe#blocksBody} рахує перекриту
+     * частку сліду мобу, а не саму лише наявність будь-якої геометрії в клітинці.
+     */
+    private boolean blocksBodyShapeAware(BlockPos originColumn, int dy) {
+        BlockGetter level = levelReader();
+        double width = mobFootprintWidth();
+        int low = Math.min(0, dy);
+        int high = Math.max(1, dy + 1);
+        for (int y = low; y <= high; y++) {
+            BlockPos cell = originColumn.offset(0, y, 0);
+            if (ShapeProbe.blocksBody(level, cell, ShapeProbe.centeredFootprint(cell, width))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     /** Підлога тверда, а на рівні ніг вільно - на рівні {@code origin.y + dy}. */
     private boolean hasFloorAt(BlockPos origin, int dx, int dz, int dy) {
+        if (Config.ENABLE_SHAPE_AWARE_PATHING.get()) {
+            return classifyCellShapeAware(origin.offset(dx, dy, dz)) == WALKABLE;
+        }
+        return hasFloorAtLegacy(origin, dx, dz, dy);
+    }
+
+    private boolean hasFloorAtLegacy(BlockPos origin, int dx, int dz, int dy) {
         BlockPos column = origin.offset(dx, dy, dz);
         BlockPos floorPos = column.below();
 
@@ -315,7 +401,12 @@ public class GapJumpNodeEvaluator extends WalkNodeEvaluator {
         if (!hasFloorAt(origin, dx, dz, dy)) {
             return false;
         }
-        BlockState headState = getBlockStateAt(origin.offset(dx, dy + 1, dz));
+        BlockPos head = origin.offset(dx, dy + 1, dz);
+        if (Config.ENABLE_SHAPE_AWARE_PATHING.get()) {
+            BlockGetter level = levelReader();
+            return !ShapeProbe.blocksBody(level, head, ShapeProbe.centeredFootprint(head, mobFootprintWidth()));
+        }
+        BlockState headState = getBlockStateAt(head);
         return headState != null && !headState.blocksMotion();
     }
 
@@ -331,5 +422,27 @@ public class GapJumpNodeEvaluator extends WalkNodeEvaluator {
             return this.mob.level().getBlockState(pos);
         }
         return null;
+    }
+
+    /**
+     * {@link BlockGetter} для {@link ShapeProbe} — той самий пріоритет джерела, що й
+     * {@link #getBlockStateAt}: контекст пошуку (Fast/Thread-safe), інакше фолбек на живий світ моба.
+     */
+    private BlockGetter levelReader() {
+        if (this.currentContext != null) {
+            return this.currentContext.level();
+        }
+        if (this.mob != null) {
+            return this.mob.level();
+        }
+        return null;
+    }
+
+    /**
+     * Реальна ширина ЦЬОГО моба — точніша за {@link ShapeProbe#DEFAULT_MOB_WIDTH} (типове значення
+     * для загального ванільного мексину, де конкретного {@code Mob} під рукою нема).
+     */
+    private double mobFootprintWidth() {
+        return this.mob != null ? this.mob.getBbWidth() : ShapeProbe.DEFAULT_MOB_WIDTH;
     }
 }
