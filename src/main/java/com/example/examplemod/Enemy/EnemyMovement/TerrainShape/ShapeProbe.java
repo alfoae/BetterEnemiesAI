@@ -7,6 +7,7 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.world.level.BlockGetter;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.phys.AABB;
+import net.minecraft.world.phys.shapes.Shapes;
 import net.minecraft.world.phys.shapes.VoxelShape;
 
 import java.util.ArrayList;
@@ -17,13 +18,15 @@ import java.util.List;
  * {@link ShapeGeometry}. Це ЄДИНЕ місце в моді, що читає {@code VoxelShape} напряму — усе інше
  * (evaluator, мексин) працює через ці методи, а не через {@code blocksMotion()}/{@code isSolid()}.
  * <p>
- * <b>Швидкий шлях (продуктивність).</b> {@link #boxesOf} спершу питає {@code state.blocksMotion()} —
- * ту саму закешовану ваніллю властивість "форма ≈ повний куб". Якщо вона {@code true}, форму НЕ
- * розкладаємо (це і так майже завжди правильна відповідь, а {@code getCollisionShape} +
- * {@code toAabbs()} для реального блока з мода з динамічною формою можуть коштувати дорожче за просте
- * читання прапорця). Розклад на окремі коробки відбувається лише для "неоднозначних" блоків —
- * {@code blocksMotion()==false}, але форма не порожня (плити, горщики, паркани, люки, килими тощо) —
- * а це рідкість на типовому ландшафті.
+ * <b>Швидкий шлях (продуктивність).</b> {@link #boxesOf} завжди питає реальну
+ * {@code state.getCollisionShape(level, pos)} (без цього нема як дізнатись правду), але розкладає її
+ * на окремі коробки ({@code toAabbs()}) лише коли це справді потрібно: якщо отримана форма —
+ * САМЕ той самий спільний екземпляр "повний куб" ({@code Shapes.block()}), повертаємо одну готову
+ * коробку на всю клітинку без розкладання. Раніше тут для цього ж рішення питався
+ * {@code state.blocksMotion()} — виявилось помилкою (див. чат): цей прапорець — окрема "legacy
+ * solid" властивість, не синонім "форма ≈ повний куб", і для блоків із залежною від стану формою
+ * (люки, двері) лишається {@code true} незалежно від поточного стану (відкритий люк теж давав
+ * {@code true}, тому форма для нього взагалі не розкладалась).
  * <p>
  * Не бере на себе {@code isPathfindable(BlockState, PathComputationType)} — окремий opt-in хук,
  * яким блок (ванільний чи модовий) сам каже "по мені не можна ходити" (сніг по висоті шарів тощо).
@@ -71,6 +74,17 @@ public final class ShapeProbe {
      * Розкладає форму колізії блока на список коробок в АБСОЛЮТНИХ світових координатах.
      * Порожній список — блок геометрично прохідний наскрізь (справжнє повітря чи форма без колізії,
      * напр. квіти чи смолоскип).
+     * <p>
+     * <b>ВАЖЛИВО — тут НЕ використовується {@code state.blocksMotion()}</b> (раніше було, і це була
+     * реальна знайдена помилка — див. чат). Цей прапорець ("legacy solid") — НЕ "форма ≈ повний куб":
+     * за офіційним вікі Minecraft він "distinct from... whether the block has a collision box, is a
+     * full block", і для блоків із динамічною формою (двері, люки) лишається {@code true} незалежно
+     * від поточного стану. Для ВІДКРИТОГО люка це давало {@code blocksMotion()==true}, тож форма
+     * взагалі не розкладалась — клітинка трактувалась як суцільний блок. Натомість звіряємо САМУ
+     * отриману форму з {@link Shapes#block()} (єдиний спільний екземпляр "повний куб", яким
+     * повертає {@code getCollisionShape} для дійсно повних блоків) — це робить реальний рушій
+     * Minecraft для того самого питання (див. {@code VoxelShape#isFullBlock()}), тому безпечно
+     * покладатись на цю саму перевірку.
      */
     public static List<Box> boxesOf(BlockGetter level, BlockPos pos) {
         List<Box> boxes = new ArrayList<>(2);
@@ -78,13 +92,15 @@ public final class ShapeProbe {
             return boxes;
         }
         BlockState state = level.getBlockState(pos);
-        if (state.blocksMotion()) {
-            boxes.add(new Box(pos.getX(), pos.getY(), pos.getZ(),
-                    pos.getX() + 1.0, pos.getY() + 1.0, pos.getZ() + 1.0));
-            return boxes;
-        }
         VoxelShape shape = state.getCollisionShape(level, pos);
         if (shape.isEmpty()) {
+            return boxes;
+        }
+        if (shape == Shapes.block()) {
+            // дешевий і БЕЗПЕЧНИЙ шлях: САМЕ посилання на єдиний спільний "повний куб" - не
+            // окремий прапорець, а звірка з тим, що ми щойно реально отримали від getCollisionShape.
+            boxes.add(new Box(pos.getX(), pos.getY(), pos.getZ(),
+                    pos.getX() + 1.0, pos.getY() + 1.0, pos.getZ() + 1.0));
             return boxes;
         }
         for (AABB box : shape.toAabbs()) {

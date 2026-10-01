@@ -38,9 +38,7 @@ public final class ShapeGeometry {
             return maxX > f.minX() && minX < f.maxX() && maxZ > f.minZ() && minZ < f.maxZ();
         }
 
-        /**
-         * Площа перетину горизонтальної проекції коробки з footprint-ом (0, якщо не перетинаються).
-         */
+        /** Площа перетину горизонтальної проекції коробки з footprint-ом (0, якщо не перетинаються). */
         public double intersectionAreaXZ(Footprint f) {
             double dx = Math.min(maxX, f.maxX()) - Math.max(minX, f.minX());
             double dz = Math.min(maxZ, f.maxZ()) - Math.max(minZ, f.minZ());
@@ -53,9 +51,7 @@ public final class ShapeGeometry {
      */
     public record Footprint(double minX, double minZ, double maxX, double maxZ) {
 
-        /**
-         * Квадрат заданої ширини, відцентрований у (cx, cz).
-         */
+        /** Квадрат заданої ширини, відцентрований у (cx, cz). */
         public static Footprint centered(double cx, double cz, double width) {
             double h = width / 2.0;
             return new Footprint(cx - h, cz - h, cx + h, cz + h);

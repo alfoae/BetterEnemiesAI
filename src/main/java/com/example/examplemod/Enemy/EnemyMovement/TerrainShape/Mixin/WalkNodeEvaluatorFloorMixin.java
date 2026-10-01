@@ -5,7 +5,6 @@ import com.example.examplemod.Enemy.EnemyMovement.TerrainShape.ShapeGeometry;
 import com.example.examplemod.Enemy.EnemyMovement.TerrainShape.ShapeProbe;
 import net.minecraft.core.BlockPos;
 import net.minecraft.world.level.BlockGetter;
-import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.pathfinder.PathType;
 import net.minecraft.world.level.pathfinder.WalkNodeEvaluator;
 import org.spongepowered.asm.mixin.Mixin;
@@ -39,10 +38,10 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
  * неповних блоків (плити, килими, горщики) — раніше ванільний node.y для них теж міг бути неточним;
  * тепер {@code GapJumpNodeEvaluator} (v6) і ЦЕЙ мексин рахують висоту ОДНАКОВО, тим самим кодом.
  * <p>
- * <b>Продуктивність.</b> {@link ShapeProbe#boxesOf} має дешевий фолбек: якщо {@code blocksMotion()}
- * блока {@code true}, форма НЕ розкладається (той самий прапорець, який ванілья вже порахувала).
- * Розклад {@code VoxelShape} на коробки відбувається лише для "неоднозначних" блоків — рідкість на
- * типовому ландшафті.
+ * <b>Продуктивність.</b> {@link ShapeProbe#boxesOf} розкладає {@code VoxelShape} на коробки лише
+ * коли форма НЕ є спільним екземпляром "повний куб" ({@code Shapes.block()}) — рідкість на типовому
+ * ландшафті. Раніше тут замість цього питався {@code blocksMotion()} — саме це й ламало люки, див.
+ * клас {@code ShapeProbe} за деталями.
  * <p>
  * <b>ЧЕСНО, найменш перевірена частина всієї роботи.</b> Точний дескриптор методу нижче
  * (аргументи {@code BlockGetter, BlockPos}, повертає {@code double}, {@code protected static}) —
@@ -79,10 +78,9 @@ public abstract class WalkNodeEvaluatorFloorMixin {
     )
     private static void betterEnemiesAi$shapeAwareFloorLevel(
             BlockGetter level, BlockPos pos, CallbackInfoReturnable<Double> cir) {
-        BlockState state = level.getBlockState(pos);
-        if (state.blocksMotion()) {
-            return; // майже повний куб - ванільна відповідь (pos.getY()+1) і так правильна, не чіпаємо
-        }
+        // ТУТ НЕ перевіряємо state.blocksMotion() (раніше було - виявилось помилкою, див. чат: для
+        // люків/дверей цей прапорець лишається true незалежно від open/closed). Швидкий шлях для
+        // дійсно повних блоків усе одно є - всередині ShapeProbe.boxesOf, звіркою самої форми.
         boolean enabled = Config.ENABLE_SHAPE_AWARE_PATHING.get();
         double width = ShapeProbe.DEFAULT_MOB_WIDTH; // мобо-агностичний виклик - конкретного Mob тут нема
         ShapeGeometry.Footprint footprint = ShapeProbe.centeredFootprint(pos, width);
@@ -91,7 +89,7 @@ public abstract class WalkNodeEvaluatorFloorMixin {
             // DEBUG (тимчасово - див. чат): рахуємо це НАВІТЬ коли enabled=false, щоб побачити в лозі,
             // якщо причина взагалі не тут (тумблер вимкнений, чи ця гілка не викликається).
             System.out.println("[DEBUG TerrainShape] getFloorLevel NO-SUPPORT pos=" + pos
-                    + " state=" + state
+                    + " state=" + level.getBlockState(pos)
                     + " vanillaAnswer=" + cir.getReturnValue()
                     + " shapeAwareEnabled=" + enabled
                     + " coverage=" + support.coverage());

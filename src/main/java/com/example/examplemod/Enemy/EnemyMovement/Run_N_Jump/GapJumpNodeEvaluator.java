@@ -149,18 +149,6 @@ public class GapJumpNodeEvaluator extends WalkNodeEvaluator {
     /** На рівні ніг стіна/блок (або світ недоступний): крізь неї стрибок не йде. */
     private static final byte BLOCKED = 3;
 
-    /**
-     * DEBUG-хелпер (тимчасово - див. чат): читабельна назва замість сирого byte.
-     */
-    private static String classificationName(byte value) {
-        return switch (value) {
-            case WALKABLE -> "WALKABLE";
-            case VOID -> "VOID";
-            case BLOCKED -> "BLOCKED";
-            default -> "UNKNOWN(" + value + ")";
-        };
-    }
-
     @Override
     public int getNeighbors(Node[] nodes, Node node) {
         int count = super.getNeighbors(nodes, node);
@@ -294,6 +282,18 @@ public class GapJumpNodeEvaluator extends WalkNodeEvaluator {
                 + " origin=" + origin + " front=(" + ray.frontX() + "," + ray.frontZ() + ") dy=" + dy
                 + " countAfter=" + count);
         return count;
+    }
+
+    /**
+     * DEBUG-хелпер (тимчасово - див. чат): читабельна назва замість сирого byte.
+     */
+    private static String classificationName(byte value) {
+        return switch (value) {
+            case WALKABLE -> "WALKABLE";
+            case VOID -> "VOID";
+            case BLOCKED -> "BLOCKED";
+            default -> "UNKNOWN(" + value + ")";
+        };
     }
 
     private Node jumpNode(BlockPos origin, int dx, int dz, int dy, boolean skip) {
