@@ -51,14 +51,14 @@ public final class ShapeGeometry {
      */
     public record Footprint(double minX, double minZ, double maxX, double maxZ) {
 
+        public double area() {
+            return Math.max(0.0, maxX - minX) * Math.max(0.0, maxZ - minZ);
+        }
+
         /** Квадрат заданої ширини, відцентрований у (cx, cz). */
         public static Footprint centered(double cx, double cz, double width) {
             double h = width / 2.0;
             return new Footprint(cx - h, cz - h, cx + h, cz + h);
-        }
-
-        public double area() {
-            return Math.max(0.0, maxX - minX) * Math.max(0.0, maxZ - minZ);
         }
     }
 

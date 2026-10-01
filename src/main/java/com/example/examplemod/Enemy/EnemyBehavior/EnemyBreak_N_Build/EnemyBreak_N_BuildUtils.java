@@ -165,6 +165,14 @@ public final class EnemyBreak_N_BuildUtils {
     }
 
     /**
+     * Прогресивний бекоф: перші {@link #UNREACHABLE_FAST_RETRY_TICKS} тіків недосяжності - кожен
+     * тік (раптом перепона щойно зникла), далі - раз на {@link Config#UNREACHABLE_RECOMPUTE_INTERVAL_TICKS}.
+     * Немає сенсу робити це складнішим (більше сходинок бекофу) - нам потрібно лише не бити по CPU
+     * щотіку заради цілі, яка вже довго недосяжна, а не ідеальну криву витрат.
+     */
+    private static final int UNREACHABLE_FAST_RETRY_TICKS = 5;
+
+    /**
      * Повертає закешований (на цей тік, для цієї цілі) {@link Path}, рахуючи {@code createPath()}
      * лише якщо ще не рахували. Викликається і з {@link #isNavigationBlocked}, і напряму з
      * {@code PursuitEnemyMeleeBehavior.tick()} — щоб реальний рух ішов по ТОМУ САМОМУ шляху, який
@@ -178,7 +186,24 @@ public final class EnemyBreak_N_BuildUtils {
             return cache.path;
         }
 
+        // v12 - ТРОТЛІНГ для недосяжної цілі (той самий пункт "Б", що ми давно узгодили, просто
+        // руки дійшли тільки зараз - виявлено користувачем через лаг: GapJumpNodeEvaluator на
+        // широкому непрохідному розриві щотіку вичерпно обшукує околицю, перш ніж здатися, а
+        // createPath() тут рахувався КОЖЕН тік без винятку, поки моб переслідує - 20 повних
+        // пошуків на секунду замість одного. targetChanged скидає троттлінг одразу: якщо ціль
+        // (округлена до блока) зрушила - стара застигла відповідь може бути геть не про те.
+        boolean targetChanged = !pathTarget.equals(cache.pathTarget);
+        if (!targetChanged && cache.consecutiveUnreachableTicks > 0) {
+            int interval = recomputeIntervalFor(cache.consecutiveUnreachableTicks);
+            if (mob.tickCount - cache.lastRealComputeTick < interval) {
+                cache.tickComputed = mob.tickCount; // той самий тік - не рахувати ще раз із getOrComputePath()
+                return cache.path; // та сама (застигла) відповідь, БЕЗ нового createPath()
+            }
+        }
+
         Path path = mob.getNavigation().createPath(pathTarget, 0);
+        cache.lastRealComputeTick = mob.tickCount;
+        cache.consecutiveUnreachableTicks = (path != null && path.canReach()) ? 0 : cache.consecutiveUnreachableTicks + 1;
 
         // [PATH DEBUG] - лишаю (корисно знайшли не я): тепер спрацьовує лише на СПРАВЖНЬОМУ
         // обчисленні (не на кожному зверненні з різних місць), тож більше не дублюється з
@@ -186,8 +211,9 @@ public final class EnemyBreak_N_BuildUtils {
         if (path != null && path.getNodeCount() > 0) {
             Node end = path.getEndNode();
             debugMsg(mob, String.format(
-                    "[PATH DEBUG] target=%s canReach=%s nodes=%d endNode=(%d,%d,%d)",
-                    pathTarget, path.canReach(), path.getNodeCount(), end.x, end.y, end.z));
+                    "[PATH DEBUG] target=%s canReach=%s nodes=%d endNode=(%d,%d,%d) недосяжна_підряд=%d",
+                    pathTarget, path.canReach(), path.getNodeCount(), end.x, end.y, end.z,
+                    cache.consecutiveUnreachableTicks));
         }
 
         cache.tickComputed = mob.tickCount;
@@ -195,6 +221,13 @@ public final class EnemyBreak_N_BuildUtils {
         cache.canReach = path != null && path.canReach();
         cache.path = path;
         return path;
+    }
+
+    private static int recomputeIntervalFor(int consecutiveUnreachableTicks) {
+        if (consecutiveUnreachableTicks < UNREACHABLE_FAST_RETRY_TICKS) {
+            return 1;
+        }
+        return Config.UNREACHABLE_RECOMPUTE_INTERVAL_TICKS.get();
     }
 
     /**
@@ -306,6 +339,9 @@ public final class EnemyBreak_N_BuildUtils {
         BlockPos pathTarget;
         boolean canReach;
         Path path;
+        // v12 - троттлінг недосяжної цілі, див. getOrComputePath вище.
+        int consecutiveUnreachableTicks = 0;
+        int lastRealComputeTick = Integer.MIN_VALUE;
     }
 
     private static boolean isPassableColumn(Level level, BlockPos pos) {

@@ -39,6 +39,10 @@ public class Config {
     // Enemy.EnemyMovement.TerrainShape.ShapeProbe та GapJumpNodeEvaluator.*ShapeAware/*Legacy.
     public static final ModConfigSpec.BooleanValue ENABLE_SHAPE_AWARE_PATHING;
 
+    // Троттлінг createPath() для цілі, що лишається недосяжною кілька тіків підряд - див.
+    // EnemyBreak_N_BuildUtils.getOrComputePath/recomputeIntervalFor.
+    public static final ModConfigSpec.IntValue UNREACHABLE_RECOMPUTE_INTERVAL_TICKS;
+
     static {
         ModConfigSpec.Builder builder = new ModConfigSpec.Builder();
 
@@ -167,6 +171,14 @@ public class Config {
                         "замість грубого blocksMotion() (true/false). Вимкнення повертає стару ",
                         "поведінку (GapJumpNodeEvaluator.*Legacy) - для відкату чи порівняння.")
                 .define("enableShapeAwarePathing", true);
+
+        UNREACHABLE_RECOMPUTE_INTERVAL_TICKS = builder
+                .comment("Коли ціль лишається недосяжною (canReach=false) довше кількох тіків ",
+                        "підряд, createPath() більше не рахується КОЖЕН тік - лише раз на стільки ",
+                        "тіків. 20 тіків = раз на секунду. Менше значення - швидше помітить, коли ",
+                        "перепона нарешті стане прохідною, але й частіше вантажить CPU на широких ",
+                        "непрохідних розривах.")
+                .defineInRange("unreachableRecomputeIntervalTicks", 20, 1, 200);
 
         builder.pop();
 

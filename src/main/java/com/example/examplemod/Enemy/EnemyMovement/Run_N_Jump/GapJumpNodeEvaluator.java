@@ -149,6 +149,16 @@ public class GapJumpNodeEvaluator extends WalkNodeEvaluator {
     /** На рівні ніг стіна/блок (або світ недоступний): крізь неї стрибок не йде. */
     private static final byte BLOCKED = 3;
 
+    /** DEBUG-хелпер (тимчасово - див. чат): читабельна назва замість сирого byte. */
+    private static String classificationName(byte value) {
+        return switch (value) {
+            case WALKABLE -> "WALKABLE";
+            case VOID -> "VOID";
+            case BLOCKED -> "BLOCKED";
+            default -> "UNKNOWN(" + value + ")";
+        };
+    }
+
     @Override
     public int getNeighbors(Node[] nodes, Node node) {
         int count = super.getNeighbors(nodes, node);
@@ -172,6 +182,12 @@ public class GapJumpNodeEvaluator extends WalkNodeEvaluator {
             return count;
         }
         var level = this.mob.level();
+        // DEBUG (тимчасово - див. чат): рахунок на ЦЕЙ виклик getNeighbors - один підсумковий рядок
+        // замість логу на кожен окремий промінь (той самий origin міг раніше дати тисячі рядків за
+        // секунду й витісняв усе інше з буфера логу - саме це й викликало "лаги при зборі логів").
+        int debugRaysAttempted = 0;
+        int debugLanded = 0;
+        int countBefore = count;
         // Дальність залежить від блока, З ЯКОГО моб відривається (тертя / speedFactor / jumpFactor): лід - далі,
         // слайм, пісок душ, мед - ближче; і від Δy (вгору - вікно коротше, тож і дальність менша, навіть на
         // звичайному блоці; вниз - трохи більша). Тому рахуємо тут, для КОЖНОГО вузла й для КОЖНОГО рівня Δy
@@ -189,8 +205,22 @@ public class GapJumpNodeEvaluator extends WalkNodeEvaluator {
                 if (count >= nodes.length) {
                     break; // буфер сусідів повний - більше нема куди писати (промені відсортовані: спершу найближчі)
                 }
-                count = tryRay(nodes, count, origin, ray, frontCache, dy);
+                int before = count;
+                if (frontIsVoid(origin, ray, frontCache)) {
+                    debugRaysAttempted++;
+                    count = tryRay(nodes, count, origin, ray, dy);
+                    if (count > before) {
+                        debugLanded++;
+                    }
+                }
             }
+        }
+        if (debugRaysAttempted > 0) {
+            // DEBUG (тимчасово - див. чат): один рядок на весь виклик, не на кожен промінь.
+            System.out.println("[DEBUG GapJumpNodeEvaluator] getNeighbors: origin=" + origin
+                    + " провалля_знайдено_і_проскановано=" + debugRaysAttempted
+                    + " приземлень_знайдено=" + debugLanded
+                    + " вузлів_додано=" + (count - countBefore));
         }
         return count;
     }
@@ -222,25 +252,23 @@ public class GapJumpNodeEvaluator extends WalkNodeEvaluator {
     }
 
     /**
-     * @param dy landing.y - origin.y: {@code 0} - рівний стрибок, {@code >0} - вгору, {@code <0} - вниз
-     *           (у межах {@code -JUMP_DOWN_LIMIT_BLOCKS..+JUMP_UP_LIMIT_BLOCKS} - {@link #getNeighbors})
+     * Чи VOID у напрямку променя (рахує {@code frontCache} по дорозі, якщо ще не рахували).
      */
-    private int tryRay(Node[] nodes, int count, BlockPos origin, GapJumpRays.Ray ray, byte[] frontCache, int dy) {
-        // 1. Край у цьому напрямку? Перша клітинка має бути справжнім проваллям, ЗАВЖДИ на рівні СТАРТУ
-        //    (dy тут НЕ підставляємо - "лесенка", де порожньо на обох поверхах, інакше не розпізнається як
-        //    провалля). Якщо вона прохідна - звичайний крок з цього вже впорається (а стрибок згенерується
-        //    з наступної клітинки); якщо там стіна - крізь неї не стрибаємо.
+    private boolean frontIsVoid(BlockPos origin, GapJumpRays.Ray ray, byte[] frontCache) {
         int frontIndex = (ray.frontX() + 1) * 3 + (ray.frontZ() + 1);
         if (frontCache[frontIndex] == UNKNOWN) {
             frontCache[frontIndex] = classifyFront(origin, ray.frontX(), ray.frontZ(), 0);
         }
-        if (frontCache[frontIndex] != VOID) {
-            return count;
-        }
-        // DEBUG (тимчасово - див. чат): підтверджує, що провалля ВЗАГАЛІ побачене й скан по променю почався.
-        System.out.println("[DEBUG GapJumpNodeEvaluator] tryRay: VOID виявлено, скануємо. origin=" + origin
-                + " front=(" + ray.frontX() + "," + ray.frontZ() + ") dy=" + dy
-                + " kMin=" + ray.kMin() + " kMax=" + ray.kMax());
+        return frontCache[frontIndex] == VOID;
+    }
+
+    /**
+     * @param dy landing.y - origin.y: {@code 0} - рівний стрибок, {@code >0} - вгору, {@code <0} - вниз
+     *           (у межах {@code -JUMP_DOWN_LIMIT_BLOCKS..+JUMP_UP_LIMIT_BLOCKS} - {@link #getNeighbors})
+     */
+    private int tryRay(Node[] nodes, int count, BlockPos origin, GapJumpRays.Ray ray, int dy) {
+        // 1. Край у цьому напрямку перевірений викликачем ({@link #frontIsVoid}) ДО виклику цього методу -
+        //    тут це вже відомо VOID, тому тут самого цього рядка більше нема, лишився лише коментар.
 
         // 2. Приземлення вздовж променя, на рівні origin.y + dy. ПЕРШЕ придатне - звичайний стрибок. Далі
         //    сканування ТРИВАЄ: якщо за цією платформою знову провалля (на ЇЇ рівні, тобто теж +dy), а ще
@@ -276,24 +304,9 @@ public class GapJumpNodeEvaluator extends WalkNodeEvaluator {
             // за" береться тією самою відносною позицією, що й перша клітинка від краю (лінія періодична).
             voidBehind = classifyFront(origin, dx + ray.frontX(), dz + ray.frontZ(), dy) == VOID;
         }
-        // DEBUG (тимчасово - див. чат): landed=false тут означає "провалля побачили, але НІЯКОГО
-        // придатного приземлення на всьому промені не знайшли" - варто звірити з дальністю (maxGap).
-        System.out.println("[DEBUG GapJumpNodeEvaluator] tryRay: підсумок landed=" + landed
-                + " origin=" + origin + " front=(" + ray.frontX() + "," + ray.frontZ() + ") dy=" + dy
-                + " countAfter=" + count);
+        // (landed=false тут означає "провалля побачили, але жодного приземлення на всьому промені не
+        // знайшли" - видно в підсумковому рядку з getNeighbors, окремий лог тут більше не потрібен.)
         return count;
-    }
-
-    /**
-     * DEBUG-хелпер (тимчасово - див. чат): читабельна назва замість сирого byte.
-     */
-    private static String classificationName(byte value) {
-        return switch (value) {
-            case WALKABLE -> "WALKABLE";
-            case VOID -> "VOID";
-            case BLOCKED -> "BLOCKED";
-            default -> "UNKNOWN(" + value + ")";
-        };
     }
 
     private Node jumpNode(BlockPos origin, int dx, int dz, int dy, boolean skip) {
