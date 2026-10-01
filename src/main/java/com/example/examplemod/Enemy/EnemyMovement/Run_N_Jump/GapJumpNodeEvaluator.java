@@ -149,16 +149,6 @@ public class GapJumpNodeEvaluator extends WalkNodeEvaluator {
     /** На рівні ніг стіна/блок (або світ недоступний): крізь неї стрибок не йде. */
     private static final byte BLOCKED = 3;
 
-    /** DEBUG-хелпер (тимчасово - див. чат): читабельна назва замість сирого byte. */
-    private static String classificationName(byte value) {
-        return switch (value) {
-            case WALKABLE -> "WALKABLE";
-            case VOID -> "VOID";
-            case BLOCKED -> "BLOCKED";
-            default -> "UNKNOWN(" + value + ")";
-        };
-    }
-
     @Override
     public int getNeighbors(Node[] nodes, Node node) {
         int count = super.getNeighbors(nodes, node);
@@ -226,6 +216,18 @@ public class GapJumpNodeEvaluator extends WalkNodeEvaluator {
     }
 
     /**
+     * DEBUG-хелпер (тимчасово - див. чат): читабельна назва замість сирого byte.
+     */
+    private static String classificationName(byte value) {
+        return switch (value) {
+            case WALKABLE -> "WALKABLE";
+            case VOID -> "VOID";
+            case BLOCKED -> "BLOCKED";
+            default -> "UNKNOWN(" + value + ")";
+        };
+    }
+
+    /**
      * Чи є серед 8 напрямків такий, де ВЛАСНА класифікація {@link #classifyFront} НЕ погоджується з
      * тим, що ванілья вважає звичайним прохідним кроком (WALKABLE) — тобто провалля (люк) чи стовпчик,
      * який ванілья порахувала відкритим простором. Заповнює {@code frontCache} по дорозі — далі в
@@ -249,17 +251,6 @@ public class GapJumpNodeEvaluator extends WalkNodeEvaluator {
             }
         }
         return false;
-    }
-
-    /**
-     * Чи VOID у напрямку променя (рахує {@code frontCache} по дорозі, якщо ще не рахували).
-     */
-    private boolean frontIsVoid(BlockPos origin, GapJumpRays.Ray ray, byte[] frontCache) {
-        int frontIndex = (ray.frontX() + 1) * 3 + (ray.frontZ() + 1);
-        if (frontCache[frontIndex] == UNKNOWN) {
-            frontCache[frontIndex] = classifyFront(origin, ray.frontX(), ray.frontZ(), 0);
-        }
-        return frontCache[frontIndex] == VOID;
     }
 
     /**
@@ -307,6 +298,17 @@ public class GapJumpNodeEvaluator extends WalkNodeEvaluator {
         // (landed=false тут означає "провалля побачили, але жодного приземлення на всьому промені не
         // знайшли" - видно в підсумковому рядку з getNeighbors, окремий лог тут більше не потрібен.)
         return count;
+    }
+
+    /**
+     * Чи VOID у напрямку променя (рахує {@code frontCache} по дорозі, якщо ще не рахували).
+     */
+    private boolean frontIsVoid(BlockPos origin, GapJumpRays.Ray ray, byte[] frontCache) {
+        int frontIndex = (ray.frontX() + 1) * 3 + (ray.frontZ() + 1);
+        if (frontCache[frontIndex] == UNKNOWN) {
+            frontCache[frontIndex] = classifyFront(origin, ray.frontX(), ray.frontZ(), 0);
+        }
+        return frontCache[frontIndex] == VOID;
     }
 
     private Node jumpNode(BlockPos origin, int dx, int dz, int dy, boolean skip) {

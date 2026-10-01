@@ -166,9 +166,13 @@ public class GapJumpAssistGoal extends Goal {
 
     @Override
     public boolean canUse() {
-        if (!PursuitEnemyBehavior.isMemoryChasing(this.mob)) {
-            return false;
-        }
+        // v13 - ТУТ РАНІШЕ був "if (!PursuitEnemyBehavior.isMemoryChasing(this.mob)) return false;" -
+        // реальний знайдений баг (див. чат): через нього GapJumpAssistGoal міг стартувати ЛИШЕ коли
+        // моб УЖЕ втратив ціль з очей (memory chasing), а не під час звичайного переслідування
+        // видимої цілі - тобто саме тоді, коли стрибок найчастіше й потрібен. Суперечило й логіці
+        // PursuitEnemyMeleeBehavior.shouldYieldToGapJump(), яка такого обмеження не має: вона
+        // передає керування сюди, щойно findUpcomingJumpSegment бачить стрибок, незалежно від
+        // memoryChasing - і саме ця умова (не isMemoryChasing) тепер єдина й достатня підстава.
         GapJumpUtils.GapJump segment = GapJumpUtils.findUpcomingJumpSegment(this.mob);
         // DEBUG (тимчасово - див. чат): segment=null тут означає, що готового стрибка в ПОБУДОВАНОМУ
         // шляху взагалі нема - тобто причина ще ВИЩЕ (GapJumpNodeEvaluator/мексин), не тут.
@@ -213,10 +217,11 @@ public class GapJumpAssistGoal extends Goal {
 
     @Override
     public boolean canContinueToUse() {
-        boolean result =
-                !this.done
-                        && this.jump != null
-                        && PursuitEnemyBehavior.isMemoryChasing(this.mob);
+        // v13 - те саме прибране обмеження, що й у canUse() (див. коментар там): раніше тут був
+        // ще й "&& isMemoryChasing" - навіть якби canUse() стартував під час звичайного
+        // переслідування, ЦЕЙ рядок зупиняв би ціль одразу на наступному тіку (isMemoryChasing тоді
+        // ще false), тож стрибок усе одно б не встигав виконатись.
+        boolean result = !this.done && this.jump != null;
 
         System.out.println(
                 "[DEBUG GapJumpAssistGoal] CAN_CONTINUE=" + result
@@ -651,8 +656,11 @@ public class GapJumpAssistGoal extends Goal {
      * @return true, якщо наступний сегмент прийнято (стан уже скинуто {@link #beginSegment})
      */
     private boolean chainNextSegment() {
-        if (this.chainCount >= MAX_CHAIN_SEGMENTS
-                || !PursuitEnemyBehavior.isMemoryChasing(this.mob)) {
+        // v13 - те саме прибране обмеження (див. canUse()): інакше ланцюжок із кількох стрибків
+        // поспіль (наприклад, кілька відкритих люків підряд) обривався б одразу після першого
+        // стрибка, поки моб ще бачить ціль - саме це й пояснювало "пригнув лише з одного люка,
+        // далі йде пішки" у довших паркурах.
+        if (this.chainCount >= MAX_CHAIN_SEGMENTS) {
             return false;
         }
         GapJumpUtils.GapJump next = GapJumpUtils.findFreshJumpSegment(this.mob);
