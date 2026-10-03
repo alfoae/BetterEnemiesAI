@@ -1,5 +1,6 @@
 package com.example.examplemod.Enemy.EnemyMovement.Run_N_Jump;
 
+import com.example.examplemod.Enemy.EnemyMovement.TerrainShape.ShapePathFinder;
 import net.minecraft.world.entity.Mob;
 import net.minecraft.world.entity.ai.navigation.GroundPathNavigation;
 import net.minecraft.world.level.Level;
@@ -7,7 +8,8 @@ import net.minecraft.world.level.pathfinder.PathFinder;
 
 /**
  * Той самий {@code GroundPathNavigation}, який мобу дав би ванільний {@code createNavigation},
- * тільки з {@link GapJumpNodeEvaluator} замість стандартного {@code WalkNodeEvaluator}. Це
+ * тільки з {@link GapJumpNodeEvaluator} (який успадковує форм-орієнтований
+ * {@code ShapeAwareNodeEvaluator}) і {@code ShapePathFinder} замість стандартних. Це
  * єдина зміна — весь інший функціонал (recompute, stuck-detection, canOpenDoors тощо)
  * лишається ванільним, успадкованим без змін.
  * <p>
@@ -23,8 +25,9 @@ public class GapJumpPathNavigation extends GroundPathNavigation {
 
     @Override
     protected PathFinder createPathFinder(int maxVisitedNodes) {
-        this.nodeEvaluator = new GapJumpNodeEvaluator();
+        GapJumpNodeEvaluator evaluator = new GapJumpNodeEvaluator();
+        this.nodeEvaluator = evaluator;
         this.nodeEvaluator.setCanPassDoors(true);
-        return new PathFinder(this.nodeEvaluator, maxVisitedNodes);
+        return new ShapePathFinder(evaluator, maxVisitedNodes);
     }
 }

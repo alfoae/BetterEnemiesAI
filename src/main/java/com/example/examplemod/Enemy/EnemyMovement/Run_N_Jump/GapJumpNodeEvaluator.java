@@ -1,14 +1,10 @@
 package com.example.examplemod.Enemy.EnemyMovement.Run_N_Jump;
 
-import com.example.examplemod.Config;
-import com.example.examplemod.Enemy.EnemyMovement.TerrainShape.ShapeGeometry;
-import com.example.examplemod.Enemy.EnemyMovement.TerrainShape.ShapeProbe;
+import com.example.examplemod.Enemy.EnemyMovement.TerrainShape.ShapeAwareNodeEvaluator;
 import net.minecraft.core.BlockPos;
-import net.minecraft.world.level.BlockGetter;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.pathfinder.Node;
 import net.minecraft.world.level.pathfinder.PathType;
-import net.minecraft.world.level.pathfinder.WalkNodeEvaluator;
 
 /**
  * Розширює звичайний {@code WalkNodeEvaluator} додатковими "стрибковими" ребрами графа: якщо від
@@ -112,7 +108,7 @@ import net.minecraft.world.level.pathfinder.WalkNodeEvaluator;
  * перед пошуком) — самі назви полів і API світу лишились ТІ САМІ, що були в попередній версії цього файлу
  * (нових викликів Minecraft тут немає).
  */
-public class GapJumpNodeEvaluator extends WalkNodeEvaluator {
+public class GapJumpNodeEvaluator extends ShapeAwareNodeEvaluator {
 
     /**
      * Ванільний getNeighbors дає максимум 8 сусідів: 4 сторони + 4 діагоналі.
@@ -152,32 +148,18 @@ public class GapJumpNodeEvaluator extends WalkNodeEvaluator {
     @Override
     public int getNeighbors(Node[] nodes, Node node) {
         int count = super.getNeighbors(nodes, node);
-        BlockPos origin = new BlockPos(node.x, node.y, node.z);
-        byte[] frontCache = new byte[9]; // стан 8 клітинок перед краєм НА РІВНІ СТАРТУ; ключ (dx+1)*3+(dz+1)
-
-        // v11 - НЕ довіряти "count" ваніли наосліп. Люк, відкритий рівно під ногами моба, ванілья могла
-        // порахувати звичайним кроком НА ТОМУ Ж РІВНІ (getFloorLevel повертає ЯКЕСЬ число - який саме
-        // контракт "нема підлоги" очікує виклик ВСЕРЕДИНІ WalkNodeEvaluator, чесно не підтверджено,
-        // про це написано в самому мексині). Якщо просто повірити count>=8, граф "крокує" через
-        // порожнечу, а стрибковий скан нижче НАВІТЬ НЕ ЗАПУСКАЄТЬСЯ - точно баг "падає і навіть не
-        // пригне". Тому за наявності 8 сусідів звіряємось іще раз ВЛАСНОЮ (перевіреною тестами)
-        // класифікацією - дешево для звичайного ландшафту (у classifyFront швидкий шлях на
-        // blocksMotion()), і лише коли є розбіжність - не виходимо рано.
-        if (count >= ALL_NORMAL_NEIGHBORS && !anySuspectDirection(origin, frontCache)) {
-            return count; // справді відкрита клітинка з усіх боків - стрибок тут не потрібен, не скануємо
+        if (count >= ALL_NORMAL_NEIGHBORS) {
+            return count; // повністю відкрита клітинка - тут стрибок ніколи не потрібен, не скануємо
         }
+        BlockPos origin = new BlockPos(node.x, node.y, node.z);
         BlockPos floorPos = origin.below();
         BlockState floor = getBlockStateAt(floorPos);
         if (floor == null || this.mob == null) {
             return count;
         }
         var level = this.mob.level();
-        // DEBUG (тимчасово - див. чат): рахунок на ЦЕЙ виклик getNeighbors - один підсумковий рядок
-        // замість логу на кожен окремий промінь (той самий origin міг раніше дати тисячі рядків за
-        // секунду й витісняв усе інше з буфера логу - саме це й викликало "лаги при зборі логів").
-        int debugRaysAttempted = 0;
-        int debugLanded = 0;
-        int countBefore = count;
+
+        byte[] frontCache = new byte[9]; // стан 8 клітинок перед краєм НА РІВНІ СТАРТУ; ключ (dx+1)*3+(dz+1)
         // Дальність залежить від блока, З ЯКОГО моб відривається (тертя / speedFactor / jumpFactor): лід - далі,
         // слайм, пісок душ, мед - ближче; і від Δy (вгору - вікно коротше, тож і дальність менша, навіть на
         // звичайному блоці; вниз - трохи більша). Тому рахуємо тут, для КОЖНОГО вузла й для КОЖНОГО рівня Δy
@@ -195,71 +177,28 @@ public class GapJumpNodeEvaluator extends WalkNodeEvaluator {
                 if (count >= nodes.length) {
                     break; // буфер сусідів повний - більше нема куди писати (промені відсортовані: спершу найближчі)
                 }
-                int before = count;
-                if (frontIsVoid(origin, ray, frontCache)) {
-                    debugRaysAttempted++;
-                    count = tryRay(nodes, count, origin, ray, dy);
-                    if (count > before) {
-                        debugLanded++;
-                    }
-                }
+                count = tryRay(nodes, count, origin, ray, frontCache, dy);
             }
-        }
-        if (debugRaysAttempted > 0) {
-            // DEBUG (тимчасово - див. чат): один рядок на весь виклик, не на кожен промінь.
-            System.out.println("[DEBUG GapJumpNodeEvaluator] getNeighbors: origin=" + origin
-                    + " провалля_знайдено_і_проскановано=" + debugRaysAttempted
-                    + " приземлень_знайдено=" + debugLanded
-                    + " вузлів_додано=" + (count - countBefore));
         }
         return count;
-    }
-
-    /**
-     * DEBUG-хелпер (тимчасово - див. чат): читабельна назва замість сирого byte.
-     */
-    private static String classificationName(byte value) {
-        return switch (value) {
-            case WALKABLE -> "WALKABLE";
-            case VOID -> "VOID";
-            case BLOCKED -> "BLOCKED";
-            default -> "UNKNOWN(" + value + ")";
-        };
-    }
-
-    /**
-     * Чи є серед 8 напрямків такий, де ВЛАСНА класифікація {@link #classifyFront} НЕ погоджується з
-     * тим, що ванілья вважає звичайним прохідним кроком (WALKABLE) — тобто провалля (люк) чи стовпчик,
-     * який ванілья порахувала відкритим простором. Заповнює {@code frontCache} по дорозі — далі в
-     * {@link #tryRay} та сама перевірка на {@code UNKNOWN} не дасть це перерахувати вдруге.
-     */
-    private boolean anySuspectDirection(BlockPos origin, byte[] frontCache) {
-        for (int dx = -1; dx <= 1; dx++) {
-            for (int dz = -1; dz <= 1; dz++) {
-                if (dx == 0 && dz == 0) {
-                    continue;
-                }
-                int idx = (dx + 1) * 3 + (dz + 1);
-                frontCache[idx] = classifyFront(origin, dx, dz, 0);
-                if (frontCache[idx] != WALKABLE) {
-                    // DEBUG (тимчасово - див. чат): звіряю ваніли й свою класифікацію розійшлись.
-                    System.out.println("[DEBUG GapJumpNodeEvaluator] anySuspectDirection: розбіжність з "
-                            + "ваниллю (count вже було 8) origin=" + origin + " dx=" + dx + " dz=" + dz
-                            + " myClass=" + classificationName(frontCache[idx]));
-                    return true;
-                }
-            }
-        }
-        return false;
     }
 
     /**
      * @param dy landing.y - origin.y: {@code 0} - рівний стрибок, {@code >0} - вгору, {@code <0} - вниз
      *           (у межах {@code -JUMP_DOWN_LIMIT_BLOCKS..+JUMP_UP_LIMIT_BLOCKS} - {@link #getNeighbors})
      */
-    private int tryRay(Node[] nodes, int count, BlockPos origin, GapJumpRays.Ray ray, int dy) {
-        // 1. Край у цьому напрямку перевірений викликачем ({@link #frontIsVoid}) ДО виклику цього методу -
-        //    тут це вже відомо VOID, тому тут самого цього рядка більше нема, лишився лише коментар.
+    private int tryRay(Node[] nodes, int count, BlockPos origin, GapJumpRays.Ray ray, byte[] frontCache, int dy) {
+        // 1. Край у цьому напрямку? Перша клітинка має бути справжнім проваллям, ЗАВЖДИ на рівні СТАРТУ
+        //    (dy тут НЕ підставляємо - "лесенка", де порожньо на обох поверхах, інакше не розпізнається як
+        //    провалля). Якщо вона прохідна - звичайний крок з цього вже впорається (а стрибок згенерується
+        //    з наступної клітинки); якщо там стіна - крізь неї не стрибаємо.
+        int frontIndex = (ray.frontX() + 1) * 3 + (ray.frontZ() + 1);
+        if (frontCache[frontIndex] == UNKNOWN) {
+            frontCache[frontIndex] = classifyFront(origin, ray.frontX(), ray.frontZ(), 0);
+        }
+        if (frontCache[frontIndex] != VOID) {
+            return count;
+        }
 
         // 2. Приземлення вздовж променя, на рівні origin.y + dy. ПЕРШЕ придатне - звичайний стрибок. Далі
         //    сканування ТРИВАЄ: якщо за цією платформою знову провалля (на ЇЇ рівні, тобто теж +dy), а ще
@@ -295,20 +234,7 @@ public class GapJumpNodeEvaluator extends WalkNodeEvaluator {
             // за" береться тією самою відносною позицією, що й перша клітинка від краю (лінія періодична).
             voidBehind = classifyFront(origin, dx + ray.frontX(), dz + ray.frontZ(), dy) == VOID;
         }
-        // (landed=false тут означає "провалля побачили, але жодного приземлення на всьому промені не
-        // знайшли" - видно в підсумковому рядку з getNeighbors, окремий лог тут більше не потрібен.)
         return count;
-    }
-
-    /**
-     * Чи VOID у напрямку променя (рахує {@code frontCache} по дорозі, якщо ще не рахували).
-     */
-    private boolean frontIsVoid(BlockPos origin, GapJumpRays.Ray ray, byte[] frontCache) {
-        int frontIndex = (ray.frontX() + 1) * 3 + (ray.frontZ() + 1);
-        if (frontCache[frontIndex] == UNKNOWN) {
-            frontCache[frontIndex] = classifyFront(origin, ray.frontX(), ray.frontZ(), 0);
-        }
-        return frontCache[frontIndex] == VOID;
     }
 
     private Node jumpNode(BlockPos origin, int dx, int dz, int dy, boolean skip) {
@@ -327,63 +253,14 @@ public class GapJumpNodeEvaluator extends WalkNodeEvaluator {
     /**
      * Завжди на рівні {@code origin.y + dy} - викликається або з {@code dy=0} (перевірка "тут провалля" на
      * рівні старту), або з поточним Δy променя (перевірка "проміжна платформа скінчилась" - на ЇЇ рівні).
-     * <p>
-     * <b>v6 — форма замість {@code blocksMotion()}.</b> Перемикається {@link Config#ENABLE_SHAPE_AWARE_PATHING}
-     * (типово увімкнено): замість булевого прапорця "≈повний куб" питає РЕАЛЬНУ форму колізії через
-     * {@link ShapeProbe} (розділ {@code TerrainShape}, спільний з ванільним мексином на
-     * {@code WalkNodeEvaluator} — та сама геометрія, той самий поріг покриття). Горщик, килим, нижня/
-     * верхня плита більше не VOID і не BLOCKED — WALKABLE на своїй справжній висоті (закриває частину
-     * TODO(Y) вище: саму КЛАСИФІКАЦІЮ; точна висота Δy для фізики польоту — окремий, ще не зроблений
-     * крок). Відкритий люк (тонка ВЕРТИКАЛЬНА панель при стінці клітинки, не горизонтальна поличка) —
-     * VOID, а не WALKABLE, як було: {@code ShapeProbe.floorSupport} семплить опору по центру клітинки,
-     * де панель узагалі не лежить. Стара {@code blocksMotion()}-логіка лишена поруч
-     * ({@code classifyFrontLegacy}) на випадок, якщо десь знадобиться відкат.
      */
     private byte classifyFront(BlockPos origin, int dx, int dz, int dy) {
-        if (Config.ENABLE_SHAPE_AWARE_PATHING.get()) {
-            return classifyCellShapeAware(origin.offset(dx, dy, dz));
-        }
-        return classifyFrontLegacy(origin, dx, dz, dy);
-    }
-
-    private byte classifyFrontLegacy(BlockPos origin, int dx, int dz, int dy) {
         BlockPos column = origin.offset(dx, dy, dz);
-        BlockState feetState = getBlockStateAt(column);
-        BlockState floorState = getBlockStateAt(column.below());
-        if (feetState == null || floorState == null || feetState.blocksMotion()) {
-            return BLOCKED;
+        // Реальна форма (ShapeProbe/ShapeWalk), а не blocksMotion(): плита, килим, край люка — це опора.
+        if (isStandableCell(column.getX(), column.getY(), column.getZ())) {
+            return WALKABLE;
         }
-        return floorState.blocksMotion() ? WALKABLE : VOID;
-    }
-
-    /**
-     * Реальна опора {@code column} — {@link ShapeProbe#floorSupport} рахує форму САМОЇ клітинки
-     * (нуб горщика/килима/нижньої плити ВСЕРЕДИНІ неї) РАЗОМ із формою клітинки під нею (звичайна
-     * підлога чи верхня плита впритул до межі) ОДНІЄЮ геометричною задачею — findSupport сам бере
-     * вищу з двох поверхонь, без жодного спеціального розбору "чи це плита/горщик/килим/люк", тому
-     * працює так само й для блоків з інших модів. Нема реальної опори під заданим {@code footprint}-ом
-     * узагалі (відкритий люк при стінці, справжня порожнеча) — VOID; є опора, але вона впирається в
-     * стелю клітинки (суцільний блок від низу до верху, не тонкий виступ) — BLOCKED; інакше WALKABLE.
-     * <p>
-     * Перевірка "стовпчика" ({@link ShapeProbe#isPillarObstruction}) — ЗАВЖДИ перша, ще до
-     * {@code floorSupport}: паркан (колізія 1.5) ВИЩИЙ за стелю клітинки (1.0), тому
-     * {@code floorSupport} його власний верх у принципі не побачить і піде шукати опору в клітинці
-     * НИЖЧЕ (там зазвичай суцільна земля) — без цієї окремої перевірки клітинка з парканом
-     * помилково вийшла б WALKABLE (опора "знайдена" у сусідній клітинці, а сам стовпчик просто
-     * випав з розрахунку).
-     */
-    private byte classifyCellShapeAware(BlockPos column) {
-        BlockGetter level = levelReader();
-        ShapeGeometry.Footprint footprint = ShapeProbe.centeredFootprint(column, mobFootprintWidth());
-        if (ShapeProbe.isPillarObstruction(level, column, footprint)) {
-            return BLOCKED;
-        }
-        ShapeGeometry.Support support = ShapeProbe.floorSupport(level, column, footprint);
-        if (support.coverage() < ShapeProbe.MIN_FLOOR_COVERAGE) {
-            return VOID;
-        }
-        double clearance = (column.getY() + 1.0) - support.surfaceY();
-        return clearance >= ShapeProbe.MIN_STANDING_CLEARANCE ? WALKABLE : BLOCKED;
+        return isBodyZoneClear(column.getX(), column.getY(), column.getZ()) ? VOID : BLOCKED;
     }
 
     /**
@@ -403,81 +280,29 @@ public class GapJumpNodeEvaluator extends WalkNodeEvaluator {
         return true;
     }
 
-    /** Клітинки в діапазоні висот {@code [min(0,dy), max(1,dy+1)]} не мають бути суцільними. */
-    private boolean blocksBody(BlockPos originColumn, int dy) {
-        if (Config.ENABLE_SHAPE_AWARE_PATHING.get()) {
-            return blocksBodyShapeAware(originColumn, dy);
-        }
-        return blocksBodyLegacy(originColumn, dy);
-    }
-
-    private boolean blocksBodyLegacy(BlockPos originColumn, int dy) {
-        int low = Math.min(0, dy);
-        int high = Math.max(1, dy + 1);
-        for (int y = low; y <= high; y++) {
-            BlockState state = getBlockStateAt(originColumn.offset(0, y, 0));
-            if (state == null || state.blocksMotion()) {
-                return true; // світ недоступний - обережно вважаємо заблокованим
-            }
-        }
-        return false;
-    }
-
     /**
-     * Те саме, форма замість {@code blocksMotion()}: тонкий виступ чи панель скраю клітинки (край
-     * відкритого люка, стовпчик паркану не по центру променя) більше не гасять увесь коридор польоту,
-     * якщо мобу реально є куди пролетіти повз них — {@link ShapeProbe#blocksBody} рахує перекриту
-     * частку сліду мобу, а не саму лише наявність будь-якої геометрії в клітинці.
+     * Клітинки в діапазоні висот {@code [min(0,dy), max(1,dy+1)]} не мають мати виступів вище за крок підйому.
      */
-    private boolean blocksBodyShapeAware(BlockPos originColumn, int dy) {
-        BlockGetter level = levelReader();
-        double width = mobFootprintWidth();
+    private boolean blocksBody(BlockPos originColumn, int dy) {
         int low = Math.min(0, dy);
         int high = Math.max(1, dy + 1);
         for (int y = low; y <= high; y++) {
-            BlockPos cell = originColumn.offset(0, y, 0);
-            if (ShapeProbe.blocksBody(level, cell, ShapeProbe.centeredFootprint(cell, width))) {
-                return true;
+            if (blocksFlightAt(originColumn.getX(), originColumn.getY() + y, originColumn.getZ())) {
+                return true; // у т.ч. якщо світ недоступний - обережно вважаємо заблокованим
             }
         }
         return false;
     }
 
-    /** Підлога тверда, а на рівні ніг вільно - на рівні {@code origin.y + dy}. */
+    /** Є де стати (реальна опора за формою колізії) і вільне тіло - на рівні {@code origin.y + dy}. */
     private boolean hasFloorAt(BlockPos origin, int dx, int dz, int dy) {
-        if (Config.ENABLE_SHAPE_AWARE_PATHING.get()) {
-            return classifyCellShapeAware(origin.offset(dx, dy, dz)) == WALKABLE;
-        }
-        return hasFloorAtLegacy(origin, dx, dz, dy);
-    }
-
-    private boolean hasFloorAtLegacy(BlockPos origin, int dx, int dz, int dy) {
         BlockPos column = origin.offset(dx, dy, dz);
-        BlockPos floorPos = column.below();
-
-        BlockState floorState = getBlockStateAt(floorPos);
-        BlockState feetState = getBlockStateAt(column);
-
-        if (floorState == null || feetState == null) {
-            return false;
-        }
-
-        // Перевіряємо, що підлога блокирует рух (тверда), а на рівні ніг — вільно
-        return floorState.blocksMotion() && !feetState.blocksMotion();
+        return isStandableCell(column.getX(), column.getY(), column.getZ());
     }
 
-    /** Придатне для приземлення: підлога, а над нею вільно і на рівні ніг, і на рівні голови - на {@code origin.y + dy}. */
+    /** Придатне для приземлення: опора + вільне тіло на повну висоту моба - на {@code origin.y + dy}. */
     private boolean isStandable(BlockPos origin, int dx, int dz, int dy) {
-        if (!hasFloorAt(origin, dx, dz, dy)) {
-            return false;
-        }
-        BlockPos head = origin.offset(dx, dy + 1, dz);
-        if (Config.ENABLE_SHAPE_AWARE_PATHING.get()) {
-            BlockGetter level = levelReader();
-            return !ShapeProbe.blocksBody(level, head, ShapeProbe.centeredFootprint(head, mobFootprintWidth()));
-        }
-        BlockState headState = getBlockStateAt(head);
-        return headState != null && !headState.blocksMotion();
+        return hasFloorAt(origin, dx, dz, dy);
     }
 
     /**
@@ -492,27 +317,5 @@ public class GapJumpNodeEvaluator extends WalkNodeEvaluator {
             return this.mob.level().getBlockState(pos);
         }
         return null;
-    }
-
-    /**
-     * {@link BlockGetter} для {@link ShapeProbe} — той самий пріоритет джерела, що й
-     * {@link #getBlockStateAt}: контекст пошуку (Fast/Thread-safe), інакше фолбек на живий світ моба.
-     */
-    private BlockGetter levelReader() {
-        if (this.currentContext != null) {
-            return this.currentContext.level();
-        }
-        if (this.mob != null) {
-            return this.mob.level();
-        }
-        return null;
-    }
-
-    /**
-     * Реальна ширина ЦЬОГО моба — точніша за {@link ShapeProbe#DEFAULT_MOB_WIDTH} (типове значення
-     * для загального ванільного мексину, де конкретного {@code Mob} під рукою нема).
-     */
-    private double mobFootprintWidth() {
-        return this.mob != null ? this.mob.getBbWidth() : ShapeProbe.DEFAULT_MOB_WIDTH;
     }
 }

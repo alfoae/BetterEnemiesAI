@@ -3,6 +3,8 @@ package com.example.examplemod.Enemy.EnemyMovement.TerrainShape;
 import com.example.examplemod.Enemy.EnemyMovement.TerrainShape.ShapeGeometry.Box;
 import com.example.examplemod.Enemy.EnemyMovement.TerrainShape.ShapeGeometry.Footprint;
 import com.example.examplemod.Enemy.EnemyMovement.TerrainShape.ShapeGeometry.Support;
+import it.unimi.dsi.fastutil.longs.Long2ByteOpenHashMap;
+import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap;
 import net.minecraft.core.BlockPos;
 import net.minecraft.world.level.BlockGetter;
 import net.minecraft.world.level.block.state.BlockState;
@@ -11,7 +13,9 @@ import net.minecraft.world.phys.shapes.Shapes;
 import net.minecraft.world.phys.shapes.VoxelShape;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
+import java.util.function.Predicate;
 
 /**
  * Міст між реальним Minecraft ({@code BlockState.getCollisionShape}) і чистою геометрією
@@ -174,5 +178,178 @@ public final class ShapeProbe {
         double lowY = cell.getY();
         double highY = cell.getY() + 1.0 - MIN_STANDING_CLEARANCE;
         return ShapeGeometry.spansRange(boxes, footprint, lowY, highY);
+    }
+
+    /**
+     * N, S, W, E - у цьому порядку перевіряються як кандидати, коли центр клітинки не підійшов.
+     */
+    private static final int[][] EDGE_DIRECTIONS = {{0, -1}, {0, 1}, {-1, 0}, {1, 0}};
+
+    /**
+     * Квадрат заданої ширини, притиснутий до однієї зі стінок клітинки {@code cell}
+     * ({@code dirX}/{@code dirZ} - рівно одне ненульове, з {-1,0,1}: північ/південь/захід/схід).
+     * Зсув від центру рахується з ширини мобу (не фіксована константа), тому коректний для мобів
+     * будь-якого розміру.
+     */
+    public static Footprint edgeFootprint(BlockPos cell, double width, int dirX, int dirZ) {
+        double half = Math.max(0.0, 0.5 - width / 2.0);
+        double cx = cell.getX() + 0.5 + dirX * half;
+        double cz = cell.getZ() + 0.5 + dirZ * half;
+        return Footprint.centered(cx, cz, width);
+    }
+
+    /**
+     * Чи {@code column} прохідна для ЦЬОГО КОНКРЕТНОГО footprint-у: не "стовпчик" (паркан і подібне)
+     * і є реальна опора з достатнім просвітом до стелі клітинки. Єдине місце, де поєднуються обидві
+     * перевірки - і для центру, і для країв (нижче), щоб вони завжди узгоджувались між собою.
+     */
+    public static boolean isWalkableAt(BlockGetter level, BlockPos column, Footprint footprint) {
+        if (isPillarObstruction(level, column, footprint)) {
+            return false;
+        }
+        Support support = floorSupport(level, column, footprint);
+        if (support.coverage() < MIN_FLOOR_COVERAGE) {
+            return false;
+        }
+        double clearance = (column.getY() + 1.0) - support.surfaceY();
+        return clearance >= MIN_STANDING_CLEARANCE;
+    }
+
+    /**
+     * Опора в {@code column} з урахуванням краю: спершу центр клітинки (звичайний випадок), а якщо
+     * там опори нема - по черзі 4 позиції впритул до стінок (N,S,W,E). Повертає ПЕРШИЙ footprint,
+     * що підходить, разом із опорою на ньому - {@code null}, якщо не підходить жоден (справжнє
+     * провалля з усіх боків). Жодного знання про конкретний тип блока (люк чи інше) - чиста
+     * геометрія, тому однаково працює для ванільних блоків і блоків із будь-якого мода.
+     * <p>
+     * ЄДИНЕ місце, де рахується ця перевірка - і загальний мексин ({@code getFloorLevel},
+     * {@code getPathTypeFromState}), і {@code GapJumpNodeEvaluator} кличуть САМЕ цей метод, тому
+     * обидва розумнішають одночасно, без дублювання логіки.
+     * <p>
+     * Приклад: відкритий люк, притиснутий до стінки - вертикальна панель на ВСЮ висоту клітинки
+     * (розвернулась із горизонтального стану на всю ширину клітинки). По центру - порожньо
+     * (coverage=0). На краю, де сама панель - опора знайдеться РІВНО на рівні стелі клітинки (той
+     * самий рівень, що й сусідні суцільні блоки) - моб іде по верхньому ребру панелі, не спускається
+     * в заглибину.
+     */
+    public static StandSpot resolveStandSpot(BlockGetter level, BlockPos column, double width) {
+        Footprint center = centeredFootprint(column, width);
+        if (isWalkableAt(level, column, center)) {
+            return new StandSpot(center, floorSupport(level, column, center));
+        }
+        for (int[] dir : EDGE_DIRECTIONS) {
+            Footprint edge = edgeFootprint(column, width, dir[0], dir[1]);
+            if (isWalkableAt(level, column, edge)) {
+                return new StandSpot(edge, floorSupport(level, column, edge));
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Чи тримає хоч щось (покриття ≥ мінімуму) моба ШИРИНИ {@code width}, якщо його центр буде в
+     * {@code (x, z)}, а ноги на висоті {@code feetY} — у межах кроку вгору/вниз 0.6. Використовується як
+     * «гальмо» на краю: якщо наступна позиція без опори — вбиваємо горизонтальну швидкість.
+     */
+    public static boolean hasStandingSupport(BlockGetter level, double x, double z, double feetY, double width) {
+        CachedSource src = new CachedSource(level, state -> false);
+        Footprint fp = Footprint.centered(x, z, Math.max(0.01, width - 2.0 * ShapeWalk.SKIN));
+        List<Box> list = new ArrayList<>(8);
+        src.collect(fp.minX(), feetY - 1.0, fp.minZ(), fp.maxX(), feetY + 0.7, fp.maxZ(), list);
+        Support s = ShapeGeometry.findSupport(list, fp, feetY + 0.6 + 1.0E-3, MIN_FLOOR_COVERAGE);
+        return s.isPresent() && s.surfaceY() >= feetY - 0.6;
+    }
+
+    // ------------------------------------------------------------------------------------------
+    // Адаптер до BoxSource (для ShapeWalk / WaypointPlanner) + кеш на один пошук шляху
+    // ------------------------------------------------------------------------------------------
+
+    /**
+     * Результат {@link #resolveStandSpot}: на якому САМЕ footprint-і (центр чи край) знайшлась опора.
+     */
+    public record StandSpot(Footprint footprint, Support support) {
+    }
+
+    /**
+     * Реалізація {@link BoxSource} над реальним світом із кешем «клітинка → коробки» і «клітинка →
+     * нерегулярна форма». Живе рівно один пошук шляху (створюється в {@code prepare} evaluator-а), тому
+     * ніколи не показує застарілий світ. Не потокобезпечна — pathfinding у 1.21.1 іде в головному потоці.
+     *
+     * @param ignore блоки, чию колізію ми свідомо ігноруємо (зачинені двері, які моб уміє відчиняти)
+     */
+    public static final class CachedSource implements BoxSource {
+
+        private final BlockGetter level;
+        private final Predicate<BlockState> ignore;
+        private final Long2ObjectOpenHashMap<List<Box>> boxes = new Long2ObjectOpenHashMap<>();
+        /**
+         * 0 — ще не питали, 1 — регулярна (порожньо / повний куб), 2 — нерегулярна форма.
+         */
+        private final Long2ByteOpenHashMap irregular = new Long2ByteOpenHashMap();
+
+        public CachedSource(BlockGetter level, Predicate<BlockState> ignore) {
+            this.level = level;
+            this.ignore = ignore;
+        }
+
+        /**
+         * Коробки однієї клітинки (кешовані). Не змінювати повернений список.
+         */
+        public List<Box> cell(int x, int y, int z) {
+            long key = BlockPos.asLong(x, y, z);
+            List<Box> cached = boxes.get(key);
+            if (cached != null) {
+                return cached;
+            }
+            BlockPos pos = new BlockPos(x, y, z);
+            BlockState state = level.getBlockState(pos);
+            List<Box> result;
+            if (state.isAir() || ignore.test(state)) {
+                result = Collections.emptyList();
+            } else {
+                result = boxesOf(level, pos);
+            }
+            boxes.put(key, result);
+            return result;
+        }
+
+        /**
+         * Чи має клітинка «нерегулярну» колізію: не порожню і не повний куб (плита, сходи, люк, паркан,
+         * килим, горщик, двері…). Для регулярних клітинок ванільний pathfinding правий — і ми його не чіпаємо.
+         */
+        public boolean isIrregular(int x, int y, int z) {
+            long key = BlockPos.asLong(x, y, z);
+            byte known = irregular.get(key);
+            if (known != 0) {
+                return known == 2;
+            }
+            BlockPos pos = new BlockPos(x, y, z);
+            BlockState state = level.getBlockState(pos);
+            boolean irr = false;
+            if (!state.isAir() && !ignore.test(state)) {
+                VoxelShape shape = state.getCollisionShape(level, pos);
+                irr = !shape.isEmpty() && shape != Shapes.block();
+            }
+            irregular.put(key, (byte) (irr ? 2 : 1));
+            return irr;
+        }
+
+        @Override
+        public void collect(double minX, double minY, double minZ, double maxX, double maxY, double maxZ,
+                            List<Box> out) {
+            int x0 = (int) Math.floor(minX);
+            int y0 = (int) Math.floor(minY);
+            int z0 = (int) Math.floor(minZ);
+            int x1 = Math.max(x0, (int) Math.ceil(maxX) - 1);
+            int y1 = Math.max(y0, (int) Math.ceil(maxY) - 1);
+            int z1 = Math.max(z0, (int) Math.ceil(maxZ) - 1);
+            for (int x = x0; x <= x1; x++) {
+                for (int y = y0; y <= y1; y++) {
+                    for (int z = z0; z <= z1; z++) {
+                        out.addAll(cell(x, y, z));
+                    }
+                }
+            }
+        }
     }
 }

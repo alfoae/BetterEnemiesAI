@@ -35,12 +35,10 @@ public class Config {
     // рахується на рівні самого API постановки блоку (EnemyBreak_N_BuildUtils.placeBlock).
     public static final ModConfigSpec.IntValue MOB_PLACE_DELAY_TICKS;
 
-    // TerrainShape (неповні блоки: горщики/плити/килими/люки/паркани) - див.
-    // Enemy.EnemyMovement.TerrainShape.ShapeProbe та GapJumpNodeEvaluator.*ShapeAware/*Legacy.
-    public static final ModConfigSpec.BooleanValue ENABLE_SHAPE_AWARE_PATHING;
+    // Форм-орієнтована ходьба (TerrainShape): моби ходять по неповних блоках, не падають крізь відкриті люки.
+    public static final ModConfigSpec.BooleanValue ENABLE_SHAPE_AWARE_WALKING;
+    public static final ModConfigSpec.ConfigValue<String> SHAPE_WALK_BLACKLIST;
 
-    // Троттлінг createPath() для цілі, що лишається недосяжною кілька тіків підряд - див.
-    // EnemyBreak_N_BuildUtils.getOrComputePath/recomputeIntervalFor.
     public static final ModConfigSpec.IntValue UNREACHABLE_RECOMPUTE_INTERVAL_TICKS;
 
     static {
@@ -163,22 +161,25 @@ public class Config {
 
         builder.pop();
 
-        builder.push("Terrain_Shape_Awareness");
+        builder.push("Shape_Aware_Walking");
 
-        ENABLE_SHAPE_AWARE_PATHING = builder
-                .comment("Увімкнути/Вимкнути врахування РЕАЛЬНОЇ форми неповних блоків (горщики, ",
-                        "плити, килими, люки, паркани - ванільні й з інших модів) у побудові шляху ",
-                        "замість грубого blocksMotion() (true/false). Вимкнення повертає стару ",
-                        "поведінку (GapJumpNodeEvaluator.*Legacy) - для відкату чи порівняння.")
-                .define("enableShapeAwarePathing", true);
+        ENABLE_SHAPE_AWARE_WALKING = builder
+                .comment("Моби (УСІ наземні, включно з модовими) враховують реальну форму колізії блоків:",
+                        "ходять по плитах, горщиках, килимах, краю відкритих люків (притискаючись до стіни/краю,",
+                        "щоб не впасти) - замість грубого 'блок суцільний / порожній'. (true/false)")
+                .define("enableShapeAwareWalking", true);
+
+        SHAPE_WALK_BLACKLIST = builder
+                .comment("ID типів мобів через кому, до яких ця система НЕ застосовується",
+                        "(наприклад: minecraft:iron_golem,somemod:weird_mob). Порожньо - застосовується до всіх.")
+                .define("shapeWalkBlacklist", "");
 
         UNREACHABLE_RECOMPUTE_INTERVAL_TICKS = builder
-                .comment("Коли ціль лишається недосяжною (canReach=false) довше кількох тіків ",
-                        "підряд, createPath() більше не рахується КОЖЕН тік - лише раз на стільки ",
-                        "тіків. 20 тіків = раз на секунду. Менше значення - швидше помітить, коли ",
-                        "перепона нарешті стане прохідною, але й частіше вантажить CPU на широких ",
-                        "непрохідних розривах.")
-                .defineInRange("unreachableRecomputeIntervalTicks", 20, 1, 200);
+                .comment("Інтервал (у тіках) між повторними спробами порахувати шлях до цілі,",
+                        "яку path-finder щойно визнав недосяжною.")
+                .defineInRange("unreachableRecomputeIntervalTicks", 40, 1, 1200);
+
+
 
         builder.pop();
 

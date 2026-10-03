@@ -1,5 +1,6 @@
 package com.example.examplemod.Enemy.EnemyMovement.TerrainShape;
 
+import java.util.ArrayList;
 import java.util.List;
 
 /**
@@ -47,19 +48,45 @@ public final class ShapeGeometry {
     }
 
     /**
-     * Горизонтальний "слід" мобу (чи довільна ділянка вибірки) у світових координатах X/Z.
+     * Те саме, що {@link #findSupport(List, Footprint, double)}, але з відсіканням "випадкових" опор:
+     * перебирає РІЗНІ верхні рівні (maxY) від найвищого до найнижчого (не вище {@code ceilingY}) і
+     * повертає ПЕРШИЙ, де сумарне покриття footprint-у не менше {@code minCoverage}. Потрібно для
+     * ходьби по краю: коли моб майже зійшов з блока (покриття 3%), справжня опора вже нижче.
      */
-    public record Footprint(double minX, double minZ, double maxX, double maxZ) {
-
-        public double area() {
-            return Math.max(0.0, maxX - minX) * Math.max(0.0, maxZ - minZ);
+    public static Support findSupport(List<Box> boxes, Footprint footprint, double ceilingY, double minCoverage) {
+        double area = footprint.area();
+        if (area <= 0.0) {
+            return Support.NONE;
         }
-
-        /** Квадрат заданої ширини, відцентрований у (cx, cz). */
-        public static Footprint centered(double cx, double cz, double width) {
-            double h = width / 2.0;
-            return new Footprint(cx - h, cz - h, cx + h, cz + h);
+        List<Double> tops = new ArrayList<>(4);
+        for (Box b : boxes) {
+            if (b.maxY() <= ceilingY + EPS && b.overlapsXZ(footprint)) {
+                boolean known = false;
+                for (double t : tops) {
+                    if (Math.abs(t - b.maxY()) <= EPS) {
+                        known = true;
+                        break;
+                    }
+                }
+                if (!known) {
+                    tops.add(b.maxY());
+                }
+            }
         }
+        tops.sort((a, c) -> Double.compare(c, a));
+        for (double top : tops) {
+            double covered = 0.0;
+            for (Box b : boxes) {
+                if (Math.abs(b.maxY() - top) <= EPS && b.overlapsXZ(footprint)) {
+                    covered += b.intersectionAreaXZ(footprint);
+                }
+            }
+            double coverage = Math.min(1.0, covered / area);
+            if (coverage >= minCoverage) {
+                return new Support(top, coverage);
+            }
+        }
+        return Support.NONE;
     }
 
     /**
@@ -112,6 +139,30 @@ public final class ShapeGeometry {
         }
         double coverage = Math.min(1.0, covered / area);
         return new Support(bestTop, coverage);
+    }
+
+    /**
+     * Горизонтальний "слід" мобу (чи довільна ділянка вибірки) у світових координатах X/Z.
+     */
+    public record Footprint(double minX, double minZ, double maxX, double maxZ) {
+
+        public double area() {
+            return Math.max(0.0, maxX - minX) * Math.max(0.0, maxZ - minZ);
+        }
+
+        public double centerX() {
+            return (minX + maxX) / 2.0;
+        }
+
+        public double centerZ() {
+            return (minZ + maxZ) / 2.0;
+        }
+
+        /** Квадрат заданої ширини, відцентрований у (cx, cz). */
+        public static Footprint centered(double cx, double cz, double width) {
+            double h = width / 2.0;
+            return new Footprint(cx - h, cz - h, cx + h, cz + h);
+        }
     }
 
     /**

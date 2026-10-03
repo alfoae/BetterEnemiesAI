@@ -81,7 +81,7 @@ public abstract class WalkNodeEvaluatorFloorMixin {
         // ТУТ НЕ перевіряємо state.blocksMotion() (раніше було - виявилось помилкою, див. чат: для
         // люків/дверей цей прапорець лишається true незалежно від open/closed). Швидкий шлях для
         // дійсно повних блоків усе одно є - всередині ShapeProbe.boxesOf, звіркою самої форми.
-        boolean enabled = Config.ENABLE_SHAPE_AWARE_PATHING.get();
+        boolean enabled = Config.ENABLE_SHAPE_AWARE_WALKING.get();
         double width = ShapeProbe.DEFAULT_MOB_WIDTH; // мобо-агностичний виклик - конкретного Mob тут нема
         ShapeGeometry.Footprint footprint = ShapeProbe.centeredFootprint(pos, width);
         ShapeGeometry.Support support = ShapeProbe.floorSupport(level, pos, footprint);
@@ -125,7 +125,7 @@ public abstract class WalkNodeEvaluatorFloorMixin {
         // DEBUG (тимчасово - див. чат): якщо ЦЕЙ рядок НЕ з'являється в лозі при тесті біля відкритого
         // люка - мексин у принципі не застосувався (перевірте лог завантаження на "terrainshape" /
         // помилки Mixin), і решта цього класу тут ні до чого.
-        boolean enabled = Config.ENABLE_SHAPE_AWARE_PATHING.get();
+        boolean enabled = Config.ENABLE_SHAPE_AWARE_WALKING.get();
         ShapeGeometry.Footprint footprint = ShapeProbe.centeredFootprint(pos, ShapeProbe.DEFAULT_MOB_WIDTH);
         ShapeGeometry.Support support = enabled
                 ? ShapeProbe.floorSupport(level, pos, footprint)
