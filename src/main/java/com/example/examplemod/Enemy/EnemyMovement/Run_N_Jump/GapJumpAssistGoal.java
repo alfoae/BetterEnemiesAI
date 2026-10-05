@@ -186,7 +186,7 @@ public class GapJumpAssistGoal extends Goal {
         // навігатор), а швидкий моб за цей час може вже зійти з краю. Поки він просів менше ніж на
         // RESCUE_MAX_DROP і не летить угору, його ще можна врятувати - див. tryRescueJump().
         if (!this.mob.onGround()) {
-            double drop = segment.edge().getY() - this.mob.getY();
+            double drop = segment.edgeY() - this.mob.getY();
             if (drop < -0.05 || drop > RESCUE_MAX_DROP || this.mob.getDeltaMovement().y > 0.1) {
                 return false;
             }
@@ -291,7 +291,7 @@ public class GapJumpAssistGoal extends Goal {
             this.mob.setSprinting(true);
         }
 
-        Vec3 edgeCenter = Vec3.atBottomCenterOf(this.jump.edge());
+        Vec3 edgeCenter = this.jump.edgeCenter();
         double axisLength = horizontalDistance(edgeCenter, this.jump.landing());
 
         System.out.println(
@@ -381,7 +381,7 @@ public class GapJumpAssistGoal extends Goal {
             // вбік. Модель польоту точна, тож при звичайних блоках очікуємо |вздовж| ~ 0.0-0.1.
             // Якщо стабільно щось інше - значить, тертя блока не 0.6 (лід/слайм/...) або змінена
             // сила стрибка мобом.
-            Vec3 edgeCenter = Vec3.atBottomCenterOf(this.jump.edge());
+            Vec3 edgeCenter = this.jump.edgeCenter();
             double axisX = this.jump.landing().x - edgeCenter.x;
             double axisZ = this.jump.landing().z - edgeCenter.z;
             double axisLength = Math.sqrt(axisX * axisX + axisZ * axisZ);
@@ -417,7 +417,7 @@ public class GapJumpAssistGoal extends Goal {
         // НА ЗЕМЛІ, ДО ВІДРИВУ
         // =========================================================
         Vec3 landing = this.jump.landing();
-        Vec3 edgeCenter = Vec3.atBottomCenterOf(this.jump.edge());
+        Vec3 edgeCenter = this.jump.edgeCenter();
 
         // === Моб уже практично на landing без стрибка (перейшов ногами) ===
         // Без цього перевірки Goal у такому разі зависав би в розбігу назавжди (distToEdge більше
@@ -607,8 +607,8 @@ public class GapJumpAssistGoal extends Goal {
 
         double vy = vel.y;
 
-        // TODO(Y): landing.y - ЦІЛА координата вузла, а не реальна висота підлоги (пісок душ на 0.125 нижче, плита на
-        // 0.5 тощо), тож heightAbove/remainingAirTicks трохи хибять. Повний список блоків - у GapJumpNodeEvaluator.
+        // landing.y - РЕАЛЬНА висота підлоги в точці приземлення (плита +0.5, пісок душ +0.875 тощо, див.
+        // GapJumpUtils.findJumpSegmentInPath), тож heightAbove/remainingAirTicks рахуються від справжнього рівня.
         double heightAbove = this.mob.getY() - landing.y;
         double dx = landing.x - this.mob.getX();
         double dz = landing.z - this.mob.getZ();
@@ -672,7 +672,7 @@ public class GapJumpAssistGoal extends Goal {
             return false;
         }
         // Початок сегмента має бути поруч з мобом (той самий рівень і в межах видимості Path).
-        Vec3 nextEdgeCenter = Vec3.atBottomCenterOf(next.edge());
+        Vec3 nextEdgeCenter = next.edgeCenter();
         if (horizontalDistance(this.mob.position(), nextEdgeCenter) > CHAIN_MAX_EDGE_DISTANCE
                 || Math.abs(nextEdgeCenter.y - this.mob.getY()) > 1.0) {
             return false;
@@ -704,8 +704,15 @@ public class GapJumpAssistGoal extends Goal {
         // Δy цього стрибка (landing.y - блок відриву): 0 - рівно, додатне - вгору, від'ємне - вниз (у межах
         // GapJumpPhysics.JUMP_UP_LIMIT_BLOCKS/JUMP_DOWN_LIMIT_BLOCKS). jumpFactor блока відриву впливає на
         // ТЕ, ЯКОЇ висоти реально досягне стрибок (мед - нижче), тож і на тривалість польоту для Δy>0.
-        int deltaYBlocks = (int) Math.round(landing.y - this.jump.edge().getY());
-        BlockPos takeoffFloorPos = this.jump.edge().below();
+        // РЕАЛЬНЕ (дробове) Δy: від фактичної висоти ніг на відриві (на землі - сама позиція моба, інакше -
+        // планова висота краю) до реальної висоти поверхні приземлення. Плита -> повний блок = +0.5, а не +1.
+        double takeoffY = this.mob.onGround() ? this.mob.getY() : this.jump.edgeY();
+        double deltaYBlocks = landing.y - takeoffY;
+        if (Math.abs(deltaYBlocks) < 1.0E-3) {
+            deltaYBlocks = 0.0; // шум double: рівний стрибок має йти по гілці Δy<=0
+        }
+        // Блок, який РЕАЛЬНО тримає моба (для плити/піску душ - клітинка вузла, а не та, що під нею).
+        BlockPos takeoffFloorPos = GapJumpUtils.supportPos(this.jump.edge(), takeoffY);
         BlockState takeoffFloor = this.mob.level().getBlockState(takeoffFloorPos);
         float takeoffJumpFactor = takeoffFloor.getBlock().getJumpFactor();
 
@@ -758,7 +765,8 @@ public class GapJumpAssistGoal extends Goal {
                         + " | pos=" + formatVec(this.mob.position())
                         + " | edge=" + this.jump.edge()
                         + " | landing=" + formatVec(landing)
-                        + " | Δy=" + (deltaYBlocks > 0 ? "+" + deltaYBlocks + " (вгору)" : deltaYBlocks < 0 ? deltaYBlocks + " (вниз)" : "0 (рівно)")
+                        + " | Δy=" + String.format("%+.3f", deltaYBlocks)
+                        + (deltaYBlocks > 0 ? " (вгору)" : deltaYBlocks < 0 ? " (вниз)" : " (рівно)")
                         + (noJumpNeeded ? " | без стрибка: рівномірна швидкість до природного падіння вистачає дальності" : "")
                         + " | along=" + String.format("%+.3f", along)
                         + " (край блока = +" + String.format("%.3f", front) + ")"
@@ -932,7 +940,7 @@ public class GapJumpAssistGoal extends Goal {
 
     /** Відстань між центром блока-краю і центром приземлення (для осі це gap + 1). */
     private double segmentLength() {
-        Vec3 edgeCenter = Vec3.atBottomCenterOf(this.jump.edge());
+        Vec3 edgeCenter = this.jump.edgeCenter();
         return horizontalDistance(edgeCenter, this.jump.landing());
     }
 

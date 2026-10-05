@@ -1,6 +1,7 @@
 package com.example.examplemod.Enemy.EnemyMovement.Run_N_Jump;
 
 import com.example.examplemod.Enemy.EnemyMovement.TerrainShape.ShapeAwareNodeEvaluator;
+import com.example.examplemod.Enemy.EnemyMovement.TerrainShape.ShapeWalk;
 import net.minecraft.core.BlockPos;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.pathfinder.Node;
@@ -75,24 +76,17 @@ import net.minecraft.world.level.pathfinder.PathType;
  * замість 2 (від рівня ніг на старті до рівня голови на приземленні чи навпаки): проста, консервативна
  * оцінка без точного розрахунку, де саме на дузі моб опиниться в кожній проміжній точці.
  * <p>
- * НЕ займає (лишається як TODO, разом із неповними блоками приземлення нижче): похилий стрибок, де
- * приземлення не на повний блок (плита, сходинка тощо) - для нього й рівний Δy=0 вже неточний, а
- * для похилого додається ще й питання "від якого фактичного рівня рахувати сам Δy".
- * <p>
- * <b>TODO(Y) — висота блока, з якого стрибаємо / на який приземляємось, для НЕПОВНИХ блоків.</b> Висота підлоги
- * зараз завжди береться як ЦІЛА координата вузла ({@code node.y}). Для неповних і нестандартних блоків варто
- * колись рахувати РЕАЛЬНУ висоту, на якій стоїть моб:
+ * <b>v5 — РЕАЛЬНІ висоти (форма колізії).</b> Висота підлоги вузла більше не ціла {@code node.y}: беремо
+ * {@code surfaceY} найкращої точки стояння ({@link com.example.examplemod.Enemy.EnemyMovement.TerrainShape.ShapeWalk#surfaceYOf}):
+ * плита {@code y+0.5}, пісок душ {@code y+0.875}, килим {@code y+0.0625}, край відкритого люка тощо. Звідси:
  * <ul>
- *   <li>пісок душ (14/16), мед (15/16), плити (0.5; верхня плита - 1.0), килими, шари снігу, платівки, горщики,
- *       яйця тощо;</li>
- *   <li>сходинки: залежно від повороту й {@code half} (низ/верх). Якщо моб стоїть на "ребрі" сходинки, відрив і
- *       приземлення мають бути на НИЖНЬОМУ краї;</li>
- *   <li>паркани, стіни, хвіртки (колізія 1.5), двері й люки (залежно від open / half / facing) і т.д.</li>
+ *   <li>блок відриву (тертя / speedFactor / jumpFactor) береться з клітинки, що РЕАЛЬНО тримає моба
+ *       ({@link GapJumpUtils#supportPos}), а не завжди з {@code origin.below()};</li>
+ *   <li>приземлення відсіюється, якщо РЕАЛЬНИЙ підйом (а не різниця цілих {@code y}) вищий за апекс стрибка
+ *       блока відриву ({@link #isRiseReachable}) - наприклад, з нижньої плити на блок, що вищий за неї на 1.5.</li>
  * </ul>
- * Загальне правило - брати {@code getCollisionShape(...).max(Axis.Y)} у тій точці, де моб стоїть/приземляється.
- * Куди це вплине: {@code landing.y} у сегменті ({@link GapJumpUtils.GapJump}), {@code heightAbove} у
- * {@code GapJumpAssistGoal.controlFlight/tryRescueJump}, а тут - {@link #hasFloorAt} / {@link #isStandable}.
- * Поки що похибка невелика (пісок душ дає ~0.05 переліту) і стрибок виходить; для плит/сходинок вона більша.
+ * Сітка графа (проміні, {@code dy}-ліміти, вартості) лишилась цілочисельною; точність - у відсіві й у фізиці
+ * виконання ({@code GapJumpAssistGoal} бере дробове Δy з {@link GapJumpUtils.GapJump#edgeY()} і {@code landing.y}).
  * <p>
  * ПРО ПРОДУКТИВНІСТЬ: getNeighbors викликається на КОЖЕН вузол під час КОЖНОГО пошуку шляху, тож
  * додатковий скан не повинен бути безумовним. Ванільний WalkNodeEvaluator дає максимум 8 сусідів
@@ -136,6 +130,12 @@ public class GapJumpNodeEvaluator extends ShapeAwareNodeEvaluator {
      */
     private static final float UP_JUMP_EXTRA_MALUS_PER_BLOCK = 0.5F;
 
+    /**
+     * Запас над реальним підйомом: апекс ванільного стрибка (~1.25) має бути вище за поверхню приземлення
+     * щонайменше на стільки, інакше моб не "заскочить" на неї, а вперше торкнеться збоку.
+     */
+    private static final double RISE_SAFETY_MARGIN = 0.1;
+
     /** Стан клітинки перед краєм (для кешу на вузол). */
     private static final byte UNKNOWN = 0;
     /** Є підлога й вільно на рівні ніг: моб просто зробить крок, стрибок звідси в цей бік не потрібен. */
@@ -152,11 +152,14 @@ public class GapJumpNodeEvaluator extends ShapeAwareNodeEvaluator {
             return count; // повністю відкрита клітинка - тут стрибок ніколи не потрібен, не скануємо
         }
         BlockPos origin = new BlockPos(node.x, node.y, node.z);
-        BlockPos floorPos = origin.below();
+        // Реальна висота ніг на відриві й блок, що її тримає (плита/пісок душ/килим - це клітинка вузла).
+        double originSurface = surfaceYAt(node.x, node.y, node.z);
+        BlockPos floorPos = GapJumpUtils.supportPos(origin, originSurface);
         BlockState floor = getBlockStateAt(floorPos);
         if (floor == null || this.mob == null) {
             return count;
         }
+        float jumpFactor = floor.getBlock().getJumpFactor();
         var level = this.mob.level();
 
         byte[] frontCache = new byte[9]; // стан 8 клітинок перед краєм НА РІВНІ СТАРТУ; ключ (dx+1)*3+(dz+1)
@@ -177,7 +180,7 @@ public class GapJumpNodeEvaluator extends ShapeAwareNodeEvaluator {
                 if (count >= nodes.length) {
                     break; // буфер сусідів повний - більше нема куди писати (промені відсортовані: спершу найближчі)
                 }
-                count = tryRay(nodes, count, origin, ray, frontCache, dy);
+                count = tryRay(nodes, count, origin, ray, frontCache, dy, originSurface, jumpFactor);
             }
         }
         return count;
@@ -187,7 +190,8 @@ public class GapJumpNodeEvaluator extends ShapeAwareNodeEvaluator {
      * @param dy landing.y - origin.y: {@code 0} - рівний стрибок, {@code >0} - вгору, {@code <0} - вниз
      *           (у межах {@code -JUMP_DOWN_LIMIT_BLOCKS..+JUMP_UP_LIMIT_BLOCKS} - {@link #getNeighbors})
      */
-    private int tryRay(Node[] nodes, int count, BlockPos origin, GapJumpRays.Ray ray, byte[] frontCache, int dy) {
+    private int tryRay(Node[] nodes, int count, BlockPos origin, GapJumpRays.Ray ray, byte[] frontCache, int dy,
+                       double originSurface, float jumpFactor) {
         // 1. Край у цьому напрямку? Перша клітинка має бути справжнім проваллям, ЗАВЖДИ на рівні СТАРТУ
         //    (dy тут НЕ підставляємо - "лесенка", де порожньо на обох поверхах, інакше не розпізнається як
         //    провалля). Якщо вона прохідна - звичайний крок з цього вже впорається (а стрибок згенерується
@@ -209,7 +213,7 @@ public class GapJumpNodeEvaluator extends ShapeAwareNodeEvaluator {
         for (int k = ray.kMin(); k <= ray.kMax(); k++) {
             int dx = ray.stepX() * k;
             int dz = ray.stepZ() * k;
-            if (!isStandable(origin, dx, dz, dy)) {
+            if (!isStandable(origin, dx, dz, dy) || !isRiseReachable(origin, dx, dz, dy, originSurface, jumpFactor)) {
                 if (landed) {
                     voidBehind = true; // (це може бути й стіна - коридор наступного кандидата її відсіче)
                 }
@@ -298,6 +302,32 @@ public class GapJumpNodeEvaluator extends ShapeAwareNodeEvaluator {
     private boolean hasFloorAt(BlockPos origin, int dx, int dz, int dy) {
         BlockPos column = origin.offset(dx, dy, dz);
         return isStandableCell(column.getX(), column.getY(), column.getZ());
+    }
+
+    /**
+     * РЕАЛЬНА висота ніг у вузлі (за формою колізії); ціле {@code y}, якщо геометрія недоступна або стояти
+     * там не можна. Кеш {@code geoSpotsEarly} спільний з рештою evaluator-а, тож додаткових запитів до світу
+     * майже нема.
+     */
+    private double surfaceYAt(int x, int y, int z) {
+        if (this.source == null) {
+            return y;
+        }
+        return ShapeWalk.surfaceYOf(geoSpotsEarly(x, y, z), y);
+    }
+
+    /**
+     * Чи дістане стрибок блока відриву ({@code jumpFactor}) до РЕАЛЬНОЇ висоти поверхні приземлення.
+     * Спуск і рівне - завжди так. Підйом - лише якщо апекс (з запасом {@link #RISE_SAFETY_MARGIN}) вище за
+     * нього: {@link GapJumpPhysics#naturalAirtime} повертає {@code -1}, коли дуга до цієї висоти не доходить.
+     */
+    private boolean isRiseReachable(BlockPos origin, int dx, int dz, int dy, double originSurface, float jumpFactor) {
+        BlockPos column = origin.offset(dx, dy, dz);
+        double rise = surfaceYAt(column.getX(), column.getY(), column.getZ()) - originSurface;
+        if (rise <= 0.0) {
+            return true;
+        }
+        return GapJumpPhysics.naturalAirtime(rise + RISE_SAFETY_MARGIN, jumpFactor) > 0;
     }
 
     /** Придатне для приземлення: опора + вільне тіло на повну висоту моба - на {@code origin.y + dy}. */

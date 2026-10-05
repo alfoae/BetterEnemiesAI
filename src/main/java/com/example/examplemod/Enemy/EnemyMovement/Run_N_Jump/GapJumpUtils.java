@@ -2,9 +2,12 @@ package com.example.examplemod.Enemy.EnemyMovement.Run_N_Jump;
 
 import com.example.examplemod.Enemy.EnemyBehavior.EnemyBreak_N_Build.EnemyBreak_N_BuildUtils;
 import com.example.examplemod.Enemy.EnemyBehavior.EnemyPursuit_N_Search.PursuitBehavior.PursuitEnemyBehavior;
+import com.example.examplemod.Enemy.EnemyMovement.TerrainShape.ShapeProbe;
+import com.example.examplemod.Enemy.EnemyMovement.TerrainShape.ShapeWalk;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.server.level.ServerLevel;
+import net.minecraft.util.Mth;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.Mob;
 import net.minecraft.world.entity.ai.attributes.Attributes;
@@ -226,7 +229,7 @@ public final class GapJumpUtils {
         if (path == null) {
             return null;
         }
-        return findJumpSegmentInPath(path, Math.max(0, path.getNextNodeIndex() - 1));
+        return findJumpSegmentInPath(path, Math.max(0, path.getNextNodeIndex() - 1), mob);
     }
 
     /**
@@ -248,7 +251,7 @@ public final class GapJumpUtils {
         if (path == null || path.getNodeCount() < 2) {
             return null;
         }
-        return findJumpSegmentInPath(path, 0);
+        return findJumpSegmentInPath(path, 0, mob);
     }
 
     /**
@@ -262,6 +265,17 @@ public final class GapJumpUtils {
      * це проста арифметика над координатами вузлів, не повторний пошук шляху.
      */
     static GapJump findJumpSegmentInPath(Path path, int from) {
+        return findJumpSegmentInPath(path, from, null);
+    }
+
+    /**
+     * Те саме, але з {@code mob}: висоти краю й приземлення беруться з РЕАЛЬНОЇ форми колізії
+     * ({@link ShapeWalk}), а не як ціла координата вузла — плита, килим, пісок душ, край люка тощо
+     * дають {@code y + 0.5}, {@code y + 0.0625}, {@code y + 0.875}… Без моба (або якщо в клітинці
+     * нема де стати) лишається ціле {@code y}, як раніше. Геометрія рахується лише коли стрибковий
+     * сегмент справді знайдено, тож у кожному тіку без стрибка це нічого не коштує.
+     */
+    static GapJump findJumpSegmentInPath(Path path, int from, Mob mob) {
         int lookahead = path.getNodeCount() - 1;
         for (int i = from; i < lookahead; i++) {
             Node a = path.getNode(i);
@@ -272,10 +286,52 @@ public final class GapJumpUtils {
                 BlockPos edge = new BlockPos(a.x, a.y, a.z);
                 BlockPos landing = new BlockPos(b.x, b.y, b.z);
                 int gapBlocks = (int) Math.round(Math.sqrt(dx * dx + dz * dz)) - 1;
-                return new GapJump(edge, Vec3.atBottomCenterOf(landing), Math.max(1, gapBlocks));
+                double edgeY = edge.getY();
+                double landingY = landing.getY();
+                if (mob != null) {
+                    ShapeProbe.CachedSource src = new ShapeProbe.CachedSource(mob.level(), state -> false);
+                    ShapeWalk.BodyDims dims = bodyDimsOf(mob);
+                    int nw = footprintCells(mob);
+                    edgeY = realSurfaceY(src, dims, nw, edge);
+                    landingY = realSurfaceY(src, dims, nw, landing);
+                }
+                Vec3 landingPoint = new Vec3(landing.getX() + 0.5, landingY, landing.getZ() + 0.5);
+                return new GapJump(edge, edgeY, landingPoint, Math.max(1, gapBlocks));
             }
         }
         return null;
+    }
+
+    /**
+     * Розміри моба для {@link ShapeWalk} — ті самі, що й у {@code ShapeAwareNodeEvaluator.prepare}.
+     */
+    static ShapeWalk.BodyDims bodyDimsOf(Mob mob) {
+        return new ShapeWalk.BodyDims(mob.getBbWidth(), mob.getBbHeight(), Math.max(0.5, mob.maxUpStep()), 1.0,
+                Math.max(1, mob.getMaxFallDistance()));
+    }
+
+    /**
+     * Скільки клітинок по X/Z займає область вузла для цього моба (ванільне {@code floor(width+1)}).
+     */
+    static int footprintCells(Mob mob) {
+        return Mth.floor(mob.getBbWidth() + 1.0F);
+    }
+
+    /**
+     * РЕАЛЬНА висота ніг у вузлі {@code cell} за формою колізії (див. {@link ShapeWalk#surfaceYOf}).
+     */
+    static double realSurfaceY(ShapeProbe.CachedSource src, ShapeWalk.BodyDims dims, int nw, BlockPos cell) {
+        return ShapeWalk.surfaceYOf(
+                ShapeWalk.candidates(src, cell.getX(), cell.getY(), cell.getZ(), nw, dims), cell.getY());
+    }
+
+    /**
+     * Клітинка блока, що РЕАЛЬНО тримає моба, якщо він стоїть у вузлі {@code cell} на висоті
+     * {@code surfaceY}: {@code ceil(surfaceY) - 1}. Для повного блока це {@code cell.below()} (як було),
+     * для плити / піску душ / килима — сама клітинка вузла (її верх у межах {@code [y, y+1)}).
+     */
+    public static BlockPos supportPos(BlockPos cell, double surfaceY) {
+        return new BlockPos(cell.getX(), (int) Math.ceil(surfaceY - 1.0E-4) - 1, cell.getZ());
     }
 
     /**
@@ -310,6 +366,20 @@ public final class GapJumpUtils {
      * Для косого/діагонального стрибка {@code gapBlocks} лише наближене (округлена відстань між
      * центрами мінус 1) і потрібне тільки для логів; уся геометрія береться з {@code edge}/{@code landing}.
      */
-    public record GapJump(BlockPos edge, Vec3 landing, int gapBlocks) {
+    public record GapJump(BlockPos edge, double edgeY, Vec3 landing, int gapBlocks) {
+
+        /**
+         * Без реальної висоти краю: {@code edgeY} = ціле {@code y} вузла (старий формат).
+         */
+        public GapJump(BlockPos edge, Vec3 landing, int gapBlocks) {
+            this(edge, edge.getY(), landing, gapBlocks);
+        }
+
+        /**
+         * Центр клітинки краю на РЕАЛЬНІЙ висоті ніг (а не на низу клітинки).
+         */
+        public Vec3 edgeCenter() {
+            return new Vec3(edge.getX() + 0.5, edgeY, edge.getZ() + 0.5);
+        }
     }
 }
