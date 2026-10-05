@@ -170,42 +170,6 @@ public final class ShapeWalk {
     }
 
     /**
-     * Найкраща точка стояння серед кандидатів вузла: номінальний центр, якщо він придатний (він завжди
-     * першим у списку), інакше та, що має найбільше покриття опорою. {@code null} — кандидатів нема.
-     */
-    public static Spot bestSpot(List<Spot> spots) {
-        Spot best = null;
-        for (Spot s : spots) {
-            if (s.center()) {
-                return s;
-            }
-            if (best == null || s.coverage() > best.coverage()) {
-                best = s;
-            }
-        }
-        return best;
-    }
-
-    public static Spot bestSpot(Spot[] spots) {
-        return bestSpot(java.util.Arrays.asList(spots));
-    }
-
-    /**
-     * РЕАЛЬНА висота ніг (поверхні опори) у вузлі: {@code surfaceY} найкращої точки стояння, або
-     * {@code fallback} (звичайно — ціле {@code y} вузла), якщо стояти там не можна. Для повного блока це
-     * рівно {@code y}; для плити {@code y+0.5}, для піску душ {@code y+0.875}, для килима
-     * {@code y+0.0625} тощо — вузол завжди має {@code y == floor(surfaceY)}.
-     */
-    public static double surfaceYOf(List<Spot> spots, double fallback) {
-        Spot s = bestSpot(spots);
-        return s == null ? fallback : s.surfaceY();
-    }
-
-    public static double surfaceYOf(Spot[] spots, double fallback) {
-        return surfaceYOf(java.util.Arrays.asList(spots), fallback);
-    }
-
-    /**
      * Розміри й можливості конкретного моба.
      *
      * @param stepUp  скільки моб піднімається просто йдучи (атрибут step height, ~0.6)

@@ -193,7 +193,7 @@ public class ShapeAwareNodeEvaluator extends WalkNodeEvaluator {
     /**
      * Звідки моб виходить: для старту — де він реально стоїть + все, куди з цієї клітинки можна пересунутись.
      */
-    private Spot[] fromSpots(Node node) {
+    protected final Spot[] fromSpots(Node node) {
         Spot[] all = geoSpotsAll(node.x, node.y, node.z);
         if (node == this.startNode && this.startSpot != null) {
             Spot[] r = new Spot[all.length + 1];
@@ -245,7 +245,7 @@ public class ShapeAwareNodeEvaluator extends WalkNodeEvaluator {
         return null;
     }
 
-    private boolean anyMove(Spot[] from, Spot[] to) {
+    protected final boolean anyMove(Spot[] from, Spot[] to) {
         for (Spot a : from) {
             for (Spot b : to) {
                 if (movable(a, b)) {

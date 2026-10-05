@@ -328,6 +328,107 @@ final class GapJumpPhysics {
         return loseX || loseZ;
     }
 
+    /**
+     * Найбільший горизонтальний крок за тік, який дозволяє профіль із коротким останнім кроком
+     * ({@link #flightCommand}, {@code shortLastStep}): швидкість спринту зомбі ~0.44, вище - це вже ривок.
+     */
+    static final double MAX_SHORT_LAST_STEP_SPEED = 0.5;
+
+    /**
+     * Той самий критерій відриву, але для опори НЕСТАНДАРТНОЇ форми (див. {@link ShapeJump}): замість меж
+     * повного блока ({@link #frontBorder}, {@code 0.5 + halfWidth}) беруться реальні межі опори вздовж стрибка.
+     * Для повного блока дає той самий результат, що й {@link #shouldTakeOff} при русі вздовж осі.
+     *
+     * @param relX, relZ  позиція моба відносно ТОЧКИ ВІДРИВУ
+     * @param front {@code along}, з якого відриваємось (центр моба над краєм поверхні)
+     * @param lose  {@code along}, де хітбокс повністю сходить з опори (далі onGround=false)
+     */
+    static boolean shouldTakeOffAlong(double relX, double relZ, double dirX, double dirZ,
+                                      double speedAlong, double groundAccel, double front, double lose) {
+        double along = relX * dirX + relZ * dirZ;
+        if (along >= front) {
+            return true;
+        }
+        double v = Math.max(0.0, speedAlong);
+        double stepSteady = v / GROUND_FRICTION;
+        double stepAccelerating = v + Math.max(0.0, groundAccel);
+        double predictedStep = Math.max(MIN_PREDICTED_STEP, Math.max(stepSteady, stepAccelerating));
+        double look = predictedStep * STEP_LOOKAHEAD_FACTOR;
+        return along + look >= lose - GROUND_LOSS_MARGIN;
+    }
+
+    /**
+     * Висоти блоків кратні 1/16, тож 1/256 не губить нічого, але прибирає шум double (64.00000000000001).
+     */
+    static double quantizeDeltaY(double deltaY) {
+        return Math.rint(deltaY * 256.0) / 256.0;
+    }
+
+    /**
+     * Один тік замкненого контуру польоту: горизонтальна швидкість = відстань до точки приземлення / тіків до
+     * торкання її висоти. Це ТОЙ САМИЙ розрахунок, що раніше жив у {@code GapJumpAssistGoal.controlFlight};
+     * винесений сюди, щоб Goal і симуляція {@link ShapeJump} користувались ОДНИМ кодом.
+     * <p>
+     * Крок за тік не має перевищувати {@code maxStep} (радіус опори приземлення, див. {@link #maxFlightStep}):
+     * <ul>
+     *   <li>{@code shortLastStep=false} (повні блоки, як і було): якщо крок вийшов би більшим - політ
+     *       подовжується (вертикаль піднімається, «зависання»), доки крок не вкладеться;</li>
+     *   <li>{@code shortLastStep=true} (вузька опора - див. {@link ShapeJump}): політ лишається ванільним, а
+     *       обмеженим робиться лише ОСТАННІЙ крок - решту дистанції моб долає трохи швидше
+     *       ({@code (D - maxStep) / (n - 1)}), на останньому тіку йде коротким кроком {@code maxStep}. Хітбокс
+     *       тоді на тіку торкання вже над опорою, а політ не перетворюється на «зависання» на 3 блоки вгору.
+     *       Якщо потрібна для цього швидкість зависока ({@link #MAX_SHORT_LAST_STEP_SPEED}) - тоді все ж
+     *       зависання, як раніше.</li>
+     * </ul>
+     *
+     * @param vy      вертикальна швидкість з deltaMovement на початку тіку (вже після гравітації минулого тіку)
+     * @param planCap стеля плану: відстань сегмента + запас (захист від абсурдної швидкості)
+     * @return команду, або {@code null}, якщо рівня приземлення вже не досягти (керувати нічим)
+     */
+    static FlightCommand flightCommand(double mobX, double mobY, double mobZ, double vy,
+                                       double landX, double landY, double landZ,
+                                       double planCap, double maxStep, boolean shortLastStep) {
+        double heightAbove = mobY - landY;
+        double dx = landX - mobX;
+        double dz = landZ - mobZ;
+        double dist = Math.sqrt(dx * dx + dz * dz);
+        if (dist < 1.0E-6) {
+            return null;
+        }
+        int ticks = remainingAirTicks(heightAbove, vy);
+        if (ticks <= 0) {
+            return null;
+        }
+        double planDist = Math.min(dist, planCap);
+        if (planDist / ticks <= maxStep + 1.0E-9) {
+            double perTick = planDist / ticks;
+            return new FlightCommand(dx / dist * perTick, vy, dz / dist * perTick);
+        }
+        if (shortLastStep && ticks >= 2) {
+            double perTick = (planDist - maxStep) / (ticks - 1);
+            if (perTick <= MAX_SHORT_LAST_STEP_SPEED) {
+                return new FlightCommand(dx / dist * perTick, vy, dz / dist * perTick);
+            }
+        }
+        int needed = (int) Math.ceil(planDist / maxStep - 1.0E-9);
+        if (needed > ticks) {
+            double extendedVy = verticalVelocityForRemainingTicks(heightAbove, vy, needed);
+            int extendedTicks = remainingAirTicks(heightAbove, extendedVy);
+            if (extendedTicks > 0) {
+                vy = extendedVy;
+                ticks = extendedTicks;
+            }
+        }
+        double perTick = planDist / ticks;
+        return new FlightCommand(dx / dist * perTick, vy, dz / dist * perTick);
+    }
+
+    /**
+     * Команда польоту на один тік: нова deltaMovement (vx, vy, vz).
+     */
+    record FlightCommand(double vx, double vy, double vz) {
+    }
+
     // =====================================================================================
     // БЛОК ПІД НОГАМИ: як тертя / speedFactor / jumpFactor міняють ДАЛЬНІСТЬ стрибка
     // =====================================================================================

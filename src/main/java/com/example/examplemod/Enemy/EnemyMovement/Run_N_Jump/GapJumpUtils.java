@@ -2,8 +2,12 @@ package com.example.examplemod.Enemy.EnemyMovement.Run_N_Jump;
 
 import com.example.examplemod.Enemy.EnemyBehavior.EnemyBreak_N_Build.EnemyBreak_N_BuildUtils;
 import com.example.examplemod.Enemy.EnemyBehavior.EnemyPursuit_N_Search.PursuitBehavior.PursuitEnemyBehavior;
+import com.example.examplemod.Enemy.EnemyMovement.TerrainShape.ShapePathAccess;
 import com.example.examplemod.Enemy.EnemyMovement.TerrainShape.ShapeProbe;
+import com.example.examplemod.Enemy.EnemyMovement.TerrainShape.ShapeSettings;
 import com.example.examplemod.Enemy.EnemyMovement.TerrainShape.ShapeWalk;
+import com.example.examplemod.Enemy.EnemyMovement.TerrainShape.ShapeWalk.BodyDims;
+import com.example.examplemod.Enemy.EnemyMovement.TerrainShape.ShapeWalk.Spot;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.server.level.ServerLevel;
@@ -18,6 +22,8 @@ import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.pathfinder.Node;
 import net.minecraft.world.level.pathfinder.Path;
 import net.minecraft.world.phys.Vec3;
+
+import java.util.*;
 
 /**
  * Спільні утиліти стрибка + читання "цей сегмент шляху вимагає стрибка" з реального Path.
@@ -166,6 +172,8 @@ public final class GapJumpUtils {
         return floor.getFriction(level, floorPos, entity) * GapJumpPhysics.AIR_FRICTION * runSlowdown(floor.getBlock());
     }
 
+    private static final Map<Mob, CachedSegment> SEGMENT_CACHE = new WeakHashMap<>();
+
     /**
      * Чи долетить моб до landing (на живій відстані {@code realDistance}, {@code deltaYBlocks} нижче,
      * завжди {@code <0}) ПРОСТО ЗБІГШИ з краю, без стрибка (без вертикального імпульсу {@code 0.42*jumpFactor}).
@@ -185,13 +193,92 @@ public final class GapJumpUtils {
      */
     public static boolean reachableWithoutJump(BlockState floor, LevelReader level, BlockPos floorPos, Entity entity,
                                                double deltaYBlocks, double realDistance, double runSpeedSetpoint) {
+        return reachableWithoutJump(floor.getFriction(level, floorPos, entity), deltaYBlocks, realDistance, runSpeedSetpoint);
+    }
+
+    // =====================================================================================
+    // ТОЧКА ВІДРИВУ ЗА ВАНІЛЬНИМИ ПРАВИЛАМИ (а не «блок під вузлом»)
+    // =====================================================================================
+
+    /**
+     * Те саме, коли тертя блока відриву вже відоме (точка стояння на нестандартній опорі - див. {@link #takeoffProps}).
+     */
+    public static boolean reachableWithoutJump(double friction, double deltaYBlocks, double realDistance,
+                                               double runSpeedSetpoint) {
         if (deltaYBlocks >= 0.0) {
             return false; // вгору чи рівно - без стрибка нікуди не долетіти
         }
-        double friction = floor.getFriction(level, floorPos, entity);
         double retention = friction * GapJumpPhysics.AIR_FRICTION;
         double sum = GapJumpPhysics.flightSum(deltaYBlocks, retention, 0.0); // jumpVelocity=0 - без імпульсу
         return runSpeedSetpoint * sum >= realDistance;
+    }
+
+    static TakeoffProps takeoffProps(LevelReader level, Entity entity, double x, double surfaceY, double z) {
+        BlockPos belowPos = BlockPos.containing(x, surfaceY - 0.500001, z);
+        BlockState below = level.getBlockState(belowPos);
+        Block belowBlock = below.getBlock();
+        Block feetBlock = level.getBlockState(BlockPos.containing(x, surfaceY, z)).getBlock();
+        double friction = below.getFriction(level, belowPos, entity);
+        float feetSpeed = feetBlock.getSpeedFactor();
+        double slowdown = feetSpeed != 1.0F ? feetSpeed : belowBlock.getSpeedFactor();
+        if (belowBlock instanceof SlimeBlock) {
+            slowdown *= SLIME_STEP_SLOWDOWN;
+        }
+        float feetJump = feetBlock.getJumpFactor();
+        double jumpFactor = feetJump != 1.0F ? feetJump : belowBlock.getJumpFactor();
+        return new TakeoffProps(belowPos, friction, slowdown, jumpFactor);
+    }
+
+    /**
+     * Фізика й дальність для {@link ShapeJump#choose}: одна й та сама і в графі шляхів
+     * ({@link GapJumpNodeEvaluator}), і при виконанні ({@link #planJump}) - тому обидва обирають ОДНУ пару точок.
+     */
+    static ShapeJump.Model jumpModel(LevelReader level, Entity mob, double runSpeed) {
+        return new ShapeJump.Model() {
+            @Override
+            public ShapeJump.Physics physics(Spot takeoff) {
+                TakeoffProps p = takeoffProps(level, mob, takeoff.x(), takeoff.surfaceY(), takeoff.z());
+                return new ShapeJump.Physics(p.jumpFactor(), p.friction() * GapJumpPhysics.AIR_FRICTION, runSpeed);
+            }
+
+            @Override
+            public ShapeJump.RangeModel range(Spot takeoff) {
+                TakeoffProps p = takeoffProps(level, mob, takeoff.x(), takeoff.surfaceY(), takeoff.z());
+                return deltaY -> {
+                    double factor = GapJumpPhysics.blockRangeFactor(p.friction(), p.slowdown(), p.jumpFactor(), deltaY);
+                    int gap = (int) Math.floor(runSpeed * RANGE_ESTIMATE_FACTOR * factor);
+                    return gap < 1 ? -1.0 : GapJumpRays.maxFlight(gap);
+                };
+            }
+        };
+    }
+
+    /**
+     * Точний план стрибка {@code edge -> landingCell} за РЕАЛЬНОЮ формою колізії (див. {@link ShapeJump}).
+     * {@code null} - якщо обидві точки звичайні (повний блок на цілому рівні: тоді виконавець лишається на
+     * старому коді, нічого не змінюється) або якщо геометрію розв'язати не вдалось (світ змінився тощо).
+     */
+    static ShapeJump.Plan planJump(Mob mob, BlockPos edge, BlockPos landingCell) {
+        if (!ShapeSettings.enabledFor(mob)) {
+            return null; // форм-орієнтованість вимкнена (config) - старий код, як і в графі шляхів
+        }
+        try {
+            LevelReader level = mob.level();
+            ShapeProbe.CachedSource src = new ShapeProbe.CachedSource(level, state -> false);
+            float width = mob.getBbWidth();
+            BodyDims dims = new BodyDims(width, mob.getBbHeight(), Math.max(0.5, mob.maxUpStep()), 1.0,
+                    Math.max(1, mob.getMaxFallDistance()));
+            int nw = Mth.floor(width + 1.0F);
+            List<Spot> from = ShapeWalk.candidates(src, edge.getX(), edge.getY(), edge.getZ(), nw, dims);
+            List<Spot> to = ShapeWalk.candidates(src, landingCell.getX(), landingCell.getY(), landingCell.getZ(), nw, dims);
+            if (from.isEmpty() || to.isEmpty()) {
+                return null;
+            }
+            ShapeJump.Plan plan = ShapeJump.choose(src, dims, from, to, jumpModel(level, mob, runSpeedSetpoint(mob)));
+            return plan == null || plan.plain() ? null : plan;
+        } catch (RuntimeException e) {
+            return null; // геометрія недоступна - лишаємось на старому коді (центр клітинки)
+        }
     }
 
     /** Рядок для логу: блок під краєм, його коефіцієнти й дальність в УСІ треті боки (рівно/вгору/вниз).
@@ -229,7 +316,91 @@ public final class GapJumpUtils {
         if (path == null) {
             return null;
         }
-        return findJumpSegmentInPath(path, Math.max(0, path.getNextNodeIndex() - 1), mob);
+        int from = Math.max(0, path.getNextNodeIndex() - 1);
+        // Pursuit питає це по кілька разів на тік, а точний план (геометрія + симуляція) коштує дорожче за
+        // арифметику над вузлами: у межах одного тіку й того самого Path відповідь та сама.
+        CachedSegment cached = SEGMENT_CACHE.get(mob);
+        if (cached != null && cached.path == path && cached.from == from && cached.tick == mob.tickCount) {
+            return cached.jump;
+        }
+        GapJump jump = findJumpSegmentInPath(path, from, mob);
+        if (jump != null) {
+            SEGMENT_CACHE.put(mob, new CachedSegment(path, from, mob.tickCount, jump));
+        }
+        return jump;
+    }
+
+    /**
+     * Те саме, але з мобом: для сегмента з НЕСТАНДАРТНОЮ опорою на кінцях ({@link #planJump}) додається точний
+     * план (куди саме відриватись/приземлятись і на якій висоті), а якщо є вузли до відриву - ще й шлях підходу
+     * ({@link #buildApproach}). Без моба (чи для звичайних блоків) - як і раніше: центри клітинок, цілі висоти.
+     */
+    static GapJump findJumpSegmentInPath(Path path, int from, Mob mob) {
+        int lookahead = path.getNodeCount() - 1;
+        for (int i = from; i < lookahead; i++) {
+            Node a = path.getNode(i);
+            Node b = path.getNode(i + 1);
+            double dx = b.x - a.x;
+            double dz = b.z - a.z;
+            if (dx * dx + dz * dz > JUMP_SEGMENT_THRESHOLD * JUMP_SEGMENT_THRESHOLD) {
+                BlockPos edge = new BlockPos(a.x, a.y, a.z);
+                BlockPos landingCell = new BlockPos(b.x, b.y, b.z);
+                int gapBlocks = (int) Math.round(Math.sqrt(dx * dx + dz * dz)) - 1;
+                Vec3 landing = Vec3.atBottomCenterOf(landingCell);
+                ShapeJump.Plan plan = null;
+                Path approach = null;
+                if (mob != null) {
+                    plan = planJump(mob, edge, landingCell);
+                    if (plan != null) {
+                        landing = new Vec3(plan.landX(), plan.landY(), plan.landZ());
+                    }
+                    approach = buildApproach(path, from, i, plan != null);
+                }
+                return new GapJump(edge, landing, Math.max(1, gapBlocks), plan, approach);
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Підхід: вузли шляху між {@code from} (де моб уже побував) і вузлом відриву {@code takeoffIndex} включно -
+     * окремий {@link Path}, який GapJumpAssistGoal віддає навігатору. Тоді моб доходить до краю ТИМ САМИМ
+     * рухом, що й у Pursuit (точні точки біля люків/плит, гальмо на краях - {@code PathNavigationMixin}), а не
+     * прямою до центру краю, яка на кривих блоках веде повз опору. Лише коли це потрібно: або стрибок точний
+     * ({@code exact}), або сам шлях уточнений ({@link ShapePathAccess} має точки). Для звичайних блоків - {@code null}
+     * (прямий розбіг, як і раніше).
+     */
+    private static Path buildApproach(Path path, int from, int takeoffIndex, boolean exact) {
+        int start = from + 1;
+        if (start > takeoffIndex) {
+            return null;
+        }
+        Vec3[] spots = null;
+        boolean[] tight = null;
+        Object holder = path;
+        if (holder instanceof ShapePathAccess access) {
+            spots = access.betterEnemies$spots();
+            tight = access.betterEnemies$tight();
+        }
+        boolean refined = spots != null && tight != null
+                && spots.length > takeoffIndex && tight.length > takeoffIndex;
+        if (!exact && !refined) {
+            return null;
+        }
+        List<Node> nodes = new ArrayList<>(takeoffIndex - start + 1);
+        for (int n = start; n <= takeoffIndex; n++) {
+            nodes.add(path.getNode(n));
+        }
+        Path approach = new Path(nodes, path.getTarget(), true);
+        if (refined) {
+            Object approachHolder = approach;
+            if (approachHolder instanceof ShapePathAccess target) {
+                target.betterEnemies$setWaypoints(
+                        Arrays.copyOfRange(spots, start, takeoffIndex + 1),
+                        Arrays.copyOfRange(tight, start, takeoffIndex + 1));
+            }
+        }
+        return approach;
     }
 
     /**
@@ -269,69 +440,20 @@ public final class GapJumpUtils {
     }
 
     /**
-     * Те саме, але з {@code mob}: висоти краю й приземлення беруться з РЕАЛЬНОЇ форми колізії
-     * ({@link ShapeWalk}), а не як ціла координата вузла — плита, килим, пісок душ, край люка тощо
-     * дають {@code y + 0.5}, {@code y + 0.0625}, {@code y + 0.875}… Без моба (або якщо в клітинці
-     * нема де стати) лишається ціле {@code y}, як раніше. Геометрія рахується лише коли стрибковий
-     * сегмент справді знайдено, тож у кожному тіку без стрибка це нічого не коштує.
+     * Що під ногами в точці стояння {@code (x, surfaceY, z)}: блок, що дає ТЕРТЯ, і множники швидкості/стрибка.
+     * Раніше скрізь брався {@code вузол.below()} - це вірно лише для поверхні на ЦІЛІЙ висоті. Ванільні правила:
+     * <ul>
+     *   <li>тертя - блок на {@code 0.500001} нижче ніг ({@code getBlockPosBelowThatAffectsMyMovement}): для
+     *       плити це блок ПІД плитою, для піску душ (поверхня 14/16 усередині ЙОГО клітинки) - він сам;</li>
+     *   <li>speedFactor і jumpFactor - блок у клітинці ніг, а якщо там 1.0 - блок із попереднього пункту
+     *       ({@code getBlockSpeedFactor}, {@code getBlockJumpFactor}).</li>
+     * </ul>
+     * Для звичайної підлоги (цілий рівень, повітря в клітинці ніг) це в точності {@code вузол.below()}.
      */
-    static GapJump findJumpSegmentInPath(Path path, int from, Mob mob) {
-        int lookahead = path.getNodeCount() - 1;
-        for (int i = from; i < lookahead; i++) {
-            Node a = path.getNode(i);
-            Node b = path.getNode(i + 1);
-            double dx = b.x - a.x;
-            double dz = b.z - a.z;
-            if (dx * dx + dz * dz > JUMP_SEGMENT_THRESHOLD * JUMP_SEGMENT_THRESHOLD) {
-                BlockPos edge = new BlockPos(a.x, a.y, a.z);
-                BlockPos landing = new BlockPos(b.x, b.y, b.z);
-                int gapBlocks = (int) Math.round(Math.sqrt(dx * dx + dz * dz)) - 1;
-                double edgeY = edge.getY();
-                double landingY = landing.getY();
-                if (mob != null) {
-                    ShapeProbe.CachedSource src = new ShapeProbe.CachedSource(mob.level(), state -> false);
-                    ShapeWalk.BodyDims dims = bodyDimsOf(mob);
-                    int nw = footprintCells(mob);
-                    edgeY = realSurfaceY(src, dims, nw, edge);
-                    landingY = realSurfaceY(src, dims, nw, landing);
-                }
-                Vec3 landingPoint = new Vec3(landing.getX() + 0.5, landingY, landing.getZ() + 0.5);
-                return new GapJump(edge, edgeY, landingPoint, Math.max(1, gapBlocks));
-            }
-        }
-        return null;
+    record TakeoffProps(BlockPos frictionPos, double friction, double slowdown, double jumpFactor) {
     }
 
-    /**
-     * Розміри моба для {@link ShapeWalk} — ті самі, що й у {@code ShapeAwareNodeEvaluator.prepare}.
-     */
-    static ShapeWalk.BodyDims bodyDimsOf(Mob mob) {
-        return new ShapeWalk.BodyDims(mob.getBbWidth(), mob.getBbHeight(), Math.max(0.5, mob.maxUpStep()), 1.0,
-                Math.max(1, mob.getMaxFallDistance()));
-    }
-
-    /**
-     * Скільки клітинок по X/Z займає область вузла для цього моба (ванільне {@code floor(width+1)}).
-     */
-    static int footprintCells(Mob mob) {
-        return Mth.floor(mob.getBbWidth() + 1.0F);
-    }
-
-    /**
-     * РЕАЛЬНА висота ніг у вузлі {@code cell} за формою колізії (див. {@link ShapeWalk#surfaceYOf}).
-     */
-    static double realSurfaceY(ShapeProbe.CachedSource src, ShapeWalk.BodyDims dims, int nw, BlockPos cell) {
-        return ShapeWalk.surfaceYOf(
-                ShapeWalk.candidates(src, cell.getX(), cell.getY(), cell.getZ(), nw, dims), cell.getY());
-    }
-
-    /**
-     * Клітинка блока, що РЕАЛЬНО тримає моба, якщо він стоїть у вузлі {@code cell} на висоті
-     * {@code surfaceY}: {@code ceil(surfaceY) - 1}. Для повного блока це {@code cell.below()} (як було),
-     * для плити / піску душ / килима — сама клітинка вузла (її верх у межах {@code [y, y+1)}).
-     */
-    public static BlockPos supportPos(BlockPos cell, double surfaceY) {
-        return new BlockPos(cell.getX(), (int) Math.ceil(surfaceY - 1.0E-4) - 1, cell.getZ());
+    private record CachedSegment(Path path, int from, int tick, GapJump jump) {
     }
 
     /**
@@ -365,21 +487,73 @@ public final class GapJumpUtils {
      * Край (останній твердий вузол перед стрибком), точка приземлення і ширина розриву в блоках.
      * Для косого/діагонального стрибка {@code gapBlocks} лише наближене (округлена відстань між
      * центрами мінус 1) і потрібне тільки для логів; уся геометрія береться з {@code edge}/{@code landing}.
+     * <p>
+     * Для НЕСТАНДАРТНОЇ опори на кінцях (плита, край люка, стовпчик...) є ще {@code plan} - точний план за
+     * реальною формою колізії ({@link ShapeJump}); тоді {@code landing} уже реальна точка приземлення з
+     * реальною висотою поверхні, а точка відриву, межі опори й ліміт кроку беруться з плану (див. методи нижче).
+     * Для звичайних блоків {@code plan == null} і нічого не змінюється. {@code approach} - вузли шляху від
+     * поточного місця до вузла відриву (для навігатора), або {@code null} (прямий розбіг, як і раніше).
      */
-    public record GapJump(BlockPos edge, double edgeY, Vec3 landing, int gapBlocks) {
+    public record GapJump(BlockPos edge, Vec3 landing, int gapBlocks, ShapeJump.Plan plan, Path approach) {
 
-        /**
-         * Без реальної висоти краю: {@code edgeY} = ціле {@code y} вузла (старий формат).
-         */
         public GapJump(BlockPos edge, Vec3 landing, int gapBlocks) {
-            this(edge, edge.getY(), landing, gapBlocks);
+            this(edge, landing, gapBlocks, null, null);
         }
 
         /**
-         * Центр клітинки краю на РЕАЛЬНІЙ висоті ніг (а не на низу клітинки).
+         * Є точний план (нестандартна опора). Тоді {@link #landing} - уже РЕАЛЬНА точка приземлення (x, z і висота
+         * поверхні), а не центр клітинки на цілій висоті; інакше все як раніше.
          */
-        public Vec3 edgeCenter() {
-            return new Vec3(edge.getX() + 0.5, edgeY, edge.getZ() + 0.5);
+        public boolean exact() {
+            return this.plan != null;
+        }
+
+        /**
+         * Точка відриву: на опорі (з реальною висотою) або, як раніше, центр блока-краю.
+         */
+        public Vec3 takeoffPoint() {
+            return this.plan != null
+                    ? new Vec3(this.plan.takeoffX(), this.plan.takeoffY(), this.plan.takeoffZ())
+                    : Vec3.atBottomCenterOf(this.edge);
+        }
+
+        /**
+         * Скільки блоків вздовж стрибка від точки відриву, поки центр моба ще над опорою (передній край).
+         */
+        public double front(double dirX, double dirZ) {
+            return this.plan != null ? this.plan.frontAlong() : GapJumpPhysics.frontBorder(dirX, dirZ);
+        }
+
+        /**
+         * Наскільки вбік від осі стрибка моб ще стоїть на опорі відриву.
+         */
+        public double lateralLimit(double halfWidth, double dirX, double dirZ) {
+            return this.plan != null ? this.plan.lateralLimit() : (0.5 + halfWidth) * (Math.abs(dirX) + Math.abs(dirZ));
+        }
+
+        /**
+         * Найбільший горизонтальний крок за тік, при якому хітбокс на тіку торкання ще над опорою приземлення.
+         */
+        public double maxStep(double halfWidth) {
+            return this.plan != null ? this.plan.maxStep() : GapJumpPhysics.maxFlightStep(halfWidth);
+        }
+
+        /**
+         * Чи пора відриватись (див. {@link GapJumpPhysics#shouldTakeOff}); для точного плану - за реальними межами опори.
+         */
+        public boolean takeoffNow(double relX, double relZ, double dirX, double dirZ, double speedAlong,
+                                  double halfWidth, double groundAccel) {
+            return this.plan != null
+                    ? GapJumpPhysics.shouldTakeOffAlong(relX, relZ, dirX, dirZ, speedAlong, groundAccel,
+                    this.plan.frontAlong(), this.plan.loseAlong())
+                    : GapJumpPhysics.shouldTakeOff(relX, relZ, dirX, dirZ, speedAlong, halfWidth, groundAccel);
+        }
+
+        @Override
+        public String toString() {
+            return "GapJump[edge=" + this.edge + ", landing=" + this.landing + ", gap=" + this.gapBlocks
+                    + (this.plan != null ? ", ТОЧНИЙ" : "") + (this.approach != null ? ", підхід=" + this.approach.getNodeCount() + " вуз." : "")
+                    + "]";
         }
     }
 }

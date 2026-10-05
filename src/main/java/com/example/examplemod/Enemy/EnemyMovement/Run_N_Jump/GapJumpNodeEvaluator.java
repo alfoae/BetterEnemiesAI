@@ -1,11 +1,16 @@
 package com.example.examplemod.Enemy.EnemyMovement.Run_N_Jump;
 
 import com.example.examplemod.Enemy.EnemyMovement.TerrainShape.ShapeAwareNodeEvaluator;
-import com.example.examplemod.Enemy.EnemyMovement.TerrainShape.ShapeWalk;
+import com.example.examplemod.Enemy.EnemyMovement.TerrainShape.ShapeSettings;
+import com.example.examplemod.Enemy.EnemyMovement.TerrainShape.ShapeWalk.Spot;
 import net.minecraft.core.BlockPos;
+import net.minecraft.world.entity.Mob;
+import net.minecraft.world.level.PathNavigationRegion;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.pathfinder.Node;
 import net.minecraft.world.level.pathfinder.PathType;
+
+import java.util.Arrays;
 
 /**
  * Розширює звичайний {@code WalkNodeEvaluator} додатковими "стрибковими" ребрами графа: якщо від
@@ -76,17 +81,23 @@ import net.minecraft.world.level.pathfinder.PathType;
  * замість 2 (від рівня ніг на старті до рівня голови на приземленні чи навпаки): проста, консервативна
  * оцінка без точного розрахунку, де саме на дузі моб опиниться в кожній проміжній точці.
  * <p>
- * <b>v5 — РЕАЛЬНІ висоти (форма колізії).</b> Висота підлоги вузла більше не ціла {@code node.y}: беремо
- * {@code surfaceY} найкращої точки стояння ({@link com.example.examplemod.Enemy.EnemyMovement.TerrainShape.ShapeWalk#surfaceYOf}):
- * плита {@code y+0.5}, пісок душ {@code y+0.875}, килим {@code y+0.0625}, край відкритого люка тощо. Звідси:
- * <ul>
- *   <li>блок відриву (тертя / speedFactor / jumpFactor) береться з клітинки, що РЕАЛЬНО тримає моба
- *       ({@link GapJumpUtils#supportPos}), а не завжди з {@code origin.below()};</li>
- *   <li>приземлення відсіюється, якщо РЕАЛЬНИЙ підйом (а не різниця цілих {@code y}) вищий за апекс стрибка
- *       блока відриву ({@link #isRiseReachable}) - наприклад, з нижньої плити на блок, що вищий за неї на 1.5.</li>
- * </ul>
- * Сітка графа (проміні, {@code dy}-ліміти, вартості) лишилась цілочисельною; точність - у відсіві й у фізиці
- * виконання ({@code GapJumpAssistGoal} бере дробове Δy з {@link GapJumpUtils.GapJump#edgeY()} і {@code landing.y}).
+ * <b>v5 — нестандартні ("криві") блоки: плити, краї відкритих люків, стовпчики, килими, блоки з модів.</b>
+ * Раніше стрибок цілився в ЦЕНТР клітинки на ЦІЛІЙ висоті вузла, а грубий коридор ({@link #isCorridorClear})
+ * дивився лише центр кожної клітинки. Тепер, коли в стрибку бере участь нерегулярна форма (колонка вузла,
+ * колонка приземлення чи будь-яка клітинка коридору - {@link #involvesIrregular}), рішення приймає
+ * {@link ShapeJump#choose}: із придатних точок стояння відриву й приземлення ({@code ShapeWalk.candidates} -
+ * ті самі, що й у побудові шляху) обирається пара, для якої {@link ShapeJump#simulate} (ванільна фізика +
+ * колізія хітбокса з реальними коробками) доводить, що моб долетить, нічого не зачепить і приземлиться
+ * саме на цю поверхню. Δy береться з РЕАЛЬНИХ висот поверхонь (плита 0.5, килим 0.0625...), блок для тертя й
+ * jumpFactor - за ванільним правилом для точки стояння ({@link GapJumpUtils#takeoffProps}). Для повних
+ * блоків (центр, повне покриття, цілий рівень, регулярний коридор) лишається СТАРИЙ код без жодних змін.
+ * <p>
+ * Друге: клітинка перед краєм могла мати поверхню (ребро люка в дальньому куті), але з краю на неї не
+ * ступити; раніше вона вважалась прохідною, крок не існував, а стрибок не генерувався - глухий кут. Тепер
+ * така клітинка прохідною вважається лише якщо справді існує геометричний перехід ({@link #classifyStartFront}).
+ * <p>
+ * НЕ займає: стрибок між СУСІДНІМИ клітинками (відстань до 1.41), навіть якщо між опорами є розрив менший
+ * за клітинку (дві свічки поруч): це за визначенням {@code GapJumpUtils.JUMP_SEGMENT_THRESHOLD} крок, а не стрибок.
  * <p>
  * ПРО ПРОДУКТИВНІСТЬ: getNeighbors викликається на КОЖЕН вузол під час КОЖНОГО пошуку шляху, тож
  * додатковий скан не повинен бути безумовним. Ванільний WalkNodeEvaluator дає максимум 8 сусідів
@@ -130,12 +141,6 @@ public class GapJumpNodeEvaluator extends ShapeAwareNodeEvaluator {
      */
     private static final float UP_JUMP_EXTRA_MALUS_PER_BLOCK = 0.5F;
 
-    /**
-     * Запас над реальним підйомом: апекс ванільного стрибка (~1.25) має бути вище за поверхню приземлення
-     * щонайменше на стільки, інакше моб не "заскочить" на неї, а вперше торкнеться збоку.
-     */
-    private static final double RISE_SAFETY_MARGIN = 0.1;
-
     /** Стан клітинки перед краєм (для кешу на вузол). */
     private static final byte UNKNOWN = 0;
     /** Є підлога й вільно на рівні ніг: моб просто зробить крок, стрибок звідси в цей бік не потрібен. */
@@ -145,6 +150,26 @@ public class GapJumpNodeEvaluator extends ShapeAwareNodeEvaluator {
     /** На рівні ніг стіна/блок (або світ недоступний): крізь неї стрибок не йде. */
     private static final byte BLOCKED = 3;
 
+    /**
+     * Точні стрибки по нестандартних блоках увімкнені тим самим перемикачем, що й форм-орієнтована ходьба
+     * ({@link ShapeSettings#enabledFor}: {@code enableShapeAwareWalking} + чорний список мобів). Вимкнено - граф
+     * і виконавець працюють старим кодом (центр клітинки, цілі висоти), як до цієї зміни.
+     */
+    private boolean exactJumps = true;
+
+    @Override
+    public void prepare(PathNavigationRegion level, Mob mob) {
+        super.prepare(level, mob);
+        this.exactJumps = ShapeSettings.enabledFor(mob);
+    }
+
+    /**
+     * Геометрія готова й точні стрибки дозволені.
+     */
+    private boolean exactReady() {
+        return this.exactJumps && this.source != null && this.dims != null;
+    }
+
     @Override
     public int getNeighbors(Node[] nodes, Node node) {
         int count = super.getNeighbors(nodes, node);
@@ -152,15 +177,15 @@ public class GapJumpNodeEvaluator extends ShapeAwareNodeEvaluator {
             return count; // повністю відкрита клітинка - тут стрибок ніколи не потрібен, не скануємо
         }
         BlockPos origin = new BlockPos(node.x, node.y, node.z);
-        // Реальна висота ніг на відриві й блок, що її тримає (плита/пісок душ/килим - це клітинка вузла).
-        double originSurface = surfaceYAt(node.x, node.y, node.z);
-        BlockPos floorPos = GapJumpUtils.supportPos(origin, originSurface);
+        BlockPos floorPos = origin.below();
         BlockState floor = getBlockStateAt(floorPos);
         if (floor == null || this.mob == null) {
             return count;
         }
-        float jumpFactor = floor.getBlock().getJumpFactor();
         var level = this.mob.level();
+
+        // Точна геометрія (ShapeJump) - лише де є нерегулярна форма; на повних блоках лишається старий код.
+        JumpCtx ctx = new JumpCtx(node, origin, exactReady() && columnIsIrregular(node.x, node.y, node.z));
 
         byte[] frontCache = new byte[9]; // стан 8 клітинок перед краєм НА РІВНІ СТАРТУ; ключ (dx+1)*3+(dz+1)
         // Дальність залежить від блока, З ЯКОГО моб відривається (тертя / speedFactor / jumpFactor): лід - далі,
@@ -172,33 +197,40 @@ public class GapJumpNodeEvaluator extends ShapeAwareNodeEvaluator {
         // сходи в 3 рівні - Δy=-1 на першу, Δy=-2 на другу, Δy=-3 на третю, кожна свій кандидат).
         for (int dy = -GapJumpPhysics.JUMP_DOWN_LIMIT_BLOCKS; dy <= GapJumpPhysics.JUMP_UP_LIMIT_BLOCKS; dy++) {
             double factor = GapJumpUtils.blockRangeFactor(floor, level, floorPos, this.mob, dy);
-            int maxGap = GapJumpUtils.estimateMaxJumpRangeBlocks(this.mob, factor);
-            if (maxGap < 1) {
+            int legacyGap = GapJumpUtils.estimateMaxJumpRangeBlocks(this.mob, factor);
+            int scanGap = legacyGap;
+            if (ctx.originIrregular) {
+                // З нестандартної опори (плита 0.5, люк...) реальний Δy інший, ніж ціла різниця рівнів: для
+                // підйому з плити на блок на клітинку вище це +0.5, а не +1 - дальність відчутно більша. Промені
+                // скануємо за найсприятливішою оцінкою; кожного кандидата все одно вирішує точна перевірка.
+                scanGap = Math.max(scanGap, irregularScanGap(ctx, dy));
+            }
+            if (scanGap < 1) {
                 continue; // цей Δy з цього блока недосяжний (напр. вгору з меду, чи просто задалеко) - не пробуємо
             }
-            for (GapJumpRays.Ray ray : GapJumpRays.forMaxGap(maxGap)) {
+            for (GapJumpRays.Ray ray : GapJumpRays.forMaxGap(scanGap)) {
                 if (count >= nodes.length) {
                     break; // буфер сусідів повний - більше нема куди писати (промені відсортовані: спершу найближчі)
                 }
-                count = tryRay(nodes, count, origin, ray, frontCache, dy, originSurface, jumpFactor);
+                count = tryRay(nodes, count, ctx, ray, frontCache, dy);
             }
         }
         return count;
     }
 
     /**
-     * @param dy landing.y - origin.y: {@code 0} - рівний стрибок, {@code >0} - вгору, {@code <0} - вниз
-     *           (у межах {@code -JUMP_DOWN_LIMIT_BLOCKS..+JUMP_UP_LIMIT_BLOCKS} - {@link #getNeighbors})
+     * @param dy          landing.y - origin.y: {@code 0} - рівний стрибок, {@code >0} - вгору, {@code <0} - вниз
+     *                    (у межах {@code -JUMP_DOWN_LIMIT_BLOCKS..+JUMP_UP_LIMIT_BLOCKS} - {@link #getNeighbors})
      */
-    private int tryRay(Node[] nodes, int count, BlockPos origin, GapJumpRays.Ray ray, byte[] frontCache, int dy,
-                       double originSurface, float jumpFactor) {
+    private int tryRay(Node[] nodes, int count, JumpCtx ctx, GapJumpRays.Ray ray, byte[] frontCache, int dy) {
+        BlockPos origin = ctx.origin;
         // 1. Край у цьому напрямку? Перша клітинка має бути справжнім проваллям, ЗАВЖДИ на рівні СТАРТУ
         //    (dy тут НЕ підставляємо - "лесенка", де порожньо на обох поверхах, інакше не розпізнається як
         //    провалля). Якщо вона прохідна - звичайний крок з цього вже впорається (а стрибок згенерується
         //    з наступної клітинки); якщо там стіна - крізь неї не стрибаємо.
         int frontIndex = (ray.frontX() + 1) * 3 + (ray.frontZ() + 1);
         if (frontCache[frontIndex] == UNKNOWN) {
-            frontCache[frontIndex] = classifyFront(origin, ray.frontX(), ray.frontZ(), 0);
+            frontCache[frontIndex] = classifyStartFront(ctx, ray.frontX(), ray.frontZ());
         }
         if (frontCache[frontIndex] != VOID) {
             return count;
@@ -213,7 +245,7 @@ public class GapJumpNodeEvaluator extends ShapeAwareNodeEvaluator {
         for (int k = ray.kMin(); k <= ray.kMax(); k++) {
             int dx = ray.stepX() * k;
             int dz = ray.stepZ() * k;
-            if (!isStandable(origin, dx, dz, dy) || !isRiseReachable(origin, dx, dz, dy, originSurface, jumpFactor)) {
+            if (!isStandable(origin, dx, dz, dy)) {
                 if (landed) {
                     voidBehind = true; // (це може бути й стіна - коридор наступного кандидата її відсіче)
                 }
@@ -222,16 +254,35 @@ public class GapJumpNodeEvaluator extends ShapeAwareNodeEvaluator {
             // Придатна клітинка. Кандидат - якщо це перше приземлення, або перед нею була порожнеча
             // (інакше це просто продовження тієї ж платформи, ногами й так дійдемо).
             if (!landed || voidBehind) {
-                // Коридор польоту (разом із проміжною платформою й проваллями між) має бути вільний.
-                // Якщо ні - то й далі по променю заблоковано.
-                if (!isCorridorClear(origin, ray.corridor()[k], dy)) {
-                    return count;
+                if (involvesIrregular(ctx, ray, k, dx, dz, dy)) {
+                    // Нестандартна форма (опора чи коридор): рішення приймає геометрія й симуляція польоту,
+                    // а не грубі "центр клітинки" / "виступ вище кроку". Відхилений кандидат НЕ закриває
+                    // промінь: далі по ньому може бути інша платформа.
+                    if (count >= nodes.length) {
+                        return count;
+                    }
+                    Spot[] from = fromSpotsOf(ctx);
+                    boolean ok = from.length == 0
+                            ? isCorridorClear(origin, ray.corridor()[k], dy) // немає точок відриву - як раніше
+                            : exactJumpOk(ctx, from, dx, dz, dy);
+                    if (ok) {
+                        nodes[count++] = jumpNode(origin, dx, dz, dy, landed);
+                        landed = true;
+                    }
+                } else {
+                    // Звичайні блоки - старий код. (Сюди не потрапляємо з нестандартної опори відриву: там
+                    // involvesIrregular завжди true, а промені для звичайної опори якраз у межах дальності.)
+                    // Коридор польоту (разом із проміжною платформою й проваллями між) має бути вільний.
+                    // Якщо ні - то й далі по променю заблоковано.
+                    if (!isCorridorClear(origin, ray.corridor()[k], dy)) {
+                        return count;
+                    }
+                    if (count >= nodes.length) {
+                        return count;
+                    }
+                    nodes[count++] = jumpNode(origin, dx, dz, dy, landed);
+                    landed = true;
                 }
-                if (count >= nodes.length) {
-                    return count;
-                }
-                nodes[count++] = jumpNode(origin, dx, dz, dy, landed);
-                landed = true;
             }
             // Чи закінчується тут платформа (одразу за нею провалля, на ЇЇ Ж рівні +dy)? Тільки тоді наступну
             // придатну клітинку на промені можна перестрибнути. Для променів із кроком >1 клітинки "клітинка
@@ -239,6 +290,127 @@ public class GapJumpNodeEvaluator extends ShapeAwareNodeEvaluator {
             voidBehind = classifyFront(origin, dx + ray.frontX(), dz + ray.frontZ(), dy) == VOID;
         }
         return count;
+    }
+
+    private Spot[] fromSpotsOf(JumpCtx ctx) {
+        if (ctx.from == null) {
+            ctx.from = !exactReady()
+                    ? new Spot[0]
+                    : geoSpotsEarly(ctx.origin.getX(), ctx.origin.getY(), ctx.origin.getZ());
+        }
+        return ctx.from;
+    }
+
+    // -------------------------------------------------------------------------------------
+    // Точна геометрія (нестандартні блоки)
+    // -------------------------------------------------------------------------------------
+
+    private ShapeJump.Model modelOf(JumpCtx ctx) {
+        if (ctx.model == null) {
+            ctx.model = GapJumpUtils.jumpModel(this.mob.level(), this.mob, GapJumpUtils.runSpeedSetpoint(this.mob));
+        }
+        return ctx.model;
+    }
+
+    /**
+     * Чи бере участь у стрибку нерегулярна форма: колонка відриву, колонка приземлення або клітинка коридору
+     * (на рівні старту й на рівні приземлення). Лише тоді діє точна перевірка; інакше - старий код.
+     */
+    private boolean involvesIrregular(JumpCtx ctx, GapJumpRays.Ray ray, int k, int dx, int dz, int dy) {
+        if (!exactReady()) {
+            return false;
+        }
+        if (ctx.originIrregular) {
+            return true;
+        }
+        BlockPos o = ctx.origin;
+        if (columnIsIrregular(o.getX() + dx, o.getY() + dy, o.getZ() + dz)) {
+            return true;
+        }
+        for (int[] c : ray.corridor()[k]) {
+            if (columnIsIrregular(o.getX() + c[0], o.getY(), o.getZ() + c[1])
+                    || (dy != 0 && columnIsIrregular(o.getX() + c[0], o.getY() + dy, o.getZ() + c[1]))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Чи є хоч одна пара точок (відрив у клітинці вузла, приземлення в цільовій), для якої політ проходить.
+     */
+    private boolean exactJumpOk(JumpCtx ctx, Spot[] from, int dx, int dz, int dy) {
+        // Виняток тут обірвав би пошук шляху (а з ним і тік моба/сервера) - гірше, ніж відхилений стрибок.
+        try {
+            BlockPos land = ctx.origin.offset(dx, dy, dz);
+            Spot[] to = geoSpotsEarly(land.getX(), land.getY(), land.getZ());
+            if (to.length == 0) {
+                return false;
+            }
+            return ShapeJump.choose(this.source, this.dims, Arrays.asList(from), Arrays.asList(to), modelOf(ctx)) != null;
+        } catch (RuntimeException e) {
+            return false;
+        }
+    }
+
+    /**
+     * Кількість блоків розриву, яку варто сканувати з нестандартної опори для рівня {@code dy}: дальність за
+     * НАЙСПРИЯТЛИВІШОЮ реальною різницею висот (поверхня відриву може бути вище за ціле {@code origin.y}).
+     */
+    private int irregularScanGap(JumpCtx ctx, int dy) {
+        try {
+            Spot[] from = fromSpotsOf(ctx);
+            if (from.length == 0) {
+                return 0;
+            }
+            double maxFrac = 0.0;
+            for (Spot s : from) {
+                maxFrac = Math.max(maxFrac, s.surfaceY() - ctx.origin.getY());
+            }
+            GapJumpUtils.TakeoffProps p = GapJumpUtils.takeoffProps(
+                    this.mob.level(), this.mob, from[0].x(), from[0].surfaceY(), from[0].z());
+            double factor = GapJumpPhysics.blockRangeFactor(p.friction(), p.slowdown(), p.jumpFactor(), dy - maxFrac);
+            return GapJumpUtils.estimateMaxJumpRangeBlocks(this.mob, factor);
+        } catch (RuntimeException e) {
+            return 0;
+        }
+    }
+
+    /**
+     * Перша клітинка променя на рівні старту. Як {@link #classifyFront}, але в нерегулярній зоні клітинка, на
+     * якій Є опора, вважається прохідною ({@link #WALKABLE}) лише якщо з вузла на неї реально можна ступити:
+     * інакше (ребро люка в дальньому куті клітинки, стовпчик за проваллям менше клітинки) це «провалля з
+     * опорою за ним» - тобто те, через що стрибають.
+     */
+    private byte classifyStartFront(JumpCtx ctx, int fx, int fz) {
+        BlockPos column = ctx.origin.offset(fx, 0, fz);
+        if (isStandableCell(column.getX(), column.getY(), column.getZ())) {
+            if (exactReady()
+                    && (ctx.originIrregular || columnIsIrregular(column.getX(), column.getY(), column.getZ()))
+                    && !anyMove(fromSpots(ctx.node), geoSpotsEarly(column.getX(), column.getY(), column.getZ()))) {
+                return VOID;
+            }
+            return WALKABLE;
+        }
+        return isBodyZoneClear(column.getX(), column.getY(), column.getZ()) ? VOID : BLOCKED;
+    }
+
+    /**
+     * Що відомо про вузол на час одного {@link #getNeighbors}: нерегулярність колонки, придатні точки відриву
+     * й модель фізики (рахуються ліниво - на повних блоках вони взагалі не потрібні).
+     */
+    private static final class JumpCtx {
+        final Node node;
+        final BlockPos origin;
+        final boolean originIrregular;
+        Spot[] from;
+        ShapeJump.Model model;
+
+        JumpCtx(Node node, BlockPos origin, boolean originIrregular) {
+            this.node = node;
+            this.origin = origin;
+            this.originIrregular = originIrregular;
+        }
     }
 
     private Node jumpNode(BlockPos origin, int dx, int dz, int dy, boolean skip) {
@@ -302,32 +474,6 @@ public class GapJumpNodeEvaluator extends ShapeAwareNodeEvaluator {
     private boolean hasFloorAt(BlockPos origin, int dx, int dz, int dy) {
         BlockPos column = origin.offset(dx, dy, dz);
         return isStandableCell(column.getX(), column.getY(), column.getZ());
-    }
-
-    /**
-     * РЕАЛЬНА висота ніг у вузлі (за формою колізії); ціле {@code y}, якщо геометрія недоступна або стояти
-     * там не можна. Кеш {@code geoSpotsEarly} спільний з рештою evaluator-а, тож додаткових запитів до світу
-     * майже нема.
-     */
-    private double surfaceYAt(int x, int y, int z) {
-        if (this.source == null) {
-            return y;
-        }
-        return ShapeWalk.surfaceYOf(geoSpotsEarly(x, y, z), y);
-    }
-
-    /**
-     * Чи дістане стрибок блока відриву ({@code jumpFactor}) до РЕАЛЬНОЇ висоти поверхні приземлення.
-     * Спуск і рівне - завжди так. Підйом - лише якщо апекс (з запасом {@link #RISE_SAFETY_MARGIN}) вище за
-     * нього: {@link GapJumpPhysics#naturalAirtime} повертає {@code -1}, коли дуга до цієї висоти не доходить.
-     */
-    private boolean isRiseReachable(BlockPos origin, int dx, int dz, int dy, double originSurface, float jumpFactor) {
-        BlockPos column = origin.offset(dx, dy, dz);
-        double rise = surfaceYAt(column.getX(), column.getY(), column.getZ()) - originSurface;
-        if (rise <= 0.0) {
-            return true;
-        }
-        return GapJumpPhysics.naturalAirtime(rise + RISE_SAFETY_MARGIN, jumpFactor) > 0;
     }
 
     /** Придатне для приземлення: опора + вільне тіло на повну висоту моба - на {@code origin.y + dy}. */
