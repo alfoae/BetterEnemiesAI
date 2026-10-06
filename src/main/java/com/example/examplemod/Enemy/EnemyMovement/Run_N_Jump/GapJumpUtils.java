@@ -172,8 +172,6 @@ public final class GapJumpUtils {
         return floor.getFriction(level, floorPos, entity) * GapJumpPhysics.AIR_FRICTION * runSlowdown(floor.getBlock());
     }
 
-    private static final Map<Mob, CachedSegment> SEGMENT_CACHE = new WeakHashMap<>();
-
     /**
      * Чи долетить моб до landing (на живій відстані {@code realDistance}, {@code deltaYBlocks} нижче,
      * завжди {@code <0}) ПРОСТО ЗБІГШИ з краю, без стрибка (без вертикального імпульсу {@code 0.42*jumpFactor}).
@@ -196,10 +194,6 @@ public final class GapJumpUtils {
         return reachableWithoutJump(floor.getFriction(level, floorPos, entity), deltaYBlocks, realDistance, runSpeedSetpoint);
     }
 
-    // =====================================================================================
-    // ТОЧКА ВІДРИВУ ЗА ВАНІЛЬНИМИ ПРАВИЛАМИ (а не «блок під вузлом»)
-    // =====================================================================================
-
     /**
      * Те саме, коли тертя блока відриву вже відоме (точка стояння на нестандартній опорі - див. {@link #takeoffProps}).
      */
@@ -212,6 +206,12 @@ public final class GapJumpUtils {
         double sum = GapJumpPhysics.flightSum(deltaYBlocks, retention, 0.0); // jumpVelocity=0 - без імпульсу
         return runSpeedSetpoint * sum >= realDistance;
     }
+
+    // =====================================================================================
+    // ТОЧКА ВІДРИВУ ЗА ВАНІЛЬНИМИ ПРАВИЛАМИ (а не «блок під вузлом»)
+    // =====================================================================================
+
+    private static final Map<Mob, CachedSegment> SEGMENT_CACHE = new WeakHashMap<>();
 
     static TakeoffProps takeoffProps(LevelReader level, Entity entity, double x, double surfaceY, double z) {
         BlockPos belowPos = BlockPos.containing(x, surfaceY - 0.500001, z);
@@ -331,6 +331,62 @@ public final class GapJumpUtils {
     }
 
     /**
+     * Те саме, що {@link #findUpcomingJumpSegment}, але від ПОТОЧНОГО положення моба й по СВІЖОМУ шляху:
+     * бере спільний кеш {@code EnemyBreak_N_BuildUtils.getOrComputePath} (той самий, з якого їде
+     * Pursuit; рахується не більше разу на тік на моба, тож додаткового createPath() це не дає).
+     * Потрібне для ланцюжка стрибків: у тіку приземлення навігатор моба порожній (ціль його зупиняє на
+     * старті), тож {@link #findUpcomingJumpSegment} нічого не бачить, і наступний стрибок мусив би чекати,
+     * поки Pursuit заново покладе шлях у навігатор (~2 тіки, поки моб "повзе" без керування).
+     *
+     * @return наступний стрибок від поточного положення, або {@code null}, якщо шляху нема чи поруч лише кроки
+     */
+    public static GapJump findFreshJumpSegment(Mob mob) {
+        Vec3 chasePos = PursuitEnemyBehavior.getChasePosition(mob);
+        if (chasePos == null) {
+            return null;
+        }
+        // "Свіжий" = порахований від ПОТОЧНОГО місця (моб щойно приземлився), а не застиглий тротлінгом
+        // недосяжності відповідь, порахована ще до стрибка (інакше ланцюжок обривався, а моб стояв ~1 с).
+        EnemyBreak_N_BuildUtils.invalidatePathCache(mob);
+        Path path = EnemyBreak_N_BuildUtils.getOrComputePath(mob, chasePos);
+        if (path == null || path.getNodeCount() < 2) {
+            return null;
+        }
+        return findJumpSegmentInPath(path, 0, mob);
+    }
+
+    /**
+     * Шукає стрибковий сегмент серед пар вузлів Path, починаючи з індексу {@code from}.
+     * <p>
+     * ВЕСЬ залишок шляху, не лише перші кілька вузлів (раніше тут було {@code from+3} - реальний
+     * знайдений баг, див. чат: для короткого локального шляху (кілька звичайних кроків до краю,
+     * потім ОДИН стрибок у самому кінці) стрибок міг опинитись за межею цього вікна, і ЦЯ функція
+     * поверталась {@code null}, хоча сам стрибок у Path був). Шлях тут завжди короткий (локальний
+     * відрізок до найближчої перепони, не маршрут через усю карту) - сканувати його цілком дешево,
+     * це проста арифметика над координатами вузлів, не повторний пошук шляху.
+     */
+    static GapJump findJumpSegmentInPath(Path path, int from) {
+        return findJumpSegmentInPath(path, from, null);
+    }
+
+    /**
+     * Що під ногами в точці стояння {@code (x, surfaceY, z)}: блок, що дає ТЕРТЯ, і множники швидкості/стрибка.
+     * Раніше скрізь брався {@code вузол.below()} - це вірно лише для поверхні на ЦІЛІЙ висоті. Ванільні правила:
+     * <ul>
+     *   <li>тертя - блок на {@code 0.500001} нижче ніг ({@code getBlockPosBelowThatAffectsMyMovement}): для
+     *       плити це блок ПІД плитою, для піску душ (поверхня 14/16 усередині ЙОГО клітинки) - він сам;</li>
+     *   <li>speedFactor і jumpFactor - блок у клітинці ніг, а якщо там 1.0 - блок із попереднього пункту
+     *       ({@code getBlockSpeedFactor}, {@code getBlockJumpFactor}).</li>
+     * </ul>
+     * Для звичайної підлоги (цілий рівень, повітря в клітинці ніг) це в точності {@code вузол.below()}.
+     */
+    record TakeoffProps(BlockPos frictionPos, double friction, double slowdown, double jumpFactor) {
+    }
+
+    private record CachedSegment(Path path, int from, int tick, GapJump jump) {
+    }
+
+    /**
      * Те саме, але з мобом: для сегмента з НЕСТАНДАРТНОЮ опорою на кінцях ({@link #planJump}) додається точний
      * план (куди саме відриватись/приземлятись і на якій висоті), а якщо є вузли до відриву - ще й шлях підходу
      * ({@link #buildApproach}). Без моба (чи для звичайних блоків) - як і раніше: центри клітинок, цілі висоти.
@@ -404,59 +460,6 @@ public final class GapJumpUtils {
     }
 
     /**
-     * Те саме, що {@link #findUpcomingJumpSegment}, але від ПОТОЧНОГО положення моба й по СВІЖОМУ шляху:
-     * бере спільний кеш {@code EnemyBreak_N_BuildUtils.getOrComputePath} (той самий, з якого їде
-     * Pursuit; рахується не більше разу на тік на моба, тож додаткового createPath() це не дає).
-     * Потрібне для ланцюжка стрибків: у тіку приземлення навігатор моба порожній (ціль його зупиняє на
-     * старті), тож {@link #findUpcomingJumpSegment} нічого не бачить, і наступний стрибок мусив би чекати,
-     * поки Pursuit заново покладе шлях у навігатор (~2 тіки, поки моб "повзе" без керування).
-     *
-     * @return наступний стрибок від поточного положення, або {@code null}, якщо шляху нема чи поруч лише кроки
-     */
-    public static GapJump findFreshJumpSegment(Mob mob) {
-        Vec3 chasePos = PursuitEnemyBehavior.getChasePosition(mob);
-        if (chasePos == null) {
-            return null;
-        }
-        Path path = EnemyBreak_N_BuildUtils.getOrComputePath(mob, chasePos);
-        if (path == null || path.getNodeCount() < 2) {
-            return null;
-        }
-        return findJumpSegmentInPath(path, 0, mob);
-    }
-
-    /**
-     * Шукає стрибковий сегмент серед пар вузлів Path, починаючи з індексу {@code from}.
-     * <p>
-     * ВЕСЬ залишок шляху, не лише перші кілька вузлів (раніше тут було {@code from+3} - реальний
-     * знайдений баг, див. чат: для короткого локального шляху (кілька звичайних кроків до краю,
-     * потім ОДИН стрибок у самому кінці) стрибок міг опинитись за межею цього вікна, і ЦЯ функція
-     * поверталась {@code null}, хоча сам стрибок у Path був). Шлях тут завжди короткий (локальний
-     * відрізок до найближчої перепони, не маршрут через усю карту) - сканувати його цілком дешево,
-     * це проста арифметика над координатами вузлів, не повторний пошук шляху.
-     */
-    static GapJump findJumpSegmentInPath(Path path, int from) {
-        return findJumpSegmentInPath(path, from, null);
-    }
-
-    /**
-     * Що під ногами в точці стояння {@code (x, surfaceY, z)}: блок, що дає ТЕРТЯ, і множники швидкості/стрибка.
-     * Раніше скрізь брався {@code вузол.below()} - це вірно лише для поверхні на ЦІЛІЙ висоті. Ванільні правила:
-     * <ul>
-     *   <li>тертя - блок на {@code 0.500001} нижче ніг ({@code getBlockPosBelowThatAffectsMyMovement}): для
-     *       плити це блок ПІД плитою, для піску душ (поверхня 14/16 усередині ЙОГО клітинки) - він сам;</li>
-     *   <li>speedFactor і jumpFactor - блок у клітинці ніг, а якщо там 1.0 - блок із попереднього пункту
-     *       ({@code getBlockSpeedFactor}, {@code getBlockJumpFactor}).</li>
-     * </ul>
-     * Для звичайної підлоги (цілий рівень, повітря в клітинці ніг) це в точності {@code вузол.below()}.
-     */
-    record TakeoffProps(BlockPos frictionPos, double friction, double slowdown, double jumpFactor) {
-    }
-
-    private record CachedSegment(Path path, int from, int tick, GapJump jump) {
-    }
-
-    /**
      * (v5: GapJumpAssistGoal більше не відходить для розгону — швидкість відриву задається явно, тож
      * розбіг на дальність не впливає. Метод лишений на випадок, якщо розгін знадобиться знову.)
      * <p>
@@ -508,39 +511,29 @@ public final class GapJumpUtils {
             return this.plan != null;
         }
 
-        /**
-         * Точка відриву: на опорі (з реальною висотою) або, як раніше, центр блока-краю.
-         */
+        /** Точка відриву: на опорі (з реальною висотою) або, як раніше, центр блока-краю. */
         public Vec3 takeoffPoint() {
             return this.plan != null
                     ? new Vec3(this.plan.takeoffX(), this.plan.takeoffY(), this.plan.takeoffZ())
                     : Vec3.atBottomCenterOf(this.edge);
         }
 
-        /**
-         * Скільки блоків вздовж стрибка від точки відриву, поки центр моба ще над опорою (передній край).
-         */
+        /** Скільки блоків вздовж стрибка від точки відриву, поки центр моба ще над опорою (передній край). */
         public double front(double dirX, double dirZ) {
             return this.plan != null ? this.plan.frontAlong() : GapJumpPhysics.frontBorder(dirX, dirZ);
         }
 
-        /**
-         * Наскільки вбік від осі стрибка моб ще стоїть на опорі відриву.
-         */
+        /** Наскільки вбік від осі стрибка моб ще стоїть на опорі відриву. */
         public double lateralLimit(double halfWidth, double dirX, double dirZ) {
             return this.plan != null ? this.plan.lateralLimit() : (0.5 + halfWidth) * (Math.abs(dirX) + Math.abs(dirZ));
         }
 
-        /**
-         * Найбільший горизонтальний крок за тік, при якому хітбокс на тіку торкання ще над опорою приземлення.
-         */
+        /** Найбільший горизонтальний крок за тік, при якому хітбокс на тіку торкання ще над опорою приземлення. */
         public double maxStep(double halfWidth) {
             return this.plan != null ? this.plan.maxStep() : GapJumpPhysics.maxFlightStep(halfWidth);
         }
 
-        /**
-         * Чи пора відриватись (див. {@link GapJumpPhysics#shouldTakeOff}); для точного плану - за реальними межами опори.
-         */
+        /** Чи пора відриватись (див. {@link GapJumpPhysics#shouldTakeOff}); для точного плану - за реальними межами опори. */
         public boolean takeoffNow(double relX, double relZ, double dirX, double dirZ, double speedAlong,
                                   double halfWidth, double groundAccel) {
             return this.plan != null

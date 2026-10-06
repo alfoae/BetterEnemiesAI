@@ -275,7 +275,6 @@ public final class ShapeProbe {
      * нерегулярна форма». Живе рівно один пошук шляху (створюється в {@code prepare} evaluator-а), тому
      * ніколи не показує застарілий світ. Не потокобезпечна — pathfinding у 1.21.1 іде в головному потоці.
      *
-     * @param ignore блоки, чию колізію ми свідомо ігноруємо (зачинені двері, які моб уміє відчиняти)
      */
     public static final class CachedSource implements BoxSource {
 

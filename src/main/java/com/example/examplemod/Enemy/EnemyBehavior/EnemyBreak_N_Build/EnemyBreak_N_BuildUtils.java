@@ -3,6 +3,7 @@ package com.example.examplemod.Enemy.EnemyBehavior.EnemyBreak_N_Build;
 import com.example.examplemod.Config;
 import com.example.examplemod.Enemy.EnemyBehavior.EnemyPursuit_N_Search.PursuitBehavior.PursuitEnemyBehavior;
 import com.example.examplemod.Enemy.EnemyInventory.EnemyStorage.IMobBlockStorage;
+import com.example.examplemod.Enemy.EnemyMovement.Run_N_Jump.GapJumpAssistGoal;
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.sounds.SoundSource;
@@ -182,6 +183,15 @@ public final class EnemyBreak_N_BuildUtils {
         BlockPos pathTarget = resolvePathTarget(mob, chasePos);
         NavCache cache = NAV_CACHE.computeIfAbsent(mob, m -> new NavCache());
 
+        // v14 - у ПОЛЬОТІ стрибка GapJumpAssistGoal шлях не рахуємо. Поки моб у повітрі, стартова точка A*
+        // (getStart для !onGround) "провалюється" вниз - до ями/землі під розривом, тож шлях виходить про ІНШЕ місце
+        // (часто недосяжний). BuildPath/Dig/TowerClimb/Pursuit опитують цей метод щотіку й під час польоту теж,
+        // лічильник недосяжності ріс, і ПІСЛЯ приземлення тротлінг (unreachableRecomputeIntervalTicks) віддавав цей
+        // застарілий шлях: ланцюжок стрибків обривався, а моб стояв до наступного справжнього перерахунку (~1 с).
+        if (cache.path != null && !mob.onGround() && GapJumpAssistGoal.isActive(mob)) {
+            return cache.path;
+        }
+
         if (cache.tickComputed == mob.tickCount && pathTarget.equals(cache.pathTarget)) {
             return cache.path;
         }
@@ -221,6 +231,21 @@ public final class EnemyBreak_N_BuildUtils {
         cache.canReach = path != null && path.canReach();
         cache.path = path;
         return path;
+    }
+
+    /**
+     * Скидає тротлінг і застиглу відповідь кешу: наступний {@link #getOrComputePath} порахує шлях ЗАНОВО.
+     * Для випадків, коли моб різко змінив місце НЕ ідучи по шляху (приземлення після стрибка): тротлінг
+     * недосяжної цілі вважає, що "нічого не змінилось", а після стрибка це не так. Якщо цього тіку шлях уже
+     * справді рахувався - він свіжий, вдруге не чіпаємо (ванільний NodeEvaluator не любить дубль у тому самому тіку).
+     */
+    public static void invalidatePathCache(Mob mob) {
+        NavCache cache = NAV_CACHE.get(mob);
+        if (cache == null || cache.lastRealComputeTick == mob.tickCount) {
+            return;
+        }
+        cache.consecutiveUnreachableTicks = 0;
+        cache.tickComputed = -1;
     }
 
     private static int recomputeIntervalFor(int consecutiveUnreachableTicks) {

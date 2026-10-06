@@ -150,6 +150,21 @@ public class GapJumpNodeEvaluator extends ShapeAwareNodeEvaluator {
     /** На рівні ніг стіна/блок (або світ недоступний): крізь неї стрибок не йде. */
     private static final byte BLOCKED = 3;
 
+    /** Чи є хоч одна пара точок (відрив у клітинці вузла, приземлення в цільовій), для якої політ проходить. */
+    private boolean exactJumpOk(JumpCtx ctx, Spot[] from, int dx, int dz, int dy) {
+        // Виняток тут обірвав би пошук шляху (а з ним і тік моба/сервера) - гірше, ніж відхилений стрибок.
+        try {
+            BlockPos land = ctx.origin.offset(dx, dy, dz);
+            Spot[] to = geoSpotsEarly(land.getX(), land.getY(), land.getZ());
+            if (to.length == 0) {
+                return false;
+            }
+            return ShapeJump.choose(this.source, this.dims, Arrays.asList(from), Arrays.asList(to), modelOf(ctx)) != null;
+        } catch (RuntimeException e) {
+            return false;
+        }
+    }
+
     /**
      * Точні стрибки по нестандартних блоках увімкнені тим самим перемикачем, що й форм-орієнтована ходьба
      * ({@link ShapeSettings#enabledFor}: {@code enableShapeAwareWalking} + чорний список мобів). Вимкнено - граф
@@ -292,6 +307,10 @@ public class GapJumpNodeEvaluator extends ShapeAwareNodeEvaluator {
         return count;
     }
 
+    // -------------------------------------------------------------------------------------
+    // Точна геометрія (нестандартні блоки)
+    // -------------------------------------------------------------------------------------
+
     private Spot[] fromSpotsOf(JumpCtx ctx) {
         if (ctx.from == null) {
             ctx.from = !exactReady()
@@ -300,10 +319,6 @@ public class GapJumpNodeEvaluator extends ShapeAwareNodeEvaluator {
         }
         return ctx.from;
     }
-
-    // -------------------------------------------------------------------------------------
-    // Точна геометрія (нестандартні блоки)
-    // -------------------------------------------------------------------------------------
 
     private ShapeJump.Model modelOf(JumpCtx ctx) {
         if (ctx.model == null) {
@@ -337,19 +352,20 @@ public class GapJumpNodeEvaluator extends ShapeAwareNodeEvaluator {
     }
 
     /**
-     * Чи є хоч одна пара точок (відрив у клітинці вузла, приземлення в цільовій), для якої політ проходить.
+     * Що відомо про вузол на час одного {@link #getNeighbors}: нерегулярність колонки, придатні точки відриву
+     * й модель фізики (рахуються ліниво - на повних блоках вони взагалі не потрібні).
      */
-    private boolean exactJumpOk(JumpCtx ctx, Spot[] from, int dx, int dz, int dy) {
-        // Виняток тут обірвав би пошук шляху (а з ним і тік моба/сервера) - гірше, ніж відхилений стрибок.
-        try {
-            BlockPos land = ctx.origin.offset(dx, dy, dz);
-            Spot[] to = geoSpotsEarly(land.getX(), land.getY(), land.getZ());
-            if (to.length == 0) {
-                return false;
-            }
-            return ShapeJump.choose(this.source, this.dims, Arrays.asList(from), Arrays.asList(to), modelOf(ctx)) != null;
-        } catch (RuntimeException e) {
-            return false;
+    private static final class JumpCtx {
+        final Node node;
+        final BlockPos origin;
+        final boolean originIrregular;
+        Spot[] from;
+        ShapeJump.Model model;
+
+        JumpCtx(Node node, BlockPos origin, boolean originIrregular) {
+            this.node = node;
+            this.origin = origin;
+            this.originIrregular = originIrregular;
         }
     }
 
@@ -393,24 +409,6 @@ public class GapJumpNodeEvaluator extends ShapeAwareNodeEvaluator {
             return WALKABLE;
         }
         return isBodyZoneClear(column.getX(), column.getY(), column.getZ()) ? VOID : BLOCKED;
-    }
-
-    /**
-     * Що відомо про вузол на час одного {@link #getNeighbors}: нерегулярність колонки, придатні точки відриву
-     * й модель фізики (рахуються ліниво - на повних блоках вони взагалі не потрібні).
-     */
-    private static final class JumpCtx {
-        final Node node;
-        final BlockPos origin;
-        final boolean originIrregular;
-        Spot[] from;
-        ShapeJump.Model model;
-
-        JumpCtx(Node node, BlockPos origin, boolean originIrregular) {
-            this.node = node;
-            this.origin = origin;
-            this.originIrregular = originIrregular;
-        }
     }
 
     private Node jumpNode(BlockPos origin, int dx, int dz, int dy, boolean skip) {

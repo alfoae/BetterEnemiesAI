@@ -156,16 +156,16 @@ public class GapJumpAssistGoal extends Goal {
     private boolean done;
     private int chargeTicks;
     /**
-     * Запобіжник: підхід навігатором не довше стількох тіків.
-     */
-    private static final int MAX_APPROACH_TICKS = 160;
-    /**
      * Фаза підходу: навігатор сам веде моба вузлами шляху до вузла відриву ({@link #start}, {@link #stillApproaching}),
      * і лише потім керування бере ця ціль. Вмикається, коли в сегменті є шлях підходу (точний стрибок чи уточнений
      * шлях); для звичайних блоків - прямий розбіг, як і було.
      */
     private boolean approachActive;
     private int approachTicks;
+    /**
+     * Запобіжник: підхід навігатором не довше стількох тіків.
+     */
+    private static final int MAX_APPROACH_TICKS = 160;
     private static final java.util.Set<Mob> ACTIVE_MOBS =
             java.util.Collections.newSetFromMap(new java.util.WeakHashMap<>());
     /**
@@ -1046,9 +1046,7 @@ public class GapJumpAssistGoal extends Goal {
         return true;
     }
 
-    /**
-     * Рядок для логу: точний план (якщо є) і шлях підходу.
-     */
+    /** Рядок для логу: точний план (якщо є) і шлях підходу. */
     private String planNote() {
         StringBuilder sb = new StringBuilder();
         if (this.jump.plan() != null) {

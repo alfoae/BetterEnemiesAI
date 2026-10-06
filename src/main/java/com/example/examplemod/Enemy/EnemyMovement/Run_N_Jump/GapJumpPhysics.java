@@ -335,13 +335,20 @@ final class GapJumpPhysics {
     static final double MAX_SHORT_LAST_STEP_SPEED = 0.5;
 
     /**
+     * Висоти блоків кратні 1/16, тож 1/256 не губить нічого, але прибирає шум double (64.00000000000001).
+     */
+    static double quantizeDeltaY(double deltaY) {
+        return Math.rint(deltaY * 256.0) / 256.0;
+    }
+
+    /**
      * Той самий критерій відриву, але для опори НЕСТАНДАРТНОЇ форми (див. {@link ShapeJump}): замість меж
      * повного блока ({@link #frontBorder}, {@code 0.5 + halfWidth}) беруться реальні межі опори вздовж стрибка.
      * Для повного блока дає той самий результат, що й {@link #shouldTakeOff} при русі вздовж осі.
      *
      * @param relX, relZ  позиція моба відносно ТОЧКИ ВІДРИВУ
-     * @param front {@code along}, з якого відриваємось (центр моба над краєм поверхні)
-     * @param lose  {@code along}, де хітбокс повністю сходить з опори (далі onGround=false)
+     * @param front       {@code along}, з якого відриваємось (центр моба над краєм поверхні)
+     * @param lose        {@code along}, де хітбокс повністю сходить з опори (далі onGround=false)
      */
     static boolean shouldTakeOffAlong(double relX, double relZ, double dirX, double dirZ,
                                       double speedAlong, double groundAccel, double front, double lose) {
@@ -358,10 +365,9 @@ final class GapJumpPhysics {
     }
 
     /**
-     * Висоти блоків кратні 1/16, тож 1/256 не губить нічого, але прибирає шум double (64.00000000000001).
+     * Команда польоту на один тік: нова deltaMovement (vx, vy, vz).
      */
-    static double quantizeDeltaY(double deltaY) {
-        return Math.rint(deltaY * 256.0) / 256.0;
+    record FlightCommand(double vx, double vy, double vz) {
     }
 
     /**
@@ -421,12 +427,6 @@ final class GapJumpPhysics {
         }
         double perTick = planDist / ticks;
         return new FlightCommand(dx / dist * perTick, vy, dz / dist * perTick);
-    }
-
-    /**
-     * Команда польоту на один тік: нова deltaMovement (vx, vy, vz).
-     */
-    record FlightCommand(double vx, double vy, double vz) {
     }
 
     // =====================================================================================
