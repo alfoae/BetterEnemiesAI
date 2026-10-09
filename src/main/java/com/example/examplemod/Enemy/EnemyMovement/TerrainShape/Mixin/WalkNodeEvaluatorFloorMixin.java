@@ -3,6 +3,7 @@ package com.example.examplemod.Enemy.EnemyMovement.TerrainShape.Mixin;
 import com.example.examplemod.Config;
 import com.example.examplemod.Enemy.EnemyMovement.TerrainShape.ShapeGeometry;
 import com.example.examplemod.Enemy.EnemyMovement.TerrainShape.ShapeProbe;
+import com.example.examplemod.debug.DebugLog;
 import net.minecraft.core.BlockPos;
 import net.minecraft.world.level.BlockGetter;
 import net.minecraft.world.level.pathfinder.PathType;
@@ -85,14 +86,18 @@ public abstract class WalkNodeEvaluatorFloorMixin {
         double width = ShapeProbe.DEFAULT_MOB_WIDTH; // мобо-агностичний виклик - конкретного Mob тут нема
         ShapeGeometry.Footprint footprint = ShapeProbe.centeredFootprint(pos, width);
         ShapeGeometry.Support support = ShapeProbe.floorSupport(level, pos, footprint);
+        // DEBUG: раніше тут був System.out.println на КОЖЕН виклик "без опори" - тобто практично на кожну
+        // повітряну клітинку графа кожного моба; він і переповнював консоль. Тепер: за замовчуванням
+        // вимкнено (debugFloorMixin=false), а коли ввімкнено - лише лічильники + 'цікаві' клітинки (де щось
+        // є, а опори нема) раз на ~5с на позицію, у ОКРЕМИЙ файл (див. DebugLog.floorNoSupport).
+        boolean debugFloor = DebugLog.on(DebugLog.Cat.FLOOR);
+        if (debugFloor) {
+            DebugLog.floorCall();
+        }
         if (support.coverage() < ShapeProbe.MIN_FLOOR_COVERAGE) {
-            // DEBUG (тимчасово - див. чат): рахуємо це НАВІТЬ коли enabled=false, щоб побачити в лозі,
-            // якщо причина взагалі не тут (тумблер вимкнений, чи ця гілка не викликається).
-            System.out.println("[DEBUG TerrainShape] getFloorLevel NO-SUPPORT pos=" + pos
-                    + " state=" + level.getBlockState(pos)
-                    + " vanillaAnswer=" + cir.getReturnValue()
-                    + " shapeAwareEnabled=" + enabled
-                    + " coverage=" + support.coverage());
+            if (debugFloor) {
+                DebugLog.floorNoSupport(level, pos, cir.getReturnValue(), enabled, support.coverage());
+            }
             if (enabled) {
                 // Нема реальної опори під центром клітинки (відкритий люк при стінці тощо) - те саме
                 // значення, яке ванілья повертає для звичайної порожньої клітинки без підлоги.
@@ -122,22 +127,17 @@ public abstract class WalkNodeEvaluatorFloorMixin {
         if (vanilla != PathType.TRAPDOOR && vanilla != PathType.DANGER_TRAPDOOR) {
             return; // не наш кейс (двері, паркани тощо мають свою окрему логіку) - не логуємо, забагато шуму
         }
-        // DEBUG (тимчасово - див. чат): якщо ЦЕЙ рядок НЕ з'являється в лозі при тесті біля відкритого
-        // люка - мексин у принципі не застосувався (перевірте лог завантаження на "terrainshape" /
-        // помилки Mixin), і решта цього класу тут ні до чого.
+        // DEBUG: якщо рядка "getPathTypeFromState" НЕ видно у файлі debug-логу при тесті біля люка (з увімкненим
+        // debugFloorMixin) - міксин не застосувався (перевір лог завантаження на "terrainshape").
         boolean enabled = Config.ENABLE_SHAPE_AWARE_WALKING.get();
         ShapeGeometry.Footprint footprint = ShapeProbe.centeredFootprint(pos, ShapeProbe.DEFAULT_MOB_WIDTH);
         ShapeGeometry.Support support = enabled
                 ? ShapeProbe.floorSupport(level, pos, footprint)
                 : ShapeGeometry.Support.NONE;
         boolean overridden = enabled && support.coverage() < ShapeProbe.MIN_FLOOR_COVERAGE;
-        System.out.println("[DEBUG TerrainShape] getPathTypeFromState pos=" + pos
-                + " state=" + level.getBlockState(pos)
-                + " vanillaType=" + vanilla
-                + " shapeAwareEnabled=" + enabled
-                + " coverage=" + support.coverage()
-                + " surfaceY=" + support.surfaceY()
-                + " overriddenToBLOCKED=" + overridden);
+        if (DebugLog.on(DebugLog.Cat.FLOOR)) {
+            DebugLog.floorTrapdoor(level, pos, vanilla, enabled, support.coverage(), support.surfaceY(), overridden);
+        }
         if (overridden) {
             cir.setReturnValue(PathType.BLOCKED);
         }

@@ -2,6 +2,7 @@ package com.example.examplemod.mobAi.Mixin;
 
 import com.example.examplemod.Enemy.EnemyMovement.TerrainShape.ShapePathAccess;
 import com.example.examplemod.Enemy.EnemyMovement.TerrainShape.ShapeProbe;
+import com.example.examplemod.debug.DebugLog;
 import net.minecraft.world.entity.Mob;
 import net.minecraft.world.entity.ai.navigation.PathNavigation;
 import net.minecraft.world.level.pathfinder.Path;
@@ -86,6 +87,22 @@ public abstract class PathNavigationMixin {
                 reached = along > 0.0 && lateral < 0.35 && dist < 1.0;
             }
         }
+        // ДЕБАГ (категорія NAV): як моб проходить "вузькі" точки біля кривих блоків. Тротлінг, щоб не шуміло.
+        if (DebugLog.on(DebugLog.Cat.NAV)) {
+            if (reached && DebugLog.throttle("nav-adv-" + this.mob.getId(), 100L)) {
+                DebugLog.log(DebugLog.Cat.NAV, this.mob, "вузол [" + i + "/" + spots.length + "] ДОСЯГНУТО: dist="
+                        + String.format(java.util.Locale.ROOT, "%.3f", dist) + " допуск="
+                        + String.format(java.util.Locale.ROOT, "%.3f", tolerance) + " tight=" + curTight
+                        + " точка=" + target + " моб=" + this.mob.position());
+            } else if (!reached && DebugLog.throttle("nav-wait-" + this.mob.getId(), 500L)) {
+                DebugLog.log(DebugLog.Cat.NAV, this.mob, "вузол [" + i + "/" + spots.length + "] ще НЕ досягнуто: dist="
+                        + String.format(java.util.Locale.ROOT, "%.3f", dist) + " допуск="
+                        + String.format(java.util.Locale.ROOT, "%.3f", tolerance) + " tight=" + curTight
+                        + " nextTight=" + nextTight + " точка=" + target + " моб=" + this.mob.position()
+                        + " dY=" + String.format(java.util.Locale.ROOT, "%.3f", this.mob.getY() - target.y)
+                        + " vel=" + String.format(java.util.Locale.ROOT, "%.3f", this.mob.getDeltaMovement().horizontalDistance()));
+            }
+        }
         if (reached) {
             p.advance();
         }
@@ -113,6 +130,14 @@ public abstract class PathNavigationMixin {
         boolean supported = ShapeProbe.hasStandingSupport(this.mob.level(),
                 this.mob.getX() + hx, this.mob.getZ() + hz, this.mob.getY(), this.mob.getBbWidth());
         if (!supported) {
+            // ДЕБАГ: якщо моб "стоїть і не йде" - перевір, чи цей рядок не повторюється: гальмо глушить швидкість
+            // кожного тіку, і моб ніколи не набирає ходу до точки.
+            if (DebugLog.on(DebugLog.Cat.NAV) && DebugLog.throttle("nav-brake-" + this.mob.getId(), 250L)) {
+                DebugLog.log(DebugLog.Cat.NAV, this.mob, "ГАЛЬМО на краю: швидкість погашено, бо в точці через 1.5 тіка "
+                        + "немає опори | моб=" + this.mob.position() + " vel=" + v + " наступна_позиція=("
+                        + String.format(java.util.Locale.ROOT, "%.3f, %.3f", this.mob.getX() + hx, this.mob.getZ() + hz)
+                        + ") ціль=" + target);
+            }
             this.mob.setDeltaMovement(0.0, v.y, 0.0);
         }
     }

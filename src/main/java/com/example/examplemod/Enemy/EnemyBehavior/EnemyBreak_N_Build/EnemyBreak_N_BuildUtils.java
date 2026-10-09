@@ -4,6 +4,8 @@ import com.example.examplemod.Config;
 import com.example.examplemod.Enemy.EnemyBehavior.EnemyPursuit_N_Search.PursuitBehavior.PursuitEnemyBehavior;
 import com.example.examplemod.Enemy.EnemyInventory.EnemyStorage.IMobBlockStorage;
 import com.example.examplemod.Enemy.EnemyMovement.Run_N_Jump.GapJumpAssistGoal;
+import com.example.examplemod.debug.DebugLog;
+import com.example.examplemod.debug.MobDebug;
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.sounds.SoundSource;
@@ -67,10 +69,41 @@ public final class EnemyBreak_N_BuildUtils {
      * завершення тестування копання/будівництва.
      */
     static void debugMsg(Mob mob, String msg) {
+        // У файл - ЗАВЖДИ (навіть без відстежуваного гравця) і з тегом моба; в чат - як і раніше, якщо гравець є.
+        if (DebugLog.on(DebugLog.Cat.BUILD)
+                && DebugLog.throttle("bm|" + mob.getId() + "|" + DebugLog.msgKey(msg), DebugLog.msgInterval(msg))) {
+            DebugLog.log(DebugLog.Cat.BUILD, mob, msg);
+        }
         Player player = PursuitEnemyBehavior.getTrackedPlayer(mob);
         if (player != null) {
-            PursuitEnemyBehavior.debugMsg(player, msg);
+            PursuitEnemyBehavior.sendChatOnly(player, msg);
         }
+    }
+
+    /**
+     * ДЕБАГ: рядок про рішення/результат будівництва, не частіше разу на 500мс на (моб, текст).
+     */
+    static void buildLog(Mob mob, String msg) {
+        if (DebugLog.on(DebugLog.Cat.BUILD) && DebugLog.throttle("bl|" + mob.getId() + "|" + msg, 500L)) {
+            DebugLog.log(DebugLog.Cat.BUILD, mob, msg);
+        }
+    }
+
+    /**
+     * ДЕБАГ: стан кешу шляху моба (для знімка стану).
+     */
+    public static String debugCacheInfo(Mob mob) {
+        NavCache c = NAV_CACHE.get(mob);
+        if (c == null) {
+            return "NavCache: запису нема";
+        }
+        boolean computed = c.lastRealComputeTick != Integer.MIN_VALUE;
+        return "NavCache: pathTarget=" + c.pathTarget + " canReach=" + c.canReach
+                + " недосяжна_підряд=" + c.consecutiveUnreachableTicks
+                + " останній_справжній_розрахунок=" + (computed ? (mob.tickCount - c.lastRealComputeTick) + " тіків тому" : "ніколи")
+                + " поточний_інтервал_перерахунку=" + (c.consecutiveUnreachableTicks > 0
+                ? recomputeIntervalFor(c.consecutiveUnreachableTicks) : 0) + " тіків"
+                + " кешований_шлях=" + MobDebug.pathBrief(c.path);
     }
 
     private EnemyBreak_N_BuildUtils() {
@@ -207,6 +240,12 @@ public final class EnemyBreak_N_BuildUtils {
             int interval = recomputeIntervalFor(cache.consecutiveUnreachableTicks);
             if (mob.tickCount - cache.lastRealComputeTick < interval) {
                 cache.tickComputed = mob.tickCount; // той самий тік - не рахувати ще раз із getOrComputePath()
+                if (DebugLog.on(DebugLog.Cat.PATH) && DebugLog.throttle("path-skip-" + mob.getId(), 1000L)) {
+                    DebugLog.log(DebugLog.Cat.PATH, mob, "перерахунок шляху ПРОПУЩЕНО (тротлінг недосяжної цілі): недосяжна_підряд="
+                            + cache.consecutiveUnreachableTicks + " інтервал=" + interval + " минуло="
+                            + (mob.tickCount - cache.lastRealComputeTick) + " -> віддаю ЗАСТИГЛИЙ кеш: "
+                            + MobDebug.pathBrief(cache.path));
+                }
                 return cache.path; // та сама (застигла) відповідь, БЕЗ нового createPath()
             }
         }
@@ -230,6 +269,9 @@ public final class EnemyBreak_N_BuildUtils {
         cache.pathTarget = pathTarget;
         cache.canReach = path != null && path.canReach();
         cache.path = path;
+        if (DebugLog.on(DebugLog.Cat.PATH)) {
+            MobDebug.logPathIfChanged(mob, pathTarget, path, cache.consecutiveUnreachableTicks);
+        }
         return path;
     }
 
@@ -468,12 +510,24 @@ public final class EnemyBreak_N_BuildUtils {
      * </ol>
      */
     public static void placeBlock(ServerLevel level, BlockPos pos, Mob mob) {
-        if (!level.getBlockState(pos).canBeReplaced()) return;
-        if (!hasAdjacentSolid(level, pos)) return;
+        // ДЕБАГ: кожна "тиха" відмова тепер лишає слід у лозі - раніше placeBlock мовчки робив return.
+        BlockState existing = level.getBlockState(pos);
+        if (!existing.canBeReplaced()) {
+            buildLog(mob, "placeBlock(" + pos.toShortString() + ") ВІДМОВА: клітинка не замінювана: " + existing);
+            return;
+        }
+        if (!hasAdjacentSolid(level, pos)) {
+            buildLog(mob, "placeBlock(" + pos.toShortString() + ") ВІДМОВА: нема суміжного isSolid()-блока для опори");
+            return;
+        }
 
         long now = level.getGameTime();
         Long lastTick = LAST_PLACE_TICK.get(mob);
-        if (lastTick != null && now - lastTick < Config.MOB_PLACE_DELAY_TICKS.get()) return;
+        if (lastTick != null && now - lastTick < Config.MOB_PLACE_DELAY_TICKS.get()) {
+            buildLog(mob, "placeBlock(" + pos.toShortString() + ") ВІДМОВА: затримка між блоками, лишилось "
+                    + (Config.MOB_PLACE_DELAY_TICKS.get() - (now - lastTick)) + " тіків");
+            return;
+        }
 
         Block block = DigBlockResolver.getDigBlock(level);
         BlockState state = block.defaultBlockState();
@@ -481,6 +535,11 @@ public final class EnemyBreak_N_BuildUtils {
         level.setBlock(pos, state, 3);
         level.playSound(null, pos, state.getSoundType().getPlaceSound(), SoundSource.HOSTILE, 1.0F, 1.0F);
         LAST_PLACE_TICK.put(mob, now);
+        if (DebugLog.on(DebugLog.Cat.BUILD)) {
+            DebugLog.log(DebugLog.Cat.BUILD, mob, "placeBlock ПОСТАВЛЕНО " + state.getBlock().getDescriptionId()
+                    + " у " + pos.toShortString() + " | моб=" + mob.position() + " onGround=" + mob.onGround()
+                    + " | поруч: " + MobDebug.cellBrief(level, pos));
+        }
 
         long expireAt = now + (long) Config.PLACED_BLOCK_LIFETIME_SECONDS.get() * 20L;
         TemporaryBlockData.get(level).track(pos, expireAt);

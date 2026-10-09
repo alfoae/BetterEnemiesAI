@@ -41,6 +41,13 @@ public class Config {
 
     public static final ModConfigSpec.IntValue UNREACHABLE_RECOMPUTE_INTERVAL_TICKS;
 
+    // Дебаг (див. com.example.examplemod.debug.DebugLog): окремий файл logs/betterenemiesai-debug.log.
+    public static final ModConfigSpec.BooleanValue DEBUG_ENABLED;
+    public static final ModConfigSpec.BooleanValue DEBUG_WATCHDOG;
+    public static final ModConfigSpec.BooleanValue DEBUG_FLOOR_MIXIN;
+    public static final ModConfigSpec.BooleanValue DEBUG_VERBOSE_JUMP;
+    public static final ModConfigSpec.IntValue DEBUG_MAX_FILE_MB;
+
     static {
         ModConfigSpec.Builder builder = new ModConfigSpec.Builder();
 
@@ -180,6 +187,32 @@ public class Config {
                 .defineInRange("unreachableRecomputeIntervalTicks", 40, 1, 1200);
 
 
+        builder.pop();
+
+        builder.push("Debug");
+
+        DEBUG_ENABLED = builder
+                .comment("Головний вимикач дебаг-логу. Увесь вивід іде у ОКРЕМИЙ файл logs/betterenemiesai-debug.log",
+                        "(а не в консоль), тому консоль/latest.log більше не переповнюються. Вимкни, коли налагодження закінчено.")
+                .define("debugEnabled", true);
+
+        DEBUG_WATCHDOG = builder
+                .comment("Сторож: сам помічає, коли заагрений моб 'завис' на місці або 'смикається' вперед-назад,",
+                        "і пише повний знімок стану (цілі, шлях, блоки навколо, чому не проходять переходи).")
+                .define("debugWatchdog", true);
+
+        DEBUG_FLOOR_MIXIN = builder
+                .comment("Вибірка з міксина getFloorLevel/getPathTypeFromState. ДУЖЕ шумно (виклик на кожну клітинку",
+                        "графа кожного моба): навіть увімкнене, друкує лише 'цікаві' клітинки й раз на ~5с на позицію.")
+                .define("debugFloorMixin", false);
+
+        DEBUG_VERBOSE_JUMP = builder
+                .comment("Покадровий вивід польоту стрибка (щотіку). Для звичайних сесій краще вимкнено.")
+                .define("debugVerboseJump", false);
+
+        DEBUG_MAX_FILE_MB = builder
+                .comment("Максимальний розмір файлу дебаг-логу (МБ). При перевищенні файл стає .prev.log, пишеться новий.")
+                .defineInRange("debugMaxFileMb", 16, 1, 512);
 
         builder.pop();
 

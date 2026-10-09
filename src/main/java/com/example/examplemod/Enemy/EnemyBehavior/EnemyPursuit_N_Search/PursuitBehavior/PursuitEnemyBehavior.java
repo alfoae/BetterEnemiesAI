@@ -195,7 +195,19 @@ public class PursuitEnemyBehavior extends Goal {
      * замість власної копії. Видалити всі виклики debugMsg (і сам метод) після завершення тестування.
      */
     public static void debugMsg(Player player, String msg) {
-        player.sendSystemMessage(net.minecraft.network.chat.Component.literal(msg));
+        // Дзеркало у файл debug-логу + однакові повідомлення в чат не частіше разу/с (див. DebugLog.chat).
+        if (com.example.examplemod.debug.DebugLog.chat(player.getName().getString(), msg)) {
+            player.sendSystemMessage(net.minecraft.network.chat.Component.literal(msg));
+        }
+    }
+
+    /**
+     * Лише чат (без дзеркала у файл) - для викликів, які вже самі записали рядок у лог з тегом моба.
+     */
+    public static void sendChatOnly(Player player, String msg) {
+        if (com.example.examplemod.debug.DebugLog.chatAllowed(msg)) {
+            player.sendSystemMessage(net.minecraft.network.chat.Component.literal(msg));
+        }
     }
 
     @Override

@@ -2,10 +2,7 @@ package com.example.examplemod.Enemy.EnemyMovement.Run_N_Jump;
 
 import com.example.examplemod.Enemy.EnemyBehavior.EnemyBreak_N_Build.EnemyBreak_N_BuildUtils;
 import com.example.examplemod.Enemy.EnemyBehavior.EnemyPursuit_N_Search.PursuitBehavior.PursuitEnemyBehavior;
-import com.example.examplemod.Enemy.EnemyMovement.TerrainShape.ShapePathAccess;
-import com.example.examplemod.Enemy.EnemyMovement.TerrainShape.ShapeProbe;
-import com.example.examplemod.Enemy.EnemyMovement.TerrainShape.ShapeSettings;
-import com.example.examplemod.Enemy.EnemyMovement.TerrainShape.ShapeWalk;
+import com.example.examplemod.Enemy.EnemyMovement.TerrainShape.*;
 import com.example.examplemod.Enemy.EnemyMovement.TerrainShape.ShapeWalk.BodyDims;
 import com.example.examplemod.Enemy.EnemyMovement.TerrainShape.ShapeWalk.Spot;
 import net.minecraft.core.BlockPos;
@@ -398,7 +395,8 @@ public final class GapJumpUtils {
             Node b = path.getNode(i + 1);
             double dx = b.x - a.x;
             double dz = b.z - a.z;
-            if (dx * dx + dz * dz > JUMP_SEGMENT_THRESHOLD * JUMP_SEGMENT_THRESHOLD) {
+            boolean hop = b instanceof HopNode; // "гоп" на сусідню клітинку: відстань 1, але це все одно стрибок
+            if (hop || dx * dx + dz * dz > JUMP_SEGMENT_THRESHOLD * JUMP_SEGMENT_THRESHOLD) {
                 BlockPos edge = new BlockPos(a.x, a.y, a.z);
                 BlockPos landingCell = new BlockPos(b.x, b.y, b.z);
                 int gapBlocks = (int) Math.round(Math.sqrt(dx * dx + dz * dz)) - 1;
@@ -411,6 +409,9 @@ public final class GapJumpUtils {
                         landing = new Vec3(plan.landX(), plan.landY(), plan.landZ());
                     }
                     approach = buildApproach(path, from, i, plan != null);
+                }
+                if (hop && plan == null) {
+                    continue; // без точного плану гоп не виконати (старий код стрибка розрахований на блоки, не на люки)
                 }
                 return new GapJump(edge, landing, Math.max(1, gapBlocks), plan, approach);
             }

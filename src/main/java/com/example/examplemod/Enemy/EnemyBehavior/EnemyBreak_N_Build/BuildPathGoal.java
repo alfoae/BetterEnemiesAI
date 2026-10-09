@@ -2,6 +2,8 @@ package com.example.examplemod.Enemy.EnemyBehavior.EnemyBreak_N_Build;
 
 import com.example.examplemod.Enemy.EnemyBehavior.EnemyPursuit_N_Search.PursuitBehavior.PursuitEnemyBehavior;
 import com.example.examplemod.Enemy.EnemyMovement.Run_N_Jump.Run_N_JumpUtils;
+import com.example.examplemod.debug.DebugLog;
+import com.example.examplemod.debug.MobDebug;
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.entity.Mob;
@@ -190,9 +192,16 @@ public class BuildPathGoal extends Goal {
             }
         }
 
-        this.mob.getNavigation().moveTo(
+        boolean moveOk = this.mob.getNavigation().moveTo(
                 this.buildTarget.getX() + 0.5, this.buildTarget.getY(), this.buildTarget.getZ() + 0.5,
                 Run_N_JumpUtils.getRunSpeedModifier(this.mob));
+        // ДЕБАГ: чи дав moveTo(buildTarget) реальний шлях. Саме тут видно, що моб "стоїть", бо шлях порожній/1 вузол.
+        if (DebugLog.on(DebugLog.Cat.BUILD) && DebugLog.throttle("build-moveto-" + this.mob.getId(), 500L)) {
+            DebugLog.log(DebugLog.Cat.BUILD, this.mob, "moveTo(buildTarget=" + this.buildTarget.toShortString() + ")="
+                    + moveOk + " | шлях=" + MobDebug.pathBrief(this.mob.getNavigation().getPath())
+                    + " | моб=" + this.mob.position() + " onGround=" + this.mob.onGround()
+                    + " vel=" + String.format("%.3f", this.mob.getDeltaMovement().horizontalDistance()));
+        }
     }
 
     private boolean needsClimb(BlockPos target) {
@@ -205,7 +214,18 @@ public class BuildPathGoal extends Goal {
     private boolean needsBridge(Level level, BlockPos target) {
         BlockPos step = EnemyBreak_N_BuildUtils.nextHorizontalStep(this.mob, target);
         if (EnemyBreak_N_BuildUtils.isBreakable(level, step)) return false; // стіна - не наша справа
-        return !level.getBlockState(step.below()).isSolid();
+        boolean result = !level.getBlockState(step.below()).isSolid();
+        // ДЕБАГ: чому саме "міст потрібен / не потрібен". Рішення тут ґрунтується на legacy isSolid() блока під
+        // кроком, а не на реальній геометрії опори - у логу видно обидва, щоб зловити розбіжність (люки!).
+        if (DebugLog.on(DebugLog.Cat.BUILD)) {
+            String sig = step.toShortString() + "|" + result;
+            if (DebugLog.throttle("build-nb|" + this.mob.getId() + "|" + sig, 3000L)) {
+                DebugLog.log(DebugLog.Cat.BUILD, this.mob, "needsBridge(target=" + target.toShortString() + "): step="
+                        + step.toShortString() + " -> " + (result ? "ТАК (під кроком isSolid()=false)"
+                        : "НІ (під кроком isSolid()=true)") + " | " + MobDebug.supportReport(level, step, this.mob.getBbWidth()));
+            }
+        }
+        return result;
     }
 
     private void handleClimb(ServerLevel level) {
@@ -233,10 +253,25 @@ public class BuildPathGoal extends Goal {
         BlockPos step = EnemyBreak_N_BuildUtils.nextHorizontalStep(this.mob, this.buildTarget);
         BlockPos stepBelow = step.below();
 
-        if (!level.getBlockState(stepBelow).isSolid()) {
+        boolean place = !level.getBlockState(stepBelow).isSolid();
+        if (DebugLog.on(DebugLog.Cat.BUILD)) {
+            DebugLog.log(DebugLog.Cat.BUILD, this.mob, "handleBridge: step=" + step.toShortString() + " stepBelow="
+                    + stepBelow.toShortString() + " -> " + (place ? "СТАВЛЮ БЛОК" : "НЕ ставлю (isSolid()=true під кроком)")
+                    + " | " + MobDebug.supportReport(level, step, this.mob.getBbWidth())
+                    + " | моб=" + this.mob.position() + " onGround=" + this.mob.onGround());
+        }
+        if (place) {
             EnemyBreak_N_BuildUtils.debugMsg(this.mob, "[DEBUG BuildPathGoal] bridge: ставлю блок " + stepBelow
                     + " (крок " + step + ")"); // DEBUG
             EnemyBreak_N_BuildUtils.placeBlock(level, stepBelow, this.mob);
         }
+    }
+
+    /**
+     * ДЕБАГ: стан цілі для знімка (MobDebug).
+     */
+    public String debugState() {
+        return "buildTarget=" + this.buildTarget + " retargetTimer=" + this.retargetTimer
+                + " stuckCheckTimer=" + this.stuckCheckTimer + " actionCooldown=" + this.actionCooldown;
     }
 }

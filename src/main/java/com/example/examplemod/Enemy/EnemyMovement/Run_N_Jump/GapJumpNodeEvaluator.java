@@ -1,8 +1,10 @@
 package com.example.examplemod.Enemy.EnemyMovement.Run_N_Jump;
 
+import com.example.examplemod.Enemy.EnemyMovement.TerrainShape.HopNode;
 import com.example.examplemod.Enemy.EnemyMovement.TerrainShape.ShapeAwareNodeEvaluator;
 import com.example.examplemod.Enemy.EnemyMovement.TerrainShape.ShapeSettings;
 import com.example.examplemod.Enemy.EnemyMovement.TerrainShape.ShapeWalk.Spot;
+import com.example.examplemod.debug.GraphProbe;
 import net.minecraft.core.BlockPos;
 import net.minecraft.world.entity.Mob;
 import net.minecraft.world.level.PathNavigationRegion;
@@ -142,6 +144,15 @@ public class GapJumpNodeEvaluator extends ShapeAwareNodeEvaluator {
     private static final float UP_JUMP_EXTRA_MALUS_PER_BLOCK = 0.5F;
 
     /** Стан клітинки перед краєм (для кешу на вузол). */
+    /**
+     * Штраф за "гоп" на сусідню клітинку (в одиницях вартості A*). Навмисно великий: коли можна пройти звичайними
+     * стрибками "через одну" (перевірені, відстань 2), шлях має обирати їх, а гоп лишається для випадків, де інакше
+     * ніяк (кінець доріжки з люків, перший блок мосту одразу за люком).
+     */
+    private static final float HOP_MALUS = 4.0F;
+
+    private static final int[][] CARDINALS = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
+
     private static final byte UNKNOWN = 0;
     /** Є підлога й вільно на рівні ніг: моб просто зробить крок, стрибок звідси в цей бік не потрібен. */
     private static final byte WALKABLE = 1;
@@ -188,7 +199,12 @@ public class GapJumpNodeEvaluator extends ShapeAwareNodeEvaluator {
     @Override
     public int getNeighbors(Node[] nodes, Node node) {
         int count = super.getNeighbors(nodes, node);
+        boolean probe = isProbeStart(node);
         if (count >= ALL_NORMAL_NEIGHBORS) {
+            if (probe) {
+                GraphProbe.logText(this.mob, "стрибкові ребра НЕ скануються: клітинка повністю відкрита (" + count + " сусідів)");
+                GraphProbe.disarm();
+            }
             return count; // повністю відкрита клітинка - тут стрибок ніколи не потрібен, не скануємо
         }
         BlockPos origin = new BlockPos(node.x, node.y, node.z);
@@ -229,6 +245,21 @@ public class GapJumpNodeEvaluator extends ShapeAwareNodeEvaluator {
                 }
                 count = tryRay(nodes, count, ctx, ray, frontCache, dy);
             }
+        }
+        count = addHops(nodes, count, ctx, frontCache);
+        if (probe) {
+            GraphProbe.logNodes(this.mob, "ПІСЛЯ стрибкових ребер і гопів (фінальний список для A*)", node, nodes, count);
+            StringBuilder fronts = new StringBuilder("стан 'першої клітинки перед краєм' на рівні старту (VOID = вважається проваллям -> породжує стрибок; originIrregular=")
+                    .append(ctx.originIrregular).append("):");
+            for (int k = 0; k < frontCache.length; k++) {
+                if (frontCache[k] == UNKNOWN) {
+                    continue;
+                }
+                String st = frontCache[k] == WALKABLE ? "WALKABLE" : frontCache[k] == VOID ? "VOID" : "BLOCKED";
+                fronts.append(" (").append(k / 3 - 1).append(',').append(k % 3 - 1).append(")=").append(st);
+            }
+            GraphProbe.logText(this.mob, fronts.toString());
+            GraphProbe.disarm();
         }
         return count;
     }
@@ -310,6 +341,46 @@ public class GapJumpNodeEvaluator extends ShapeAwareNodeEvaluator {
     // -------------------------------------------------------------------------------------
     // Точна геометрія (нестандартні блоки)
     // -------------------------------------------------------------------------------------
+
+    /**
+     * "ГОП": ребро на СУСІДНЮ клітинку (відстань 1), яка придатна для стояння, але ПІШКИ недосяжна (classifyStartFront
+     * дав VOID саме через провал опори під хітбоксом, а не через порожнечу). Ребро додається лише якщо точний
+     * планувальник ({@link ShapeJump#choose}) знаходить для нього реальний стрибок - тобто рівно за тими ж правилами,
+     * що й звичайні стрибки на нерегулярній опорі. Не знайшов - ребра нема, як і було раніше.
+     */
+    private int addHops(Node[] nodes, int count, JumpCtx ctx, byte[] frontCache) {
+        if (!exactReady()) {
+            return count;
+        }
+        BlockPos origin = ctx.origin;
+        for (int[] c : CARDINALS) {
+            if (count >= nodes.length) {
+                break;
+            }
+            int fx = c[0];
+            int fz = c[1];
+            int idx = (fx + 1) * 3 + (fz + 1);
+            if (frontCache[idx] == UNKNOWN) {
+                frontCache[idx] = classifyStartFront(ctx, fx, fz);
+            }
+            if (frontCache[idx] != VOID) {
+                continue;
+            }
+            BlockPos front = origin.offset(fx, 0, fz);
+            if (!isStandableCell(front.getX(), front.getY(), front.getZ())) {
+                continue; // справжня порожнеча - це справа звичайних стрибків (від 2 клітин), не гопа
+            }
+            Spot[] from = fromSpotsOf(ctx);
+            if (from.length == 0 || !exactJumpOk(ctx, from, fx, fz, 0)) {
+                continue;
+            }
+            Node hop = new HopNode(front.getX(), front.getY(), front.getZ());
+            hop.type = PathType.WALKABLE;
+            hop.costMalus = HOP_MALUS;
+            nodes[count++] = hop;
+        }
+        return count;
+    }
 
     private Spot[] fromSpotsOf(JumpCtx ctx) {
         if (ctx.from == null) {

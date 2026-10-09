@@ -1,6 +1,6 @@
 package com.example.examplemod.Enemy.EnemyMovement.Run_N_Jump;
 
-import com.example.examplemod.Enemy.EnemyBehavior.EnemyPursuit_N_Search.PursuitBehavior.PursuitEnemyBehavior;
+import com.example.examplemod.debug.DebugLog;
 import net.minecraft.core.BlockPos;
 import net.minecraft.world.entity.Mob;
 import net.minecraft.world.entity.ai.goal.Goal;
@@ -194,6 +194,30 @@ public class GapJumpAssistGoal extends Goal {
     private boolean debugRunupPrinted = false;
     // =========================================
 
+    // ---- ДЕБАГ (див. com.example.examplemod.debug.DebugLog) -----------------------------------------
+    /**
+     * Підпис останнього залогованого результату canUse(): друкуємо лише ЗМІНУ (раніше друкувалось щотіку).
+     */
+    private String lastCanUseSig = "";
+
+    private void jumpLog(String msg) {
+        DebugLog.log(DebugLog.Cat.JUMP, this.mob, msg);
+    }
+
+    /**
+     * Короткий опис внутрішнього стану цілі - для знімка стану (MobDebug) і діагностики зависань.
+     */
+    public String debugState() {
+        return "jump=" + (this.jump == null ? "null"
+                : "edge=" + this.jump.edge() + " landing=" + formatVec(this.jump.landing())
+                + " gap=" + this.jump.gapBlocks() + " exact=" + this.jump.exact()
+                + " approach=" + (this.jump.approach() != null))
+                + " done=" + this.done + " approachActive=" + this.approachActive
+                + " approachTicks=" + this.approachTicks + " chargeTicks=" + this.chargeTicks
+                + " airborne=" + this.hasBeenAirborne + " jumpFired=" + this.jumpFired
+                + " chain=" + this.chainCount + " impulse=" + this.impulseDetected;
+    }
+
     @Override
     public boolean canUse() {
         // v13 - ТУТ РАНІШЕ був "if (!PursuitEnemyBehavior.isMemoryChasing(this.mob)) return false;" -
@@ -206,8 +230,21 @@ public class GapJumpAssistGoal extends Goal {
         GapJumpUtils.GapJump segment = GapJumpUtils.findUpcomingJumpSegment(this.mob);
         // DEBUG (тимчасово - див. чат): segment=null тут означає, що готового стрибка в ПОБУДОВАНОМУ
         // шляху взагалі нема - тобто причина ще ВИЩЕ (GapJumpNodeEvaluator/мексин), не тут.
-        System.out.println("[DEBUG GapJumpAssistGoal] canUse: findUpcomingJumpSegment=" + segment
-                + " pos=" + this.mob.position() + " onGround=" + this.mob.onGround());
+        // Раніше тут був println на КОЖЕН виклик canUse (щодва тіки на КОЖНОГО моба). Тепер - лише ЗМІНА
+        // результату (і "стрибка нема" не частіше разу на 2с на моба).
+        if (DebugLog.on(DebugLog.Cat.JUMP)) {
+            String sig = segment == null ? "стрибка в шляху нема"
+                    : "edge=" + segment.edge() + " landing=" + formatVec(segment.landing())
+                    + " gap=" + segment.gapBlocks() + " exact=" + segment.exact()
+                    + " approach=" + (segment.approach() != null);
+            if (!sig.equals(this.lastCanUseSig)) {
+                this.lastCanUseSig = sig;
+                if (segment != null || DebugLog.throttle("jump-nojump-" + this.mob.getId(), 2000L)) {
+                    jumpLog("canUse: " + sig + " | pos=" + formatVec(this.mob.position())
+                            + " onGround=" + this.mob.onGround());
+                }
+            }
+        }
         if (segment == null) {
             return false;
         }
@@ -218,6 +255,13 @@ public class GapJumpAssistGoal extends Goal {
         if (!this.mob.onGround()) {
             double drop = segment.takeoffPoint().y - this.mob.getY();
             if (drop < -0.05 || drop > RESCUE_MAX_DROP || this.mob.getDeltaMovement().y > 0.1) {
+                // ВАЖЛИВО для "зависань": Pursuit уступає ЦІЙ цілі (бачить стрибок у шляху), а вона відмовляє -
+                // тоді моб лишається без керування. Тому фіксуємо цю ситуацію.
+                if (DebugLog.on(DebugLog.Cat.JUMP) && DebugLog.throttle("jump-refuse-" + this.mob.getId(), 1000L)) {
+                    jumpLog("canUse=FALSE хоча стрибок у шляху ЄСТЬ (Pursuit при цьому уступає!): моб не на землі, drop="
+                            + String.format("%.3f", drop) + " vy=" + String.format("%.3f", this.mob.getDeltaMovement().y)
+                            + " pos=" + formatVec(this.mob.position()) + " edge=" + segment.edge());
+                }
                 return false;
             }
         }
@@ -253,15 +297,11 @@ public class GapJumpAssistGoal extends Goal {
         // ще false), тож стрибок усе одно б не встигав виконатись.
         boolean result = !this.done && this.jump != null;
 
-        System.out.println(
-                "[DEBUG GapJumpAssistGoal] CAN_CONTINUE=" + result
-                        + " done=" + this.done
-                        + " jump=" + this.jump
-                        + " memoryChasing="
-                        + PursuitEnemyBehavior.isMemoryChasing(this.mob)
-                        + " onGround=" + this.mob.onGround()
-                        + " pos=" + this.mob.position()
-        );
+        // Раніше друкувалось щотіку; тепер - лише момент, коли ціль збирається завершитись.
+        if (!result && DebugLog.on(DebugLog.Cat.JUMP)) {
+            jumpLog("canContinueToUse=FALSE done=" + this.done + " jumpNull=" + (this.jump == null)
+                    + " onGround=" + this.mob.onGround() + " pos=" + formatVec(this.mob.position()));
+        }
 
         return result;
     }
@@ -290,6 +330,12 @@ public class GapJumpAssistGoal extends Goal {
         }
         if (!this.approachActive) {
             this.mob.getNavigation().stop();
+        }
+        if (DebugLog.on(DebugLog.Cat.JUMP)) {
+            jumpLog("START: edge=" + this.jump.edge() + " approachПередано=" + (approach != null)
+                    + " approachActive=" + this.approachActive
+                    + " approachNodes=" + (approach == null ? 0 : approach.getNodeCount())
+                    + " pos=" + formatVec(this.mob.position()));
         }
 
         // Спринт лишаємо ТІЛЬКИ для розбігу до краю (атрибут швидкості +30%). У момент самого
@@ -336,7 +382,7 @@ public class GapJumpAssistGoal extends Goal {
         Vec3 edgeCenter = this.jump.takeoffPoint();
         double axisLength = horizontalDistance(edgeCenter, this.jump.landing());
 
-        System.out.println(
+        jumpLog(
                 "[DEBUG GAP JUMP] ===============================" + (chained ? " (ЛАНЦЮЖОК: без передачі керування, швидкість збережена: "
                         + String.format("%.3f", this.carryStep) + " бл/тік)" : "")
                         + "\nМоб: " + this.mob.getName().getString()
@@ -385,7 +431,7 @@ public class GapJumpAssistGoal extends Goal {
                 // Моб втратив опору, так і не отримавши команди на стрибок - майже завжди через ЗАПІЗНІЛЕ
                 // керування (див. canUse). Поки він просів зовсім небагато, стрибаємо просто з повітря.
                 if (!tryRescueJump()) {
-                    System.out.println(
+                    jumpLog(
                             "[DEBUG GAP JUMP] !!! МОБ ЗІЙШОВ З КРАЮ БЕЗ СТРИБКА (врятувати вже не можна)"
                                     + " | pos=" + formatVec(this.mob.position())
                                     + " | edge=" + this.jump.edge()
@@ -410,13 +456,13 @@ public class GapJumpAssistGoal extends Goal {
             this.mob.getLookControl().setLookAt(
                     this.jump.landing().x, this.jump.landing().y, this.jump.landing().z, 30.0F, 30.0F);
 
-            System.out.println(
-                    "[DEBUG GAP JUMP] МОБ У ПОВІТРІ"
-                            + " | pos=" + formatVec(this.mob.position())
-                            + " | landing=" + formatVec(this.jump.landing())
-                            + " | speed=" + String.format("%.3f",
-                            this.mob.getDeltaMovement().horizontalDistance())
-            );
+            if (DebugLog.on(DebugLog.Cat.JUMP_TICK)) {
+                DebugLog.log(DebugLog.Cat.JUMP_TICK, this.mob, "МОБ У ПОВІТРІ"
+                        + " | pos=" + formatVec(this.mob.position())
+                        + " | landing=" + formatVec(this.jump.landing())
+                        + " | speed=" + String.format("%.3f",
+                        this.mob.getDeltaMovement().horizontalDistance()));
+            }
 
             return;
         }
@@ -440,7 +486,7 @@ public class GapJumpAssistGoal extends Goal {
             double errAlong = errX * dirX + errZ * dirZ;
             double errSide = errX * dirZ - errZ * dirX;
 
-            System.out.println(
+            jumpLog(
                     "[DEBUG GAP JUMP] ПРИЗЕМЛЕННЯ"
                             + " | pos=" + formatVec(this.mob.position())
                             + " | landing=" + formatVec(this.jump.landing())
@@ -461,7 +507,7 @@ public class GapJumpAssistGoal extends Goal {
                 if (!this.impulseDetected && this.jump.plan() != null && this.jump.plan().tightLanding()) {
                     Vec3 landedVel = this.mob.getDeltaMovement();
                     this.mob.setDeltaMovement(0.0, landedVel.y, 0.0);
-                    System.out.println("[DEBUG GAP JUMP] ВУЗЬКА ОПОРА: інерцію погашено, моб лишається на місці");
+                    jumpLog("[DEBUG GAP JUMP] ВУЗЬКА ОПОРА: інерцію погашено, моб лишається на місці");
                 }
                 this.done = true;
                 return;
@@ -482,7 +528,7 @@ public class GapJumpAssistGoal extends Goal {
         if (distToLanding <= ARRIVED_RADIUS) {
             this.done = true;
 
-            System.out.println(
+            jumpLog(
                     "[DEBUG GAP JUMP] РОЗРИВ ПРОЙДЕНО НОГАМИ (без стрибка)"
                             + " | pos=" + formatVec(this.mob.position())
                             + " | landing=" + formatVec(landing)
@@ -544,7 +590,7 @@ public class GapJumpAssistGoal extends Goal {
             this.chargeTicks++;
             if (this.chargeTicks > MAX_CHARGE_TICKS) {
                 this.done = true;
-                System.out.println(
+                jumpLog(
                         "[DEBUG GAP JUMP] РОЗБІГ ЗАТЯГНУВСЯ - відпускаємо керування"
                                 + " | pos=" + formatVec(this.mob.position())
                                 + " | along=" + String.format("%.3f", along)
@@ -563,17 +609,22 @@ public class GapJumpAssistGoal extends Goal {
                 steerTo(takeoffTarget);
             }
 
-            if (!this.debugRunupPrinted || this.chargeTicks % 5 == 0) {
-                System.out.println(
-                        "[DEBUG GAP JUMP] РОЗБІГ"
-                                + " | pos=" + formatVec(this.mob.position())
-                                + " | along=" + String.format("%+.3f", along)
-                                + " (край блока = +" + String.format("%.3f", front) + ")"
-                                + " | across=" + String.format("%.3f", across)
-                                + " | speed=" + String.format("%.3f", speedAlong)
-                );
-                this.debugRunupPrinted = true;
+            if ((!this.debugRunupPrinted || this.chargeTicks % 10 == 0) && DebugLog.on(DebugLog.Cat.JUMP)) {
+                // Додано нарівні з "along/across" ПРИЧИНУ, чому ще не відрив: nearAxis/lateralLimit/atEdge, куди
+                // саме цілимось (takeoffTarget) і чи йде підхід навігатором. Саме це видно при "зависанні на краю".
+                jumpLog("РОЗБІГ"
+                        + " | pos=" + formatVec(this.mob.position())
+                        + " | along=" + String.format("%+.3f", along)
+                        + " (край блока = +" + String.format("%.3f", front) + ")"
+                        + " | across=" + String.format("%.3f", across)
+                        + " (допуск=" + String.format("%.3f", lateralLimit) + ", nearAxis=" + nearAxis + ")"
+                        + " | speed=" + String.format("%.3f", speedAlong)
+                        + " | atEdge=" + atEdge + " carry=" + carryMode
+                        + " | ціль_розбігу=" + formatVec(takeoffTarget)
+                        + " (відстань " + String.format("%.3f", horizontalDistance(this.mob.position(), takeoffTarget)) + ")"
+                        + " | chargeTicks=" + this.chargeTicks + " onGround=" + this.mob.onGround());
             }
+            this.debugRunupPrinted = true;
             return;
         }
 
@@ -634,7 +685,7 @@ public class GapJumpAssistGoal extends Goal {
         this.jumpFired = true;
         this.lastFlightStep = perTick;
 
-        System.out.println(
+        jumpLog(
                 "[DEBUG GAP JUMP] РЯТІВНИЙ СТРИБОК (керування прийшло запізно)"
                         + " | pos=" + formatVec(this.mob.position())
                         + " | просів на=" + String.format("%.3f", -heightAbove)
@@ -806,7 +857,7 @@ public class GapJumpAssistGoal extends Goal {
         this.mob.setYRot((float) Math.toDegrees(Math.atan2(-dx, dz)));
         this.mob.setYHeadRot(this.mob.getYRot());
 
-        System.out.println(
+        jumpLog(
                 "[DEBUG GAP JUMP] " + (noJumpNeeded ? "ЗБІГ З КРАЮ (без стрибка)" : "СТРИБОК!")
                         + " | pos=" + formatVec(this.mob.position())
                         + " | edge=" + this.jump.edge()
@@ -880,7 +931,7 @@ public class GapJumpAssistGoal extends Goal {
         if (!friction) {
             this.impulseDetected = true;
             this.carryStep = 0.0;
-            System.out.println(
+            jumpLog(
                     "[DEBUG GAP JUMP] ЗОВНІШНІЙ ІМПУЛЬС (відкидання/поштовх): керування швидкістю знято"
                             + " | виставляли=(" + String.format("%.3f, %.3f", this.lastSetX, this.lastSetZ) + ")"
                             + " | стало=(" + String.format("%.3f, %.3f", v.x, v.z) + ")"
@@ -934,6 +985,11 @@ public class GapJumpAssistGoal extends Goal {
 
     @Override
     public void stop() {
+        if (DebugLog.on(DebugLog.Cat.JUMP)) {
+            jumpLog("STOP: " + debugState() + " pos=" + formatVec(this.mob.position())
+                    + " onGround=" + this.mob.onGround());
+        }
+        this.lastCanUseSig = "";
         ACTIVE_MOBS.remove(this.mob);
 
         this.jump = null;
@@ -1039,6 +1095,13 @@ public class GapJumpAssistGoal extends Goal {
                 || approach.isDone()
                 || this.approachTicks > MAX_APPROACH_TICKS;
         if (finished) {
+            if (DebugLog.on(DebugLog.Cat.JUMP)) {
+                jumpLog("ПІДХІД завершено навігатором: approachNull=" + (approach == null)
+                        + " шляхЗамінено=" + (approach != null && navigation.getPath() != approach)
+                        + " approachDone=" + (approach != null && approach.isDone())
+                        + " таймаут=" + (this.approachTicks > MAX_APPROACH_TICKS)
+                        + " тіків_підходу=" + this.approachTicks + " pos=" + formatVec(this.mob.position()));
+            }
             this.approachActive = false;
             navigation.stop();
             return false;

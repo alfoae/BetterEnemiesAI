@@ -4,6 +4,7 @@ import com.example.examplemod.Enemy.EnemyMovement.TerrainShape.ShapeGeometry.Box
 import com.example.examplemod.Enemy.EnemyMovement.TerrainShape.ShapeGeometry.Footprint;
 import com.example.examplemod.Enemy.EnemyMovement.TerrainShape.ShapeWalk.BodyDims;
 import com.example.examplemod.Enemy.EnemyMovement.TerrainShape.ShapeWalk.Spot;
+import com.example.examplemod.debug.GraphProbe;
 import com.mojang.logging.LogUtils;
 import it.unimi.dsi.fastutil.longs.Long2ByteOpenHashMap;
 import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap;
@@ -141,15 +142,34 @@ public class ShapeAwareNodeEvaluator extends WalkNodeEvaluator {
     @Override
     public int getNeighbors(Node[] nodes, Node node) {
         int count = super.getNeighbors(nodes, node);
+        boolean probe = isProbeStart(node);
+        if (probe) {
+            GraphProbe.logNodes(this.mob, "ВАНІЛЬНІ сусіди (до форм-орієнтованої підміни)", node, nodes, count);
+        }
         if (!this.active || this.source == null || this.mob == null) {
+            if (probe) {
+                GraphProbe.logText(this.mob, "форм-орієнтований режим НЕ активний (active=" + this.active
+                        + ", source=" + (this.source != null) + ") - лишається ванільна відповідь");
+            }
             return count;
         }
         try {
-            return shapeNeighbors(nodes, node, count);
+            int result = shapeNeighbors(nodes, node, count);
+            if (probe) {
+                GraphProbe.logNodes(this.mob, "ПІСЛЯ форм-орієнтованої підміни", node, nodes, result);
+            }
+            return result;
         } catch (RuntimeException e) {
             warnOnce(e);
             return count;
         }
+    }
+
+    /**
+     * ДЕБАГ: чи це стартовий вузол пошуку, на який озброєно {@link GraphProbe}.
+     */
+    protected final boolean isProbeStart(Node node) {
+        return node == this.startNode && GraphProbe.armedFor(this.mob);
     }
 
     private int shapeNeighbors(Node[] nodes, Node node, int count) {
@@ -168,6 +188,11 @@ public class ShapeAwareNodeEvaluator extends WalkNodeEvaluator {
                 from = fromSpots(node);
             }
             Node found = findShapeNode(node, from, dx, dz);
+            if (node == this.startNode && GraphProbe.armedFor(this.mob)) {
+                GraphProbe.logText(this.mob, "напрямок (" + dx + "," + dz + ") - нерегулярна зона, ванільного сусіда видалено; "
+                        + (found == null ? "форм-орієнтований пошук НЕ знайшов куди ступити"
+                        : "знайдено (" + found.x + "," + found.y + "," + found.z + ")"));
+            }
             if (found != null && count < nodes.length) {
                 nodes[count++] = found;
             }
@@ -500,7 +525,8 @@ public class ShapeAwareNodeEvaluator extends WalkNodeEvaluator {
             cands[i] = base;
             if (i + 1 < n) {
                 Node next = path.getNode(i + 1);
-                walk[i] = Math.abs(next.x - nd.x) <= 1 && Math.abs(next.z - nd.z) <= 1;
+                // ГОП (HopNode) - сусідня клітинка, але ребро НЕ ходьба: це стрибок через ділянку без опори.
+                walk[i] = Math.abs(next.x - nd.x) <= 1 && Math.abs(next.z - nd.z) <= 1 && !(next instanceof HopNode);
             }
         }
         List<WaypointPlanner.Waypoint> plan = WaypointPlanner.plan(cands, walk, this::movable);

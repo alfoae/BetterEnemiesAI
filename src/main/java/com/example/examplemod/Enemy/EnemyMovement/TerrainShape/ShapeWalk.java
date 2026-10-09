@@ -125,8 +125,30 @@ public final class ShapeWalk {
      * </ul>
      */
     public static boolean traverse(BoxSource src, Spot a, Spot b, BodyDims d) {
+        return traverse0(src, a, b, d, null);
+    }
+
+    /**
+     * ДЕБАГ: та сама перевірка, що й {@link #traverse}, але повертає ПРИЧИНУ відмови (або "OK"). Це один і той самий
+     * код ({@link #traverse0}), тому відповідь завжди збігається з тим, що бачить path-finder.
+     */
+    public static String explainTraverse(BoxSource src, Spot a, Spot b, BodyDims d) {
+        StringBuilder why = new StringBuilder();
+        boolean ok = traverse0(src, a, b, d, why);
+        return ok ? "OK" : "FAIL: " + why;
+    }
+
+    private static String f3(double v) {
+        return String.format(java.util.Locale.ROOT, "%.3f", v);
+    }
+
+    private static boolean traverse0(BoxSource src, Spot a, Spot b, BodyDims d, StringBuilder why) {
         double rise = b.surfaceY() - a.surfaceY();
         if (rise > d.jumpUp() + LOW || -rise > d.maxFall() + LOW) {
+            if (why != null) {
+                why.append("перепад висоти rise=").append(f3(rise)).append(" (jumpUp=").append(f3(d.jumpUp()))
+                        .append(", maxFall=").append(f3(d.maxFall())).append(')');
+            }
             return false;
         }
         boolean up = rise > d.stepUp() + 1.0E-6;
@@ -150,10 +172,20 @@ public final class ShapeWalk {
             double ceiling = cur + (up ? d.jumpUp() : d.stepUp()) + 1.0E-6;
             Support s = ShapeGeometry.findSupport(boxes, fp, ceiling, MIN_FLOOR_COVERAGE);
             if (!s.isPresent()) {
+                if (why != null) {
+                    why.append("нема опори під хітбоксом у семплі ").append(i).append('/').append(n)
+                            .append(" центр=(").append(f3(fp.centerX())).append(',').append(f3(fp.centerZ()))
+                            .append(") стеля_пошуку=").append(f3(ceiling)).append(" cur=").append(f3(cur));
+                }
                 return false;
             }
             double ns = s.surfaceY();
             if (ns < lowAllowed - ShapeGeometry.EPS) {
+                if (why != null) {
+                    why.append("опора надто низько у семплі ").append(i).append('/').append(n)
+                            .append(" центр=(").append(f3(fp.centerX())).append(',').append(f3(fp.centerZ()))
+                            .append(") ns=").append(f3(ns)).append(" lowAllowed=").append(f3(lowAllowed));
+                }
                 return false;
             }
             // Нижні виступи (≤ stepUp над опорою) моб просто переступає; ціль стрибка/падіння — теж не перешкода.
@@ -161,6 +193,15 @@ public final class ShapeWalk {
             double upper = (jumpLike ? Math.max(ns, topRef) : ns) + d.height();
             for (Box bx : boxes) {
                 if (bx.maxY() > limit && bx.minY() < upper - ShapeGeometry.EPS && bx.overlapsXZ(fp)) {
+                    if (why != null) {
+                        why.append("перешкоду створює коробка X[").append(f3(bx.minX())).append("..").append(f3(bx.maxX()))
+                                .append("] Y[").append(f3(bx.minY())).append("..").append(f3(bx.maxY()))
+                                .append("] Z[").append(f3(bx.minZ())).append("..").append(f3(bx.maxZ()))
+                                .append("] у семплі ").append(i).append('/').append(n)
+                                .append(" центр=(").append(f3(fp.centerX())).append(',').append(f3(fp.centerZ()))
+                                .append(") ns=").append(f3(ns)).append(" limit=").append(f3(limit))
+                                .append(" upper=").append(f3(upper)).append(jumpLike ? " (стрибок/падіння)" : " (звичайний крок)");
+                    }
                     return false;
                 }
             }
