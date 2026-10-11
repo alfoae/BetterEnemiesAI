@@ -107,8 +107,16 @@ import java.util.List;
  * ОКРЕМИХ опор, а не суцільна платформа. Раніше такий ряд вважався однією платформою: після першого приземлення
  * на люк решта ряду і блок за ним відкидались як "продовження, ногами дійдемо", тож ▣▢▢▢▣ давав стрибок лише через
  * один люк, а далі ще "гоп" на останній люк. Тепер це один стрибок через усі люки - так само, як ▣...▣ зі звичайних
- * блоків (з дешевшою вартістю за блок, {@link #SKIP_MALUS_PER_BLOCK}). Такі "додаткові" ребра додаються в кінець
- * списку сусідів і лише в залишок буфера ({@link #addExtraJumps}), тож старі ребра вони не витісняють.
+ * блоків. Такі "додаткові" ребра додаються в кінець списку сусідів і лише в залишок буфера
+ * ({@link #addExtraJumps}), тож старі ребра вони не витісняють.
+ * <p>
+ * <b>v7 — найдовші стрибки, а не "люк через люк".</b> Ванільний PathFinder - це A* із евристикою x1.5: він розкриває
+ * вузли за f = g + 1.5h і зупиняється на першому, що в межах accuracy від цілі. Якщо вартість стрибка росте з
+ * відстанню швидше, ніж 1.5 за блок (було 2.25), довший стрибок має БІЛЬШИЙ f за коротший, і A* ловить ціль
+ * ланцюгом коротких, хоч довгий дешевший: у ряді люків (опора на кожній клітинці) виходила суміш стрибків на 2 і 3 і
+ * "люк через люк" замість нормального стрибка. Тому в нерегулярній зоні кожне наступне приземлення на промені коштує
+ * як перше + {@link #IRREGULAR_SKIP_COST_PER_BLOCK} (менше за 1.5) за кожен блок понад ним: пошук іде найдовшими
+ * стрибками, які дозволяє мобу дальність. Промені лише зі звичайних блоків лишились як були.
  * <p>
  * НЕ займає: стрибок між СУСІДНІМИ клітинками (відстань до 1.41), навіть якщо між опорами є розрив менший
  * за клітинку (дві свічки поруч): це за визначенням {@code GapJumpUtils.JUMP_SEGMENT_THRESHOLD} крок, а не стрибок.
@@ -148,6 +156,19 @@ public class GapJumpNodeEvaluator extends ShapeAwareNodeEvaluator {
     private static final float SKIP_MALUS_PER_BLOCK = 1.25F;
 
     /**
+     * Вартість кожного блока відстані ПОНАД першим приземленням на промені для перестрибувань у нерегулярній зоні
+     * (ряд відкритих люків, плити тощо - див. {@link #platformEnd}). Навмисно МЕНША за вагу евристики ванільного
+     * PathFinder: він множить відстань до цілі на 1.5, тож для A* довший стрибок - це прогрес (його f = g + 1.5h
+     * менший, ніж у коротшого), і пошук іде найдовшими стрибками. З вартістю як у звичайного перестрибування
+     * (2.25 за блок) довший стрибок мав би БІЛЬШИЙ f: A* розкривав би ближчі приземлення першими й ловив ціль
+     * ланцюгом коротких ("люк через люк"), хоча за повною вартістю довгий таки дешевший - ванільний A* зважений і
+     * мінімуму не гарантує. Правило ОДНЕ для всіх перестрибувань у нерегулярній зоні, а не лише для нових: якби
+     * старі лишились дорогими (нахил 2.25), A* віддавав би перевагу новим коротшим замість одного довгого.
+     * Промені лише зі звичайними блоками рахуються як і раніше ({@link #SKIP_MALUS_PER_BLOCK}).
+     */
+    private static final float IRREGULAR_SKIP_COST_PER_BLOCK = 1.25F;
+
+    /**
      * Стрибок ВГОРУ додатково дорожчий за рівний (той самий дистанційний множник, зверху): вузьке вікно на
      * підйом (див. {@link GapJumpPhysics#naturalAirtime}) робить його ризикованішим, тож A* бере його лише
      * коли рівного шляху справді немає, а не як рівноцінну альтернативу. Вниз - не дорожчий (там більше
@@ -177,13 +198,9 @@ public class GapJumpNodeEvaluator extends ShapeAwareNodeEvaluator {
      * Результат {@link #platformEnd}: за платформою розриву нема (її продовжує підлога, на яку можна ступити, або стіна).
      */
     private static final byte BEHIND_NO_GAP = 0;
-    /**
-     * За платформою провалля - справжній розрив (так було завжди).
-     */
+    /** За платформою провалля - справжній розрив (так було завжди). */
     private static final byte BEHIND_VOID = 1;
-    /**
-     * За платформою є опора, але з приземлення на неї пішки не ступити (ряд відкритих люків) - нова поведінка.
-     */
+    /** За платформою є опора, але з приземлення на неї пішки не ступити (ряд відкритих люків) - нова поведінка. */
     private static final byte BEHIND_UNREACHABLE = 2;
 
     /** Чи є хоч одна пара точок (відрив у клітинці вузла, приземлення в цільовій), для якої політ проходить. */
@@ -316,6 +333,10 @@ public class GapJumpNodeEvaluator extends ShapeAwareNodeEvaluator {
         boolean voidBehind = false;  // після останньої придатної клітинки на промені була порожнеча
         // ...і з неї: за клітинкою є опора, але пішки не дійти (ряд відкритих люків) - випадок, якого раніше не було
         boolean unreachableBehind = false;
+        // Відстань і повна вартість (відстань + malus) ребра ПЕРШОГО приземлення на промені: від них відлічується
+        // вартість подальших перестрибувань у нерегулярній зоні (див. skipJumpNode)
+        double anchorDistance = 0.0;
+        double anchorCost = 0.0;
         for (int k = ray.kMin(); k <= ray.kMax(); k++) {
             int dx = ray.stepX() * k;
             int dz = ray.stepZ() * k;
@@ -330,8 +351,9 @@ public class GapJumpNodeEvaluator extends ShapeAwareNodeEvaluator {
             // (інакше це просто продовження тієї ж платформи, ногами й так дійдемо).
             if (!landed || voidBehind) {
                 // "Додатковий" кандидат існує ЛИШЕ завдяки новому правилу (опора є, але пішки не дійти). Його ребро
-                // йде в кінець списку сусідів (див. addExtraJumps) і не може витіснити звичайне. Усе, що було до
-                // цієї правки, обробляється рівно як раніше, у тому ж порядку й із тією ж вартістю.
+                // йде в кінець списку сусідів (див. addExtraJumps) і не може витіснити звичайне: усе, що було до цієї
+                // правки, лишається в списку на своїх місцях і в тому ж порядку (змінилась лише вартість
+                // перестрибувань у нерегулярній зоні - див. skipJumpNode).
                 boolean extra = landed && unreachableBehind;
                 if (involvesIrregular(ctx, ray, k, dx, dz, dy)) {
                     // Нестандартна форма (опора чи коридор): рішення приймає геометрія й симуляція польоту,
@@ -345,7 +367,15 @@ public class GapJumpNodeEvaluator extends ShapeAwareNodeEvaluator {
                             ? isCorridorClear(origin, ray.corridor()[k], dy) // немає точок відриву - як раніше
                             : exactJumpOk(ctx, from, dx, dz, dy);
                     if (ok) {
-                        Node jump = jumpNode(origin, dx, dz, dy, landed);
+                        // Перше приземлення - як завжди; подальші (перестрибування) в нерегулярній зоні - за єдиним
+                        // правилом skipJumpNode, і старі, і нові.
+                        Node jump = landed
+                                ? skipJumpNode(origin, dx, dz, dy, anchorDistance, anchorCost)
+                                : jumpNode(origin, dx, dz, dy, false);
+                        if (!landed) {
+                            anchorDistance = Math.sqrt((double) dx * dx + (double) dz * dz);
+                            anchorCost = anchorDistance + jump.costMalus;
+                        }
                         if (extra) {
                             ctx.addExtra(jump);
                         } else {
@@ -364,7 +394,12 @@ public class GapJumpNodeEvaluator extends ShapeAwareNodeEvaluator {
                     if (count >= nodes.length) {
                         return count;
                     }
-                    nodes[count++] = jumpNode(origin, dx, dz, dy, landed);
+                    Node jump = jumpNode(origin, dx, dz, dy, landed);
+                    nodes[count++] = jump;
+                    if (!landed) {
+                        anchorDistance = Math.sqrt((double) dx * dx + (double) dz * dz);
+                        anchorCost = anchorDistance + jump.costMalus;
+                    }
                     landed = true;
                 }
             }
@@ -465,16 +500,23 @@ public class GapJumpNodeEvaluator extends ShapeAwareNodeEvaluator {
     }
 
     /**
-     * Завжди на рівні {@code origin.y + dy} - викликається або з {@code dy=0} (перевірка "тут провалля" на
-     * рівні старту), або з поточним Δy променя (перевірка "проміжна платформа скінчилась" - на ЇЇ рівні).
+     * Вузол перестрибування в нерегулярній зоні (друге й далі приземлення на промені): повна вартість ребра =
+     * вартість першого приземлення + {@link #IRREGULAR_SKIP_COST_PER_BLOCK} за кожен блок відстані ПОНАД ним. Вартість
+     * зростає з відстанню повільніше, ніж вага евристики A*, тож пошук віддає перевагу найдовшому стрибку, який
+     * можливий. Стрибок ВГОРУ, як і раніше, дорожчий на {@link #UP_JUMP_EXTRA_MALUS_PER_BLOCK} за блок.
+     *
+     * @param firstDistance відстань першого приземлення на промені
+     * @param firstCost     повна вартість (відстань + malus) ребра до нього
      */
-    private byte classifyFront(BlockPos origin, int dx, int dz, int dy) {
-        BlockPos column = origin.offset(dx, dy, dz);
-        // Реальна форма (ShapeProbe/ShapeWalk), а не blocksMotion(): плита, килим, край люка — це опора.
-        if (isStandableCell(column.getX(), column.getY(), column.getZ())) {
-            return WALKABLE;
-        }
-        return isBodyZoneClear(column.getX(), column.getY(), column.getZ()) ? VOID : BLOCKED;
+    private Node skipJumpNode(BlockPos origin, int dx, int dz, int dy, double firstDistance, double firstCost) {
+        BlockPos landing = origin.offset(dx, dy, dz);
+        Node jumpNode = new Node(landing.getX(), landing.getY(), landing.getZ());
+        jumpNode.type = PathType.WALKABLE;
+        double distance = Math.sqrt((double) dx * dx + (double) dz * dz);
+        double ratePerBlock = IRREGULAR_SKIP_COST_PER_BLOCK + (dy > 0 ? UP_JUMP_EXTRA_MALUS_PER_BLOCK : 0.0F);
+        double cost = firstCost + (distance - firstDistance) * ratePerBlock;
+        jumpNode.costMalus = (float) Math.max(0.0, cost - distance);
+        return jumpNode;
     }
 
     /**
@@ -530,6 +572,48 @@ public class GapJumpNodeEvaluator extends ShapeAwareNodeEvaluator {
         }
         jumpNode.costMalus = (float) (distance * malusPerBlock);
         return jumpNode;
+    }
+
+    /**
+     * Завжди на рівні {@code origin.y + dy} - викликається або з {@code dy=0} (перевірка "тут провалля" на
+     * рівні старту), або з поточним Δy променя (перевірка "проміжна платформа скінчилась" - на ЇЇ рівні).
+     */
+    private byte classifyFront(BlockPos origin, int dx, int dz, int dy) {
+        BlockPos column = origin.offset(dx, dy, dz);
+        // Реальна форма (ShapeProbe/ShapeWalk), а не blocksMotion(): плита, килим, край люка — це опора.
+        if (isStandableCell(column.getX(), column.getY(), column.getZ())) {
+            return WALKABLE;
+        }
+        return isBodyZoneClear(column.getX(), column.getY(), column.getZ()) ? VOID : BLOCKED;
+    }
+
+    /**
+     * Що відомо про вузол на час одного {@link #getNeighbors}: нерегулярність колонки, придатні точки відриву
+     * й модель фізики (рахуються ліниво - на повних блоках вони взагалі не потрібні).
+     */
+    private static final class JumpCtx {
+        final Node node;
+        final BlockPos origin;
+        final boolean originIrregular;
+        Spot[] from;
+        ShapeJump.Model model;
+        /**
+         * Додаткові перестрибування (див. {@link #addExtraJumps}); створюється ліниво - здебільшого порожній.
+         */
+        List<Node> extra;
+
+        JumpCtx(Node node, BlockPos origin, boolean originIrregular) {
+            this.node = node;
+            this.origin = origin;
+            this.originIrregular = originIrregular;
+        }
+
+        void addExtra(Node jump) {
+            if (this.extra == null) {
+                this.extra = new ArrayList<>(4);
+            }
+            this.extra.add(jump);
+        }
     }
 
     /**
@@ -593,33 +677,6 @@ public class GapJumpNodeEvaluator extends ShapeAwareNodeEvaluator {
             nodes[count++] = jump;
         }
         return count;
-    }
-
-    /**
-     * Що відомо про вузол на час одного {@link #getNeighbors}: нерегулярність колонки, придатні точки відриву
-     * й модель фізики (рахуються ліниво - на повних блоках вони взагалі не потрібні).
-     */
-    private static final class JumpCtx {
-        final Node node;
-        final BlockPos origin;
-        final boolean originIrregular;
-        Spot[] from;
-        ShapeJump.Model model;
-        /** Додаткові перестрибування (див. {@link #addExtraJumps}); створюється ліниво - здебільшого порожній. */
-        List<Node> extra;
-
-        JumpCtx(Node node, BlockPos origin, boolean originIrregular) {
-            this.node = node;
-            this.origin = origin;
-            this.originIrregular = originIrregular;
-        }
-
-        void addExtra(Node jump) {
-            if (this.extra == null) {
-                this.extra = new ArrayList<>(4);
-            }
-            this.extra.add(jump);
-        }
     }
 
     /**
