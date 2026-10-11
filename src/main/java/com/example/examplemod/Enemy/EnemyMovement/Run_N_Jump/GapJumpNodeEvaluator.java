@@ -12,7 +12,9 @@ import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.pathfinder.Node;
 import net.minecraft.world.level.pathfinder.PathType;
 
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.List;
 
 /**
  * Розширює звичайний {@code WalkNodeEvaluator} додатковими "стрибковими" ребрами графа: якщо від
@@ -98,6 +100,16 @@ import java.util.Arrays;
  * ступити; раніше вона вважалась прохідною, крок не існував, а стрибок не генерувався - глухий кут. Тепер
  * така клітинка прохідною вважається лише якщо справді існує геометричний перехід ({@link #classifyStartFront}).
  * <p>
+ * <b>v6 — перестрибування через ряд нестандартних опор (відкриті люки).</b> Платформа на промені закінчується там,
+ * де з приземлення на наступну клітинку не можна ступити ПІШКИ ({@link #platformEnd}), а не там, де в наступній
+ * клітинці просто немає підлоги. Для повних блоків це одне й те саме, для відкритих люків - ні: опора кожного -
+ * смужка 0.19 на краю клітинки з 0.81 порожнього між смужками, а хітбокс моба 0.6, тож ряд люків - це послідовність
+ * ОКРЕМИХ опор, а не суцільна платформа. Раніше такий ряд вважався однією платформою: після першого приземлення
+ * на люк решта ряду і блок за ним відкидались як "продовження, ногами дійдемо", тож ▣▢▢▢▣ давав стрибок лише через
+ * один люк, а далі ще "гоп" на останній люк. Тепер це один стрибок через усі люки - так само, як ▣...▣ зі звичайних
+ * блоків (з дешевшою вартістю за блок, {@link #SKIP_MALUS_PER_BLOCK}). Такі "додаткові" ребра додаються в кінець
+ * списку сусідів і лише в залишок буфера ({@link #addExtraJumps}), тож старі ребра вони не витісняють.
+ * <p>
  * НЕ займає: стрибок між СУСІДНІМИ клітинками (відстань до 1.41), навіть якщо між опорами є розрив менший
  * за клітинку (дві свічки поруч): це за визначенням {@code GapJumpUtils.JUMP_SEGMENT_THRESHOLD} крок, а не стрибок.
  * <p>
@@ -160,6 +172,19 @@ public class GapJumpNodeEvaluator extends ShapeAwareNodeEvaluator {
     private static final byte VOID = 2;
     /** На рівні ніг стіна/блок (або світ недоступний): крізь неї стрибок не йде. */
     private static final byte BLOCKED = 3;
+
+    /**
+     * Результат {@link #platformEnd}: за платформою розриву нема (її продовжує підлога, на яку можна ступити, або стіна).
+     */
+    private static final byte BEHIND_NO_GAP = 0;
+    /**
+     * За платформою провалля - справжній розрив (так було завжди).
+     */
+    private static final byte BEHIND_VOID = 1;
+    /**
+     * За платформою є опора, але з приземлення на неї пішки не ступити (ряд відкритих люків) - нова поведінка.
+     */
+    private static final byte BEHIND_UNREACHABLE = 2;
 
     /** Чи є хоч одна пара точок (відрив у клітинці вузла, приземлення в цільовій), для якої політ проходить. */
     private boolean exactJumpOk(JumpCtx ctx, Spot[] from, int dx, int dz, int dy) {
@@ -247,6 +272,7 @@ public class GapJumpNodeEvaluator extends ShapeAwareNodeEvaluator {
             }
         }
         count = addHops(nodes, count, ctx, frontCache);
+        count = addExtraJumps(nodes, count, ctx);
         if (probe) {
             GraphProbe.logNodes(this.mob, "ПІСЛЯ стрибкових ребер і гопів (фінальний список для A*)", node, nodes, count);
             StringBuilder fronts = new StringBuilder("стан 'першої клітинки перед краєм' на рівні старту (VOID = вважається проваллям -> породжує стрибок; originIrregular=")
@@ -288,23 +314,30 @@ public class GapJumpNodeEvaluator extends ShapeAwareNodeEvaluator {
         //    проміжною платформою замість двох коротких (▣▢▣▢▣ - з 1-го блока одразу на 3-й).
         boolean landed = false;      // на цьому промені вже додано хоча б одне приземлення
         boolean voidBehind = false;  // після останньої придатної клітинки на промені була порожнеча
+        // ...і з неї: за клітинкою є опора, але пішки не дійти (ряд відкритих люків) - випадок, якого раніше не було
+        boolean unreachableBehind = false;
         for (int k = ray.kMin(); k <= ray.kMax(); k++) {
             int dx = ray.stepX() * k;
             int dz = ray.stepZ() * k;
             if (!isStandable(origin, dx, dz, dy)) {
                 if (landed) {
                     voidBehind = true; // (це може бути й стіна - коридор наступного кандидата її відсіче)
+                    unreachableBehind = false;
                 }
                 continue;
             }
             // Придатна клітинка. Кандидат - якщо це перше приземлення, або перед нею була порожнеча
             // (інакше це просто продовження тієї ж платформи, ногами й так дійдемо).
             if (!landed || voidBehind) {
+                // "Додатковий" кандидат існує ЛИШЕ завдяки новому правилу (опора є, але пішки не дійти). Його ребро
+                // йде в кінець списку сусідів (див. addExtraJumps) і не може витіснити звичайне. Усе, що було до
+                // цієї правки, обробляється рівно як раніше, у тому ж порядку й із тією ж вартістю.
+                boolean extra = landed && unreachableBehind;
                 if (involvesIrregular(ctx, ray, k, dx, dz, dy)) {
                     // Нестандартна форма (опора чи коридор): рішення приймає геометрія й симуляція польоту,
                     // а не грубі "центр клітинки" / "виступ вище кроку". Відхилений кандидат НЕ закриває
                     // промінь: далі по ньому може бути інша платформа.
-                    if (count >= nodes.length) {
+                    if (!extra && count >= nodes.length) {
                         return count;
                     }
                     Spot[] from = fromSpotsOf(ctx);
@@ -312,10 +345,15 @@ public class GapJumpNodeEvaluator extends ShapeAwareNodeEvaluator {
                             ? isCorridorClear(origin, ray.corridor()[k], dy) // немає точок відриву - як раніше
                             : exactJumpOk(ctx, from, dx, dz, dy);
                     if (ok) {
-                        nodes[count++] = jumpNode(origin, dx, dz, dy, landed);
+                        Node jump = jumpNode(origin, dx, dz, dy, landed);
+                        if (extra) {
+                            ctx.addExtra(jump);
+                        } else {
+                            nodes[count++] = jump;
+                        }
                         landed = true;
                     }
-                } else {
+                } else if (!extra) {
                     // Звичайні блоки - старий код. (Сюди не потрапляємо з нестандартної опори відриву: там
                     // involvesIrregular завжди true, а промені для звичайної опори якраз у межах дальності.)
                     // Коридор польоту (разом із проміжною платформою й проваллями між) має бути вільний.
@@ -330,10 +368,14 @@ public class GapJumpNodeEvaluator extends ShapeAwareNodeEvaluator {
                     landed = true;
                 }
             }
-            // Чи закінчується тут платформа (одразу за нею провалля, на ЇЇ Ж рівні +dy)? Тільки тоді наступну
-            // придатну клітинку на промені можна перестрибнути. Для променів із кроком >1 клітинки "клітинка
-            // за" береться тією самою відносною позицією, що й перша клітинка від краю (лінія періодична).
-            voidBehind = classifyFront(origin, dx + ray.frontX(), dz + ray.frontZ(), dy) == VOID;
+            // Чи закінчується тут платформа? Тільки тоді наступну придатну клітинку на промені можна перестрибнути.
+            // Для повних блоків - одразу за нею провалля (на ЇЇ Ж рівні +dy); для нерегулярних форм (ряд відкритих
+            // люків) - ще й коли з неї на наступну клітинку НЕ можна ступити пішки, хоч підлога там і є (див.
+            // platformEnd). Для променів із кроком >1 клітинки "клітинка за" береться тією самою відносною
+            // позицією, що й перша клітинка від краю (лінія періодична).
+            byte behind = platformEnd(ctx, ray, dx, dz, dy);
+            voidBehind = behind != BEHIND_NO_GAP;
+            unreachableBehind = behind == BEHIND_UNREACHABLE;
         }
         return count;
     }
@@ -423,21 +465,16 @@ public class GapJumpNodeEvaluator extends ShapeAwareNodeEvaluator {
     }
 
     /**
-     * Що відомо про вузол на час одного {@link #getNeighbors}: нерегулярність колонки, придатні точки відриву
-     * й модель фізики (рахуються ліниво - на повних блоках вони взагалі не потрібні).
+     * Завжди на рівні {@code origin.y + dy} - викликається або з {@code dy=0} (перевірка "тут провалля" на
+     * рівні старту), або з поточним Δy променя (перевірка "проміжна платформа скінчилась" - на ЇЇ рівні).
      */
-    private static final class JumpCtx {
-        final Node node;
-        final BlockPos origin;
-        final boolean originIrregular;
-        Spot[] from;
-        ShapeJump.Model model;
-
-        JumpCtx(Node node, BlockPos origin, boolean originIrregular) {
-            this.node = node;
-            this.origin = origin;
-            this.originIrregular = originIrregular;
+    private byte classifyFront(BlockPos origin, int dx, int dz, int dy) {
+        BlockPos column = origin.offset(dx, dy, dz);
+        // Реальна форма (ShapeProbe/ShapeWalk), а не blocksMotion(): плита, килим, край люка — це опора.
+        if (isStandableCell(column.getX(), column.getY(), column.getZ())) {
+            return WALKABLE;
         }
+        return isBodyZoneClear(column.getX(), column.getY(), column.getZ()) ? VOID : BLOCKED;
     }
 
     /**
@@ -496,16 +533,93 @@ public class GapJumpNodeEvaluator extends ShapeAwareNodeEvaluator {
     }
 
     /**
-     * Завжди на рівні {@code origin.y + dy} - викликається або з {@code dy=0} (перевірка "тут провалля" на
-     * рівні старту), або з поточним Δy променя (перевірка "проміжна платформа скінчилась" - на ЇЇ рівні).
+     * Чи закінчується платформа на клітинці {@code (dx, dz)} променя: чи можна наступну придатну клітинку на промені
+     * вважати ОКРЕМОЮ платформою, яку варто перестрибнути, а не продовженням тієї, на яку вже стрибаємо.
+     * <p>
+     * Для повних блоків "наступна клітинка має підлогу" означає "ногами дійдемо" ({@link #classifyFront}). Для
+     * нерегулярних форм - ні: відкриті люки - це смужки по 0.19 на краю клітинки з 0.81 порожнього між ними, а
+     * хітбокс моба лише 0.6, тож між сусідніми люками пішки не пройти, хоча підлога в кожній клітинці "є". Раніше
+     * через це ряд люків вважався однією суцільною платформою: після першого приземлення решта ряду й блок за ним
+     * відкидались, і ▣▢▢▢▣ давав стрибок через один люк та "гоп" на останній. Тому в нерегулярній зоні платформа
+     * триває лише якщо з точок стояння на приземленні на наступну клітинку справді можна пройти
+     * ({@link #anyMove}) - ті самі правила, за якими будуються звичайні кроки ({@code ShapeAwareNodeEvaluator}) і
+     * перша клітинка від краю ({@link #classifyStartFront}).
+     * <p>
+     * Для повних блоків і при вимкнених точних стрибках - рівно як і раніше ({@code classifyFront == VOID}).
+     *
+     * @return {@link #BEHIND_VOID} - за клітинкою провалля (як і раніше); {@link #BEHIND_UNREACHABLE} - за нею клітинка
+     * з опорою, на яку звідси не ступити (нове); {@link #BEHIND_NO_GAP} - платформа триває (або там стіна)
      */
-    private byte classifyFront(BlockPos origin, int dx, int dz, int dy) {
-        BlockPos column = origin.offset(dx, dy, dz);
-        // Реальна форма (ShapeProbe/ShapeWalk), а не blocksMotion(): плита, килим, край люка — це опора.
-        if (isStandableCell(column.getX(), column.getY(), column.getZ())) {
-            return WALKABLE;
+    private byte platformEnd(JumpCtx ctx, GapJumpRays.Ray ray, int dx, int dz, int dy) {
+        BlockPos origin = ctx.origin;
+        int nextDx = dx + ray.frontX();
+        int nextDz = dz + ray.frontZ();
+        byte next = classifyFront(origin, nextDx, nextDz, dy);
+        if (next == VOID) {
+            return BEHIND_VOID;
         }
-        return isBodyZoneClear(column.getX(), column.getY(), column.getZ()) ? VOID : BLOCKED;
+        if (next != WALKABLE || !exactReady()) {
+            return BEHIND_NO_GAP; // стіна або (без точної геометрії) підлога: як і раніше
+        }
+        int y = origin.getY() + dy;
+        int landX = origin.getX() + dx;
+        int landZ = origin.getZ() + dz;
+        int nextX = origin.getX() + nextDx;
+        int nextZ = origin.getZ() + nextDz;
+        if (!columnIsIrregular(landX, y, landZ) && !columnIsIrregular(nextX, y, nextZ)) {
+            return BEHIND_NO_GAP; // повні блоки: ногами дійдемо, як і було
+        }
+        Spot[] landing = geoSpotsAll(landX, y, landZ);
+        if (landing.length == 0) {
+            return BEHIND_NO_GAP;
+        }
+        return anyMove(landing, geoSpotsEarly(nextX, y, nextZ)) ? BEHIND_NO_GAP : BEHIND_UNREACHABLE;
+    }
+
+    /**
+     * Додаткові перестрибування ({@link #platformEnd} = {@link #BEHIND_UNREACHABLE}) додаються ПІСЛЯ всіх звичайних
+     * ребер і гопів і лише в залишок буфера сусідів. Буфер ванільного PathFinder - 32 вузли; щільна нерегулярна сцена
+     * (поле люків) може дати більше, і нове ребро не має витісняти звичайне: у гіршому випадку виходить те саме, що
+     * було до цієї правки.
+     */
+    private int addExtraJumps(Node[] nodes, int count, JumpCtx ctx) {
+        if (ctx.extra == null) {
+            return count;
+        }
+        for (Node jump : ctx.extra) {
+            if (count >= nodes.length) {
+                break;
+            }
+            nodes[count++] = jump;
+        }
+        return count;
+    }
+
+    /**
+     * Що відомо про вузол на час одного {@link #getNeighbors}: нерегулярність колонки, придатні точки відриву
+     * й модель фізики (рахуються ліниво - на повних блоках вони взагалі не потрібні).
+     */
+    private static final class JumpCtx {
+        final Node node;
+        final BlockPos origin;
+        final boolean originIrregular;
+        Spot[] from;
+        ShapeJump.Model model;
+        /** Додаткові перестрибування (див. {@link #addExtraJumps}); створюється ліниво - здебільшого порожній. */
+        List<Node> extra;
+
+        JumpCtx(Node node, BlockPos origin, boolean originIrregular) {
+            this.node = node;
+            this.origin = origin;
+            this.originIrregular = originIrregular;
+        }
+
+        void addExtra(Node jump) {
+            if (this.extra == null) {
+                this.extra = new ArrayList<>(4);
+            }
+            this.extra.add(jump);
+        }
     }
 
     /**
