@@ -17,6 +17,11 @@ package com.example.examplemod.Enemy.EnemyMovement.Run_N_Jump;
  *   <li>Політ на рівному місці триває N = 12 тіків. Y-колізія приземлення на N-му тіку рахується
  *       ПЕРШОЮ і по позиції, яка була ПІСЛЯ (N-1)-го тіку — тому для приземлення важлива саме вона.</li>
  * </ul>
+ * <b>v14 (варіант B):</b> керований політ ({@link #flightCommand}) більше не використовується виконавцем. Моб відривається
+ * і летить за ванільною фізикою, а модель із цього файлу (розділ «v14» унизу: {@link #forecastFlight}, {@link #predict},
+ * {@link #chooseRunPlan}, {@link #airAccel}) лише ПЕРЕДБАЧАЄ політ - щоб обрати швидкість розбігу й граничну дальність
+ * для графа шляхів. Старі функції польоту лишені як опис і для звірки.
+ * <p>
  * <b>v9:</b> ціль більше не покладається на цю балістичну модель для ВІДРИВУ (див. розділ "ПРОФІЛЬ ПОЛЬОТУ"
  * нижче: горизонтальний крок щотіку = відстань / тіків до приземлення). {@link #launchSpeedForDistance},
  * {@link #flightDistance}, {@link #remainingAirFactor} та константи {@code FLIGHT_FACTOR_*} лишені як
@@ -627,6 +632,443 @@ final class GapJumpPhysics {
             }
         }
         return 0.0; // недосяжно
+    }
+
+    // =====================================================================================
+    // v14 (ВАРІАНТ B): ПРИРОДНИЙ СТРИБОК «ЯК У ГРАВЦЯ»
+    // =====================================================================================
+    // Раніше (v9-v13) ціль щотіку ПЕРЕЗАПИСУВАЛА швидкість моба ({@link #flightCommand}) і так вела його по дузі
+    // до центру приземлення. Тепер усе, що відбувається з мобом у стрибку, робить ванільна фізика:
+    //   * розбіг  - звичайний MoveControl (швидкість = уставка * атрибут); ціль лише ОБИРАЄ уставку;
+    //   * відрив  - звичайне jumpControl.jump() зі спринтом: vy = 0.42 * jumpFactor, плюс +0.2 уздовж погляду;
+    //   * політ   - ванільний travel(): гравітація й опір 0.91 за тік. Керування в повітрі - лише те, що має
+    //               гравець, який тримає W/A/S/D при спринті: прискорення 0.026 * 0.98 бл/тік^2, не більше.
+    // Усі функції нижче - чиста математика (без Minecraft-типів), 1D уздовж осі стрибка; бічну складову
+    // й саме прискорення в повітрі рахує {@link #airAccel}.
+
+    /**
+     * Поштовх ванільного {@code LivingEntity.jumpFromGround()} при спринті: +0.2 бл/тік уздовж погляду.
+     */
+    static final double SPRINT_JUMP_BOOST = 0.2;
+
+    /**
+     * Повітряне прискорення спринтуючого гравця: {@code Player.getFlyingSpeed()} = 0.026 при спринті, вхід
+     * уперед = 1.0 * 0.98. Ванільний моб у повітрі має близько 0.008 (0.02 * вхід ~0.4): втричі менше.
+     */
+    static final double PLAYER_AIR_ACCEL = 0.026 * 0.98;
+
+    /**
+     * Скільки від сили повітряного керування гравця дозволено мобу: {@code 1.0} - як у гравця,
+     * {@code 0.0} - суто балістичний політ без жодного керування (тоді зомбі летить рівно так, як вийшов із розбігу).
+     */
+    static final double AIR_CONTROL_SCALE = 1.0;
+    static final double MAX_AIR_ACCEL = PLAYER_AIR_ACCEL * AIR_CONTROL_SCALE;
+
+    /**
+     * «Номінальний тиск на W» при розрахунку розбігу: частка {@link #MAX_AIR_ACCEL}, на яку цілимось, щоб у
+     * польоті лишався запас корекції в обидва боки (і додати, і зменшити).
+     */
+    static final double NOMINAL_AIR_FRACTION = 0.5;
+
+    /**
+     * Запас дальності ПЛАНУВАННЯ (блоки польоту) - щоб граф не пропонував стрибки на самій межі можливого:
+     * відрив трапляється трохи раніше за передню межу (правило {@link #shouldTakeOff} має запас на прискорення),
+     * а розбіг не завжди встигає вийти на повну швидкість.
+     */
+    static final double PLAN_RANGE_MARGIN = 0.30;
+
+    /**
+     * Далі за стільки блоків до краю моб просто біжить на повній швидкості й зі спринтом - регулювання лише поблизу.
+     */
+    static final double RUN_REGULATION_DISTANCE = 2.0;
+
+    /**
+     * Найнижча уставка розбігу при регулюванні: частка від повної. 0.5 для зомбі - це його ванільна швидкість ходьби
+     * (~2.3 бл/с): повільніше моб уже не «підповзає» до краю, а надто короткі стрибки дає не повільність, а відпущений
+     * спринт (див. {@link #chooseRunPlan}).
+     */
+    static final double MIN_RUN_SETPOINT_FRACTION = 0.5;
+
+    /**
+     * Гістерезис вибору «зі спринтом / без»: щоб на межі моб не перемикав спринт щотіку, відпускаємо спринт лише коли
+     * без нього дальності вистачає з запасом {@code RELEASE_SPRINT_MARGIN}, а повертаємо - коли не вистачає понад
+     * {@code KEEP_NO_SPRINT_SHORTFALL} (решту підтягне повітряне керування).
+     */
+    static final double RELEASE_SPRINT_MARGIN = 0.25;
+    static final double KEEP_NO_SPRINT_SHORTFALL = 0.15;
+
+    /**
+     * Ванільне {@code LivingEntity.aiStep}: {@code zza *= 0.98}.
+     */
+    static final double INPUT_SCALE = 0.98;
+
+    /**
+     * Ванільне {@code LivingEntity.getFrictionInfluencedSpeed}: на землі швидкість * 0.216 / тертя^3.
+     */
+    static final double GROUND_SPEED_CONSTANT = 0.21600002;
+
+    /**
+     * Скільки тіків уперед рахує прогноз розбігу (запобіжник від «моб ніколи не дійде до краю»).
+     */
+    static final int MAX_PREDICT_TICKS = 80;
+    static final Takeoff ORDINARY_TAKEOFF = new Takeoff(DEFAULT_BLOCK_FRICTION, 1.0, 1.0);
+    /**
+     * Допуск у {@link #reachableWithoutJump}: політ вважається достатнім, якщо коротший за потрібний не більше ніж на стільки.
+     */
+    static final double NO_JUMP_TOLERANCE = 0.25;
+    private static final double[] AIR_CARRY = new double[61];
+    private static final double[] AIR_PUSH = new double[61];
+
+    static {
+        double pow = 1.0;
+        double carry = 0.0;
+        double push = 0.0;
+        for (int n = 1; n <= 60; n++) {
+            carry += pow;                                   // 0.91^(n-1)
+            pow *= AIR_FRICTION;                            // 0.91^n
+            push += (1.0 - pow) / (1.0 - AIR_FRICTION);
+            AIR_CARRY[n] = carry;
+            AIR_PUSH[n] = push;
+        }
+    }
+
+    /**
+     * Наземне прискорення моба за тік при бігу з уставкою {@code setpoint}. У ванілі {@code MoveControl} ставить
+     * {@code speed = множник * атрибут}, а {@code Mob.setSpeed} кладе те саме число ще й у вхід {@code zza}, тож
+     * прискорення = {@code speed * 0.216/тертя^3 * (speed * 0.98)} - квадратичне за уставкою. Для звичайного блока
+     * (тертя 0.6) множник 0.216/тертя^3 = 1.
+     */
+    static double groundAccel(double setpoint, double friction) {
+        double f = clamp(friction, MIN_BLOCK_FRICTION, MAX_BLOCK_FRICTION);
+        double input = Math.min(1.0, Math.max(0.0, setpoint) * INPUT_SCALE);
+        return Math.max(0.0, setpoint) * (GROUND_SPEED_CONSTANT / (f * f * f)) * input;
+    }
+
+    /**
+     * Усталений зсув за тік при бігу з уставкою {@code setpoint} по блоку {@code t}: {@code a / (1 - гальмо * F)}.
+     */
+    static double steadyStep(double setpoint, Takeoff t) {
+        return groundAccel(setpoint, t.friction()) / Math.max(1.0 - t.retention(), MIN_RUN_DENOMINATOR);
+    }
+
+    /**
+     * deltaMovement (вздовж осі) на початку тіку при усталеному бігу: {@code зсув * тертя}.
+     */
+    static double steadyVelocity(double setpoint, Takeoff t) {
+        return steadyStep(setpoint, t) * t.retention();
+    }
+
+    /**
+     * Ванільний політ тік за тіком, починаючи з тіку відриву.
+     * <ul>
+     *   <li>тік 1: {@code jumpFromGround()} дає поштовх спринту ({@code boost}), а {@code travel()} ще вважає, що моб
+     *       на землі, тож додає наземне прискорення {@code groundAccel}, і тертя після зсуву - НАЗЕМНЕ;</li>
+     *   <li>тіки 2..N: прискорення в повітрі {@code airAccel} (рівне на весь політ), зсув, опір 0.91.</li>
+     * </ul>
+     *
+     * @param v0          deltaMovement уздовж осі на початку тіку відриву (після тертя минулого тіку)
+     * @param groundAccel наземне прискорення цього тіку ({@link #groundAccel})
+     * @param boost       чи діє поштовх спринту (ігнорується, якщо {@code noJump})
+     * @param noJump      моб просто збігає з краю, без вертикального імпульсу
+     * @return політ, або {@code null}, якщо висоти {@code deltaY} із цього стрибка не досягти
+     */
+    static Forecast forecastFlight(double v0, double groundAccel, Takeoff t, boolean boost, double airAccel,
+                                   double deltaY, boolean noJump) {
+        int n = naturalAirtime(deltaY, noJump ? 0.0 : t.jumpFactor());
+        if (n <= 0) {
+            return null;
+        }
+        double step = v0 + (boost && !noJump ? SPRINT_JUMP_BOOST : 0.0) + groundAccel;
+        double x = step;
+        double v = step * t.retention();
+        double before = 0.0;
+        for (int tick = 2; tick <= n; tick++) {
+            before = x;
+            v += airAccel;
+            x += v;
+            v *= AIR_FRICTION;
+        }
+        return new Forecast(x, before, n, v);
+    }
+
+    /**
+     * Найбільша дальність польоту (від позиції на початку тіку відриву) для моба, що біжить по блоку {@code t} на
+     * повній швидкості й тримає «W» у повітрі на повну силу: це стеля для ПЛАНУВАННЯ графа шляхів.
+     */
+    static double maxReach(double setpointMax, Takeoff t, double deltaY, boolean sprint) {
+        double a = groundAccel(setpointMax, t.friction());
+        Forecast f = forecastFlight(steadyVelocity(setpointMax, t), a, t, sprint, MAX_AIR_ACCEL, deltaY, false);
+        return f == null ? 0.0 : f.reach();
+    }
+
+    /**
+     * Скільки блоків розриву (як {@code maxGap} у {@link GapJumpRays}) вважати прохідними для цього моба, цього блока
+     * відриву й такого Δy. Рахується з фізики ({@link #maxReach} мінус {@link #PLAN_RANGE_MARGIN}), а не з калібрувального
+     * коефіцієнта. {@code 0} - стрибок (чи така висота) недосяжні.
+     */
+    static int maxGapBlocks(double setpointMax, Takeoff t, double deltaY) {
+        double reach = maxReach(setpointMax, t, deltaY, true);
+        if (reach <= 0.0) {
+            return 0;
+        }
+        double allowed = reach - PLAN_RANGE_MARGIN;
+        return Math.max(0, (int) Math.floor(allowed - EDGE_FRONT - GapJumpRays.FLIGHT_TOLERANCE + 1.0E-9));
+    }
+
+    /**
+     * Зсув за тік відриву ("крок 1"), після якого природний політ із постійним прискоренням {@code airAccel} у повітрі
+     * долітає рівно на {@code dist}. Із виразу {@code reach = step * (1 + F * S1(m)) + airAccel * S2(m)}, де {@code m} - тіків
+     * у повітрі після тіку відриву, {@code F} - наземне тертя тіку відриву.
+     */
+    static double takeoffStepForReach(double dist, Takeoff t, int airTicks, double airAccel) {
+        int m = Math.max(0, Math.min(airTicks - 1, 60));
+        double carry = m == 0 ? 0.0 : AIR_CARRY[m];
+        double push = m == 0 ? 0.0 : AIR_PUSH[m];
+        return (dist - airAccel * push) / (1.0 + t.retention() * carry);
+    }
+
+    /**
+     * Горизонтальна швидкість (deltaMovement) у повітрі, після якої політ ще на {@code ticks} тіків із постійним
+     * прискоренням {@code airAccel} долітає на {@code dist}. Потрібна лише рятувальному стрибку.
+     */
+    static double airSpeedForReach(double dist, int ticks, double airAccel) {
+        int n = Math.max(1, Math.min(ticks, 60));
+        return (dist - airAccel * AIR_PUSH[n]) / AIR_CARRY[n];
+    }
+
+    /**
+     * Чи долетить моб до приземлення (на {@code flight} блоків від краю, нижче на {@code -deltaY}) просто збігши з краю, без
+     * стрибка, - так, як гравець просто збігає з виступу, а не підстрибує. Лише для спуску ({@code deltaY < 0}): без
+     * стрибка вгору чи рівно нікуди не долетіти. Рахується на повній швидкості бігу з номінальним тиском на W.
+     */
+    static boolean reachableWithoutJump(Takeoff t, double setpointMax, double deltaY, double flight) {
+        if (!(deltaY < 0.0)) {
+            return false;
+        }
+        double a = groundAccel(setpointMax, t.friction());
+        Forecast f = forecastFlight(steadyVelocity(setpointMax, t), a, t, false,
+                MAX_AIR_ACCEL * NOMINAL_AIR_FRACTION, deltaY, true);
+        return f != null && f.reach() + NO_JUMP_TOLERANCE >= flight;
+    }
+
+    /**
+     * Межа, де хітбокс повного блока сходить з опори вздовж стрибка (для повного блока: {@code (0.5 + hw) / max(|dir|)}).
+     */
+    static double plainLoseAlong(double dirX, double dirZ, double halfWidth) {
+        double k = Math.max(Math.abs(dirX), Math.abs(dirZ));
+        return (EDGE_FRONT + halfWidth) / (k < 1.0E-6 ? 1.0 : k);
+    }
+
+    /**
+     * Прогноз ВСЬОГО стрибка з поточного стану: моб на {@code along} уздовж осі, його deltaMovement уздовж осі = {@code v};
+     * з цього тіку він біжить із уставкою {@code setpoint}, відривається за ТИМ САМИМ правилом, що й виконавець
+     * ({@link #shouldTakeOffAlong}), а в повітрі тримає постійне прискорення {@code airAccel}.
+     *
+     * @return прогноз; {@code null}, якщо моб не відірветься за {@link #MAX_PREDICT_TICKS} (не дійде до краю) або
+     * висота недосяжна
+     */
+    static Prediction predict(double along, double v, double setpoint, Takeoff t, Geometry g, double airAccel) {
+        double a = groundAccel(setpoint, t.friction());
+        double ret = t.retention();
+        double startSpeed = v;
+        for (int tick = 0; tick < MAX_PREDICT_TICKS; tick++) {
+            boolean takeoff = g.noJump()
+                    // збіг без стрибка: «відрив» - це тік, у якому центр моба перейде межу, де хітбокс сходить з опори
+                    ? along + v + a >= g.lose()
+                    : shouldTakeOffAlong(along, 0.0, 1.0, 0.0, v, a, g.front(), g.lose());
+            if (takeoff) {
+                Forecast f = forecastFlight(v, a, t, g.boost(), airAccel, g.deltaY(), g.noJump());
+                if (f == null) {
+                    return null;
+                }
+                return new Prediction(along + f.reach(), along, tick, startSpeed);
+            }
+            double step = v + a;
+            along += step;
+            v = step * ret;
+        }
+        return null;
+    }
+
+    /**
+     * Те саме, що {@link #predict}, але лише точка приземлення; {@code -Infinity}, якщо прогнозу нема (щоб рахувати як «замало»).
+     */
+    static double predictTouchdown(double along, double v, double setpoint, Takeoff t, Geometry g, double airAccel) {
+        Prediction p = predict(along, v, setpoint, t, g, airAccel);
+        return p == null ? Double.NEGATIVE_INFINITY : p.touchdown();
+    }
+
+    /**
+     * ГОЛОВНЕ РЕГУЛЮВАННЯ БЕЗ «ВЕДЕННЯ»: що робить моб на цьому тіку розбігу, щоб природний політ (ванільний відрив +
+     * номінальний тиск на W у повітрі) приземлив його в центр. Це рівно ті два «важелі», що є в гравця:
+     * <ul>
+     *   <li><b>спринт</b>: зі спринтом ванільний стрибок дає поштовх +0.2 (це ~1 блок дальності), без нього - ні. Для
+     *       короткого стрибка спринт відпускається - як гравець, що відпускає його перед маленьким розривом;</li>
+     *   <li><b>швидкість</b>: уставка MoveControl від ходьби ({@link #MIN_RUN_SETPOINT_FRACTION}) до повної.</li>
+     * </ul>
+     * Нічого, окрім цих двох, не змінюється: швидкість ніхто не виставляє. Прогноз монотонний за уставкою (швидше - далі),
+     * тож уставку шукаємо діленням навпіл. Далеко від краю ({@link #RUN_REGULATION_DISTANCE}) - повна швидкість і спринт.
+     * Якщо навіть повна швидкість зі спринтом не дотягує - повна (докручує повітряне керування в межах сили гравця); якщо
+     * навіть найнижча перелітає - найнижча (повітряне керування підгальмує).
+     *
+     * @param g             геометрія стрибка; поле {@code boost} тут ігнорується (пробуються обидва варіанти)
+     * @param sMax          повна уставка бігу ({@code GapJumpUtils.runSpeedSetpoint})
+     * @param nominal       «номінальний тиск на W» у повітрі, на який цілимось
+     * @param previousBoost чи був спринт на минулому тіку (для гістерезису)
+     */
+    static RunPlan chooseRunPlan(double along, double v, Takeoff t, Geometry g, double sMax, double nominal,
+                                 boolean previousBoost) {
+        if (!(sMax > 0.0) || g.front() - along > RUN_REGULATION_DISTANCE) {
+            return new RunPlan(sMax, true);
+        }
+        double sMin = sMax * MIN_RUN_SETPOINT_FRACTION;
+        double target = g.length();
+        if (g.noJump()) {
+            // збіг без стрибка: поштовху нема, регулюємо лише швидкість
+            return new RunPlan(solveSetpoint(along, v, t, g, sMin, sMax, nominal, target), true);
+        }
+        Geometry plain = new Geometry(g.front(), g.lose(), g.length(), g.deltaY(), false, false);
+        Geometry boosted = new Geometry(g.front(), g.lose(), g.length(), g.deltaY(), true, false);
+        double noSprintAtMax = predictTouchdown(along, v, sMax, t, plain, nominal) - target;
+        boolean releaseSprint = previousBoost ? noSprintAtMax >= RELEASE_SPRINT_MARGIN
+                : noSprintAtMax >= -KEEP_NO_SPRINT_SHORTFALL;
+        if (releaseSprint) {
+            return new RunPlan(solveSetpoint(along, v, t, plain, sMin, sMax, nominal, target), false);
+        }
+        return new RunPlan(solveSetpoint(along, v, t, boosted, sMin, sMax, nominal, target), true);
+    }
+
+    /**
+     * Уставка зі {@code [sMin, sMax]}, при якій прогноз приземлення найближчий до {@code target} (див. {@link #chooseRunPlan}).
+     */
+    private static double solveSetpoint(double along, double v, Takeoff t, Geometry g, double sMin, double sMax,
+                                        double nominal, double target) {
+        double eMax = predictTouchdown(along, v, sMax, t, g, nominal) - target;
+        if (!(eMax > 0.0)) {
+            return sMax;
+        }
+        double eMin = predictTouchdown(along, v, sMin, t, g, nominal) - target;
+        if (eMin >= 0.0) {
+            return sMin;
+        }
+        double lo = sMin;
+        double hi = sMax;
+        double eLo = eMin;
+        double eHi = eMax;
+        for (int i = 0; i < 20; i++) {
+            double mid = 0.5 * (lo + hi);
+            double e = predictTouchdown(along, v, mid, t, g, nominal) - target;
+            if (e < 0.0) {
+                lo = mid;
+                eLo = e;
+            } else {
+                hi = mid;
+                eHi = e;
+            }
+        }
+        return -eLo <= eHi ? lo : hi; // обираємо бік із меншою помилкою (на розриві прогноз стрибає на один тік)
+    }
+
+    /**
+     * Прискорення, яке моб додає ЦЬОГО тіку в повітрі (до того, як ванільний {@code travel()} зсуне його й помножить швидкість
+     * на 0.91). Це рівно те саме, що робить {@code moveRelative} гравця, який тримає клавішу: просто додає до deltaMovement.
+     * Прискорення - постійне до кінця польоту й вибране так, щоб приземлитись у ціль; його довжина обмежена
+     * {@code maxAccel} (сила гравця), тож велику помилку воно не виправить - лише підправить малу.
+     * <p>
+     * Виведення: якщо зараз швидкість {@code V}, лишилось {@code n} тіків (разом із цим), а прискорення {@code A} постійне, то
+     * зсув до торкання = {@code V * S1(n) + A * S2(n)}, де {@code S1 = sum 0.91^(t-1)}, {@code S2 = sum (1 - 0.91^t)/0.09}.
+     *
+     * @param ticks скільки тіків лишилось до торкання, включно з цим ({@link #remainingAirTicks})
+     */
+    static AirAccel airAccel(double posX, double posZ, double velX, double velZ, int ticks,
+                             double targetX, double targetZ, double maxAccel) {
+        if (ticks <= 0 || !(maxAccel > 0.0)) {
+            return AirAccel.NONE;
+        }
+        int n = Math.min(ticks, 60);
+        double needX = targetX - posX - velX * AIR_CARRY[n];
+        double needZ = targetZ - posZ - velZ * AIR_CARRY[n];
+        double ax = needX / AIR_PUSH[n];
+        double az = needZ / AIR_PUSH[n];
+        double len = Math.sqrt(ax * ax + az * az);
+        if (len > maxAccel) {
+            double k = maxAccel / len;
+            ax *= k;
+            az *= k;
+        }
+        return new AirAccel(ax, az);
+    }
+
+    /**
+     * Властивості опори, з якої моб відривається: тертя блока, гальмо ходьби ({@code speedFactor}, для слайма ще
+     * {@code x0.4}) і {@code jumpFactor}. Для звичайного блока - {@link #ORDINARY_TAKEOFF}.
+     */
+    record Takeoff(double friction, double slowdown, double jumpFactor) {
+
+        /**
+         * Те саме, але з захистом від сміття з чужих модів (0, NaN, >1 тощо).
+         */
+        static Takeoff of(double friction, double slowdown, double jumpFactor) {
+            double f = Double.isFinite(friction) ? clamp(friction, MIN_BLOCK_FRICTION, MAX_BLOCK_FRICTION) : DEFAULT_BLOCK_FRICTION;
+            double s = Double.isFinite(slowdown) ? clamp(slowdown, 0.0, MAX_RUN_SLOWDOWN) : 1.0;
+            double j = Double.isFinite(jumpFactor) ? clamp(jumpFactor, 0.0, MAX_JUMP_FACTOR) : 1.0;
+            return new Takeoff(f, s, j);
+        }
+
+        /**
+         * Яка частка горизонтальної швидкості лишається після ОДНОГО наземного тіку: тертя * 0.91 * гальмо.
+         */
+        double retention() {
+            return this.friction * AIR_FRICTION * this.slowdown;
+        }
+    }
+
+    // ---- керування в повітрі: що може гравець (W/A/S/D + поворот), і не більше ----
+
+    /**
+     * Політ від початку тіку відриву.
+     *
+     * @param reach           горизонтальний зсув від позиції на початку тіку відриву до торкання землі (включно з
+     *                        останнім кроком)
+     * @param reachBeforeLast те саме, але до останнього кроку: саме ця позиція вирішує, чи хітбокс уже над опорою
+     *                        приземлення (ванільна Y-колізія рахується першою)
+     * @param ticks           тіків польоту (разом із тіком відриву)
+     * @param endSpeed        deltaMovement уздовж осі після торкання (тертя 0.91 уже застосоване)
+     */
+    record Forecast(double reach, double reachBeforeLast, int ticks, double endSpeed) {
+    }
+
+    /**
+     * Геометрія стрибка вздовж його осі (початок відліку - точка відриву, тобто центр блока-краю або точка стояння
+     * на нестандартній опорі).
+     *
+     * @param front  {@code along}, із якого відриваємось (центр моба над краєм поверхні)
+     * @param lose   {@code along}, де хітбокс повністю сходить з опори
+     * @param length відстань від точки відриву до центру приземлення (сюди цілимось)
+     * @param deltaY висота приземлення мінус висота відриву
+     * @param boost  чи увімкнений спринт (поштовх +0.2 у момент відриву)
+     * @param noJump моб не стрибає, а збігає з краю
+     */
+    record Geometry(double front, double lose, double length, double deltaY, boolean boost, boolean noJump) {
+    }
+
+    /**
+     * Результат {@link #predict}: де приземлиться моб і де він при цьому відірвався.
+     */
+    record Prediction(double touchdown, double takeoffAlong, int groundTicks, double startSpeed) {
+    }
+
+    /**
+     * Рішення про розбіг на цей тік: уставка швидкості для MoveControl і чи тримати спринт (поштовх +0.2 при відриві).
+     */
+    record RunPlan(double setpoint, boolean boost) {
+    }
+
+    /**
+     * Прискорення в повітрі на цей тік.
+     */
+    record AirAccel(double ax, double az) {
+        static final AirAccel NONE = new AirAccel(0.0, 0.0);
     }
 
     private static double clamp(double value, double min, double max) {

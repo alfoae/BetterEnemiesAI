@@ -256,6 +256,7 @@ public class GapJumpNodeEvaluator extends ShapeAwareNodeEvaluator {
             return count;
         }
         var level = this.mob.level();
+        GapJumpPhysics.Takeoff takeoff = GapJumpUtils.takeoffOf(floor, level, floorPos, this.mob);
 
         // Точна геометрія (ShapeJump) - лише де є нерегулярна форма; на повних блоках лишається старий код.
         JumpCtx ctx = new JumpCtx(node, origin, exactReady() && columnIsIrregular(node.x, node.y, node.z));
@@ -269,8 +270,9 @@ public class GapJumpNodeEvaluator extends ShapeAwareNodeEvaluator {
         // міг приземлитись саме на НАЙБЛИЖЧУ доступну сходинку, а не тільки на найглибшу з можливих (наприклад,
         // сходи в 3 рівні - Δy=-1 на першу, Δy=-2 на другу, Δy=-3 на третю, кожна свій кандидат).
         for (int dy = -GapJumpPhysics.JUMP_DOWN_LIMIT_BLOCKS; dy <= GapJumpPhysics.JUMP_UP_LIMIT_BLOCKS; dy++) {
-            double factor = GapJumpUtils.blockRangeFactor(floor, level, floorPos, this.mob, dy);
-            int legacyGap = GapJumpUtils.estimateMaxJumpRangeBlocks(this.mob, factor);
+            // v14: дальність - з балістичної моделі (розбіг + спринт-стрибок + повітряне керування як у гравця), для блока
+            // відриву й цього Δy; 0 - недосяжно (напр. вгору з меду).
+            int legacyGap = GapJumpUtils.maxJumpGap(this.mob, takeoff, dy);
             int scanGap = legacyGap;
             if (ctx.originIrregular) {
                 // З нестандартної опори (плита 0.5, люк...) реальний Δy інший, ніж ціла різниця рівнів: для
@@ -535,8 +537,8 @@ public class GapJumpNodeEvaluator extends ShapeAwareNodeEvaluator {
             }
             GapJumpUtils.TakeoffProps p = GapJumpUtils.takeoffProps(
                     this.mob.level(), this.mob, from[0].x(), from[0].surfaceY(), from[0].z());
-            double factor = GapJumpPhysics.blockRangeFactor(p.friction(), p.slowdown(), p.jumpFactor(), dy - maxFrac);
-            return GapJumpUtils.estimateMaxJumpRangeBlocks(this.mob, factor);
+            return GapJumpUtils.maxJumpGap(this.mob,
+                    GapJumpPhysics.Takeoff.of(p.friction(), p.slowdown(), p.jumpFactor()), dy - maxFrac);
         } catch (RuntimeException e) {
             return 0;
         }

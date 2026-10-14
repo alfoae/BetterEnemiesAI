@@ -179,9 +179,8 @@ public final class ShapeJump {
         double x = plan.takeoffX() + plan.dirX() * t0;
         double z = plan.takeoffZ() + plan.dirZ() * t0;
         double y = plan.takeoffY();
-        double maxStep = plan.maxStep();
-        double segLen = plan.length();
-        double planCap = segLen + PLAN_EXTRA_BLOCKS;
+        GapJumpPhysics.Takeoff tk = ph.takeoff();
+        double nominalAir = GapJumpPhysics.MAX_AIR_ACCEL * GapJumpPhysics.NOMINAL_AIR_FRACTION;
 
         // Точка відриву має бути ВІЛЬНОЮ: якщо хітбокс на ній уже всередині чогось (стіна впритул за краєм
         // опори), моб до неї фізично не дійде - ванільна колізія зупинить його раніше. Ванільний рух такі
@@ -191,10 +190,11 @@ public final class ShapeJump {
             return Sim.fail("точка відриву всередині блока (стіна впритул за краєм)", 0, x, y, z);
         }
 
-        double vx = 0.0;
+        double vx = 0.0;   // зсув за ЦЕЙ тік
         double vy = 0.0;
         double vz = 0.0;
         boolean launchPending = true;   // перший тік (і всі, поки моб ще на землі) - команда відриву
+        boolean launchTick = false;     // цей тік - тік відриву: тертя після зсуву наземне, а не повітряне
         for (int tick = 1; tick <= MAX_SIM_TICKS; tick++) {
             if (launchPending) {
                 double ddx = plan.landX() - x;
@@ -204,18 +204,24 @@ public final class ShapeJump {
                     return Sim.fail("вироджений політ", tick, x, y, z);
                 }
                 double deltaY = GapJumpPhysics.quantizeDeltaY(plan.landY() - y);
-                boolean noJump = deltaY < 0.0
-                        && ph.runSpeed() * GapJumpPhysics.flightSum(deltaY, ph.retention(), 0.0) >= dist;
+                boolean noJump = GapJumpPhysics.reachableWithoutJump(tk, ph.runSpeed(), deltaY, dist);
                 int airtime = GapJumpPhysics.naturalAirtime(deltaY, noJump ? 0.0 : ph.jumpFactor());
                 if (airtime <= 0) {
                     return Sim.fail("висота недосяжна (Δy=" + deltaY + ")", tick, x, y, z);
                 }
-                double perTick = Math.min(dist, planCap) / airtime;
-                vx = ddx / dist * perTick;
-                vz = ddz / dist * perTick;
+                // Швидкість відриву: така, щоб природний політ із номінальним тиском на W приземлив у ціль, але не вища за ту,
+                // що моб набирає розбігом на повній швидкості (плюс спринт-поштовх). Далі до цілі доводить лише повітряне
+                // керування в межах сили гравця: якщо цього мало, симуляція нижче сама покаже, що моб не долетів.
+                double step = GapJumpPhysics.takeoffStepForReach(dist, tk, airtime, nominalAir);
+                double stepMax = GapJumpPhysics.steadyStep(ph.runSpeed(), tk)
+                        + (noJump ? 0.0 : GapJumpPhysics.SPRINT_JUMP_BOOST);
+                step = Math.max(0.0, Math.min(step, stepMax));
+                vx = ddx / dist * step;
+                vz = ddz / dist * step;
                 vy = noJump ? (-GapJumpPhysics.GRAVITY_PER_TICK * GapJumpPhysics.VERTICAL_DRAG_PER_TICK)
                         : GapJumpPhysics.JUMP_VERTICAL_VELOCITY * ph.jumpFactor();
                 launchPending = false;
+                launchTick = true;
             }
 
             double[] box = {x - hw, y, z - hw, x + hw, y + h, z + hw};
@@ -274,15 +280,22 @@ public final class ShapeJump {
                 return Sim.fail("вдарився об стіну/виступ", tick, x, y, z);
             }
 
+            // Кінець тіку (ванільний travel): швидкість множиться на тертя - наземне на тіку відриву, далі 0.91.
+            double friction = launchTick ? tk.retention() : GapJumpPhysics.AIR_FRICTION;
+            launchTick = false;
+            double hx = vx * friction;
+            double hz = vz * friction;
             double storedVy = (vy - GapJumpPhysics.GRAVITY_PER_TICK) * GapJumpPhysics.VERTICAL_DRAG_PER_TICK;
-            GapJumpPhysics.FlightCommand c = GapJumpPhysics.flightCommand(
-                    x, y, z, storedVy, plan.landX(), plan.landY(), plan.landZ(), planCap, maxStep, true);
-            if (c == null) {
+            int ticksLeft = GapJumpPhysics.remainingAirTicks(y - plan.landY(), storedVy);
+            if (ticksLeft <= 0) {
                 return Sim.fail("рівня приземлення не досягти", tick, x, y, z);
             }
-            vx = c.vx();
-            vy = c.vy();
-            vz = c.vz();
+            // Наступний тік: до швидкості додається прискорення, яке дає керування в повітрі (як у гравця), і більше нічого.
+            GapJumpPhysics.AirAccel air = GapJumpPhysics.airAccel(x, z, hx, hz, ticksLeft,
+                    plan.landX(), plan.landZ(), GapJumpPhysics.MAX_AIR_ACCEL);
+            vx = hx + air.ax();
+            vy = storedVy;
+            vz = hz + air.az();
         }
         return Sim.fail("політ не завершився", MAX_SIM_TICKS, x, y, z);
     }
@@ -509,13 +522,18 @@ public final class ShapeJump {
     }
 
     /**
-     * Фізика конкретного відриву (залежить від блока під ногами й від моба).
+     * Прогін польоту так само, як його проходить {@code GapJumpAssistGoal} (v14, варіант B): ванільний підйом
+     * {@code 0.42 * jumpFactor} (або просто збіг вниз) зі спринт-поштовхом, далі ванільна балістика (опір 0.91) і лише те
+     * повітряне керування, яке має гравець ({@link GapJumpPhysics#airAccel}). Швидкість відриву - та, що приземлить моба
+     * в ціль ({@link GapJumpPhysics#takeoffStepForReach}), але не більша за ту, яку моб набирає розбігом на повній
+     * швидкості. Хітбокс рухається за ванільним порядком осей (спершу Y, потім X/Z залежно від того, яка швидкість
+     * більша) і зупиняється об КОЖНУ коробку. Успіх - тільки якщо моб приземлився на поверхню висоти
+     * {@code plan.landY} і під ним є опора; будь-яке інше зіткнення (стіна, стеля, чужа поверхня) - провал.
      *
-     * @param jumpFactor ванільний множник стрибка блока (мед 0.5, інакше 1.0)
-     * @param retention  тертя блока відриву * 0.91 (для рішення «стрибати чи просто збігти вниз»)
-     * @param runSpeed   швидкість-уставка бігу моба ({@code GapJumpUtils.runSpeedSetpoint})
+     * @param t0 де вздовж стрибка (від точки відриву) моб відривається від землі
      */
-    public record Physics(double jumpFactor, double retention, double runSpeed) {
+    public static Sim simulate(List<Box> boxes, Plan plan, BodyDims d, Physics ph, double t0) {
+        return simulate(boxes, plan, d, ph, t0, null);
     }
 
     static boolean insideUnion(List<double[]> rects, double x, double z) {
@@ -601,17 +619,28 @@ public final class ShapeJump {
     // =====================================================================================
 
     /**
-     * Прогін польоту так само, як його веде {@code GapJumpAssistGoal}: ванільний підйом {@code 0.42 * jumpFactor}
-     * (або просто збіг вниз), рівномірний горизонтальний крок і щотіку замкнений контур
-     * {@link GapJumpPhysics#flightCommand}. Хітбокс рухається за ванільним порядком осей (спершу Y, потім X/Z
-     * залежно від того, яка швидкість більша) і зупиняється об КОЖНУ коробку. Успіх - тільки якщо моб
-     * приземлився на поверхню висоти {@code plan.landY} і під ним є опора; будь-яке інше зіткнення (стіна,
-     * стеля, чужа поверхня) - провал.
+     * Фізика конкретного відриву (залежить від блока під ногами й від моба).
      *
-     * @param t0 де вздовж стрибка (від точки відриву) моб відривається від землі
+     * @param jumpFactor ванільний множник стрибка блока (мед 0.5, інакше 1.0)
+     * @param retention  тертя блока відриву * 0.91
+     * @param runSpeed   швидкість-уставка бігу моба ({@code GapJumpUtils.runSpeedSetpoint})
+     * @param slowdown   гальмо ходьби по блоку відриву ({@code speedFactor}, для слайма ще x0.4); 1.0 - без гальма
      */
-    public static Sim simulate(List<Box> boxes, Plan plan, BodyDims d, Physics ph, double t0) {
-        return simulate(boxes, plan, d, ph, t0, null);
+    public record Physics(double jumpFactor, double retention, double runSpeed, double slowdown) {
+
+        /**
+         * Без гальма ходьби по блоку (звичайний блок, лід тощо) - {@code slowdown = 1}.
+         */
+        public Physics(double jumpFactor, double retention, double runSpeed) {
+            this(jumpFactor, retention, runSpeed, 1.0);
+        }
+
+        /**
+         * Властивості опори відриву для балістичної моделі ({@link GapJumpPhysics#forecastFlight}).
+         */
+        GapJumpPhysics.Takeoff takeoff() {
+            return GapJumpPhysics.Takeoff.of(this.retention / GapJumpPhysics.AIR_FRICTION, this.slowdown, this.jumpFactor);
+        }
     }
 
     /**

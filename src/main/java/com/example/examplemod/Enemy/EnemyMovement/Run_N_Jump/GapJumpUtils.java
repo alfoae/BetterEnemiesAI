@@ -41,6 +41,10 @@ import java.util.*;
 public final class GapJumpUtils {
 
     /**
+     * (v14: НЕ ВИКОРИСТОВУЄТЬСЯ. Дальність для графа тепер рахується з фізики -
+     * {@link GapJumpPhysics#maxGapBlocks}: розбіг + ванільний спринт-стрибок + повітряне керування як у гравця. Константа
+     * лишена лише як пам'ять про стару евристику.)
+     * <p>
      * Калібрувальний коефіцієнт ОЦІНКИ "на скільки блоків взагалі варто вважати розрив прохідним":
      * {@code maxGap = floor(topSpeed * RANGE_ESTIMATE_FACTOR)}. Це ДОРІВНЮЄ старому
      * {@code 10 тіків * 0.85} — навмисно лишив ті самі числа, щоб не змінювати, які розриви
@@ -91,20 +95,41 @@ public final class GapJumpUtils {
     }
 
     /**
-     * Теоретична максимальна дальність стрибка цього моба на повній швидкості (не поточній) для ЗВИЧАЙНОГО
-     * блока під ногами. Дальність із урахуванням блока відриву - {@link #estimateMaxJumpRangeBlocks(Mob, double)}.
+     * Множник для {@code MoveControl.setWantedPosition}, при якому ефективна уставка бігу моба (атрибут * множник) дорівнює
+     * {@code setpoint}: так ціль регулює швидкість розбігу, не чіпаючи ні атрибут, ні прапор спринту.
      */
-    public static int estimateMaxJumpRangeBlocks(Mob mob) {
-        return (int) Math.floor(runSpeedSetpoint(mob) * RANGE_ESTIMATE_FACTOR);
+    static double speedModifierFor(Mob mob, double setpoint) {
+        double attribute = mob.getAttributeValue(Attributes.MOVEMENT_SPEED);
+        return attribute > 1.0E-6 ? setpoint / attribute : Run_N_JumpUtils.getRunSpeedModifier(mob);
     }
 
     /**
-     * Те саме, але для моба, що відривається з блока з множником дальності {@code blockRangeFactor}
-     * ({@link #blockRangeFactor}). Для звичайного блока множник рівно 1.0 - тоді результат збігається зі
-     * старим {@link #estimateMaxJumpRangeBlocks(Mob)}.
+     * Теоретична максимальна дальність стрибка цього моба на повній швидкості (не поточній) для ЗВИЧАЙНОГО
+     * блока під ногами, на рівному. Дальність із урахуванням блока відриву й Δy - {@link #maxJumpGap}.
+     * <p>
+     * v14: рахується з фізики ({@link GapJumpPhysics#maxGapBlocks}), а не як {@code max(5, швидкість * 8.5)}. Стара
+     * нижня межа в 5 блоків існувала, бо керований політ долітав будь-куди; тепер моб летить сам, тож стеля - те, що
+     * справді дає розбіг і стрибок (для зомбі в спринті на рівному - 3 блоки розриву).
      */
-    public static int estimateMaxJumpRangeBlocks(Mob mob, double blockRangeFactor) {
-        return (int) Math.floor(runSpeedSetpoint(mob) * RANGE_ESTIMATE_FACTOR * blockRangeFactor);
+    public static int estimateMaxJumpRangeBlocks(Mob mob) {
+        return GapJumpPhysics.maxGapBlocks(runSpeedSetpoint(mob), GapJumpPhysics.ORDINARY_TAKEOFF, 0.0);
+    }
+
+    /**
+     * Властивості опори (тертя через хук NeoForge, гальмо ходьби, jumpFactor) для балістичної моделі польоту.
+     */
+    static GapJumpPhysics.Takeoff takeoffOf(BlockState floor, LevelReader level, BlockPos floorPos, Entity entity) {
+        Block block = floor.getBlock();
+        return GapJumpPhysics.Takeoff.of(floor.getFriction(level, floorPos, entity), runSlowdown(block), block.getJumpFactor());
+    }
+
+    /**
+     * Скільки блоків розриву вважати прохідними, коли моб відривається з опори {@code takeoff} і приземляється на
+     * {@code deltaY} вище (від'ємне - нижче) - те, що раніше давало {@code estimateMaxJumpRangeBlocks(mob, factor)}.
+     * {@code 0} - стрибок (чи така висота) недосяжні: наприклад, вгору з меду.
+     */
+    static int maxJumpGap(Mob mob, GapJumpPhysics.Takeoff takeoff, double deltaY) {
+        return GapJumpPhysics.maxGapBlocks(runSpeedSetpoint(mob), takeoff, deltaY);
     }
 
     /**
@@ -115,6 +140,8 @@ public final class GapJumpUtils {
     static final double SLIME_STEP_SLOWDOWN = 0.4;
 
     /**
+     * (v14: для ПЛАНУВАННЯ більше не використовується - див. {@link #maxJumpGap}; лишено як довідкову оцінку.)
+     * <p>
      * Множник дальності стрибка для блока, З ЯКОГО моб відривається, ДЛЯ ТАКОГО Δy (вгору/вниз/рівно). Береться
      * з САМОГО блока, тож працює й для блоків з інших модів:
      * <ul>
@@ -163,7 +190,8 @@ public final class GapJumpUtils {
      * Яку частку горизонтальної швидкості лишає ОДИН наземний тік на цьому блоці (ванільна фізика):
      * {@code тертя * 0.91 * гальмо ходьби}. Звичайний блок - 0.546, лід - 0.89, слайм - 0.29, пісок душ і
      * мед - 0.22. Береться з САМОГО блока (тертя через хук NeoForge), тож працює й для блоків з інших модів.
-     * Потрібно, щоб відрізняти гальмо блока від удару (див. {@code GapJumpAssistGoal.checkExternalImpulse}).
+     * (До v14 потрібно було, щоб відрізняти гальмо блока від удару - {@code GapJumpAssistGoal.checkExternalImpulse}; тепер
+     * ціль швидкість не перезаписує, тож метод лишено лише як довідковий.)
      */
     public static double groundRetention(BlockState floor, LevelReader level, BlockPos floorPos, Entity entity) {
         return floor.getFriction(level, floorPos, entity) * GapJumpPhysics.AIR_FRICTION * runSlowdown(floor.getBlock());
@@ -196,12 +224,10 @@ public final class GapJumpUtils {
      */
     public static boolean reachableWithoutJump(double friction, double deltaYBlocks, double realDistance,
                                                double runSpeedSetpoint) {
-        if (deltaYBlocks >= 0.0) {
-            return false; // вгору чи рівно - без стрибка нікуди не долетіти
-        }
-        double retention = friction * GapJumpPhysics.AIR_FRICTION;
-        double sum = GapJumpPhysics.flightSum(deltaYBlocks, retention, 0.0); // jumpVelocity=0 - без імпульсу
-        return runSpeedSetpoint * sum >= realDistance;
+        // v14: та сама балістична модель, що й для стрибка (розбіг на повній швидкості, збіг з краю, політ із легким
+        // повітряним керуванням), а не {@code швидкість * сума множників}.
+        return GapJumpPhysics.reachableWithoutJump(GapJumpPhysics.Takeoff.of(friction, 1.0, 1.0),
+                runSpeedSetpoint, deltaYBlocks, realDistance);
     }
 
     // =====================================================================================
@@ -235,15 +261,15 @@ public final class GapJumpUtils {
             @Override
             public ShapeJump.Physics physics(Spot takeoff) {
                 TakeoffProps p = takeoffProps(level, mob, takeoff.x(), takeoff.surfaceY(), takeoff.z());
-                return new ShapeJump.Physics(p.jumpFactor(), p.friction() * GapJumpPhysics.AIR_FRICTION, runSpeed);
+                return new ShapeJump.Physics(p.jumpFactor(), p.friction() * GapJumpPhysics.AIR_FRICTION, runSpeed, p.slowdown());
             }
 
             @Override
             public ShapeJump.RangeModel range(Spot takeoff) {
                 TakeoffProps p = takeoffProps(level, mob, takeoff.x(), takeoff.surfaceY(), takeoff.z());
+                GapJumpPhysics.Takeoff tk = GapJumpPhysics.Takeoff.of(p.friction(), p.slowdown(), p.jumpFactor());
                 return deltaY -> {
-                    double factor = GapJumpPhysics.blockRangeFactor(p.friction(), p.slowdown(), p.jumpFactor(), deltaY);
-                    int gap = (int) Math.floor(runSpeed * RANGE_ESTIMATE_FACTOR * factor);
+                    int gap = GapJumpPhysics.maxGapBlocks(runSpeed, tk, deltaY);
                     return gap < 1 ? -1.0 : GapJumpRays.maxFlight(gap);
                 };
             }
@@ -286,17 +312,15 @@ public final class GapJumpUtils {
         BlockPos floorPos = feet.below();
         BlockState floor = mob.level().getBlockState(floorPos);
         Block block = floor.getBlock();
-        double flatFactor = blockRangeFactor(floor, mob.level(), floorPos, mob, 0.0);
-        double upFactor = blockRangeFactor(floor, mob.level(), floorPos, mob, GapJumpPhysics.JUMP_UP_LIMIT_BLOCKS);
-        double downFactor = blockRangeFactor(floor, mob.level(), floorPos, mob, -GapJumpPhysics.JUMP_DOWN_LIMIT_BLOCKS);
+        GapJumpPhysics.Takeoff tk = takeoffOf(floor, mob.level(), floorPos, mob);
         return BuiltInRegistries.BLOCK.getKey(block)
                 + " | тертя=" + String.format("%.3f", floor.getFriction(mob.level(), floorPos, mob))
                 + " speedFactor=" + String.format("%.2f", block.getSpeedFactor())
                 + " jumpFactor=" + String.format("%.2f", block.getJumpFactor())
                 + (block instanceof SlimeBlock ? " (слайм: гальмо ходьби x" + SLIME_STEP_SLOWDOWN + ")" : "")
-                + " | макс.розрив рівно=" + estimateMaxJumpRangeBlocks(mob, flatFactor)
-                + " вгору(+" + GapJumpPhysics.JUMP_UP_LIMIT_BLOCKS + ")=" + estimateMaxJumpRangeBlocks(mob, upFactor)
-                + " вниз(-" + GapJumpPhysics.JUMP_DOWN_LIMIT_BLOCKS + ")=" + estimateMaxJumpRangeBlocks(mob, downFactor);
+                + " | макс.розрив рівно=" + maxJumpGap(mob, tk, 0.0)
+                + " вгору(+" + GapJumpPhysics.JUMP_UP_LIMIT_BLOCKS + ")=" + maxJumpGap(mob, tk, GapJumpPhysics.JUMP_UP_LIMIT_BLOCKS)
+                + " вниз(-" + GapJumpPhysics.JUMP_DOWN_LIMIT_BLOCKS + ")=" + maxJumpGap(mob, tk, -GapJumpPhysics.JUMP_DOWN_LIMIT_BLOCKS);
     }
 
     /**
@@ -461,8 +485,9 @@ public final class GapJumpUtils {
     }
 
     /**
-     * (v5: GapJumpAssistGoal більше не відходить для розгону — швидкість відриву задається явно, тож
-     * розбіг на дальність не впливає. Метод лишений на випадок, якщо розгін знадобиться знову.)
+     * (v5: GapJumpAssistGoal більше не відходить для розгону — швидкість відриву задавалась явно, тож
+     * розбіг на дальність не впливав. УВАГА, v14: тепер розбіг НАВПАКИ визначає дальність стрибка, і якщо довгі
+     * стрибки з вузьких опор після гальмування недолітатимуть, саме цей метод - заготовка для "відійти й розігнатись".)
      * <p>
      * Йде по прямій у напрямку {@code dir} від моба, шукаючи найдальшу БЕЗПЕЧНУ точку в межах
      * {@code desiredBlocks} — якщо позаду теж обрив (чи стіна), зупиняється на останньому
@@ -522,6 +547,13 @@ public final class GapJumpUtils {
         /** Скільки блоків вздовж стрибка від точки відриву, поки центр моба ще над опорою (передній край). */
         public double front(double dirX, double dirZ) {
             return this.plan != null ? this.plan.frontAlong() : GapJumpPhysics.frontBorder(dirX, dirZ);
+        }
+
+        /**
+         * Де вздовж стрибка хітбокс повністю сходить з опори відриву (далі onGround=false).
+         */
+        public double lose(double dirX, double dirZ, double halfWidth) {
+            return this.plan != null ? this.plan.loseAlong() : GapJumpPhysics.plainLoseAlong(dirX, dirZ, halfWidth);
         }
 
         /** Наскільки вбік від осі стрибка моб ще стоїть на опорі відриву. */

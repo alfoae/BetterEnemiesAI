@@ -135,7 +135,7 @@ public class ChangeEnemiesAttributes {
         // ==========================================
         // МОНСТРИ
         // ==========================================
-        event.add(EntityType.ZOMBIE, Attributes.MOVEMENT_SPEED, 0.23);
+        event.add(EntityType.ZOMBIE, Attributes.MOVEMENT_SPEED, 0.33);
         event.add(EntityType.HUSK, Attributes.MOVEMENT_SPEED, 0.23);
         event.add(EntityType.DROWNED, Attributes.MOVEMENT_SPEED, 0.23);
         event.add(EntityType.ZOMBIE_VILLAGER, Attributes.MOVEMENT_SPEED, 0.23);
