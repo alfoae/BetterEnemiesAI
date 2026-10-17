@@ -549,9 +549,7 @@ public final class GapJumpUtils {
             return this.plan != null ? this.plan.frontAlong() : GapJumpPhysics.frontBorder(dirX, dirZ);
         }
 
-        /**
-         * Де вздовж стрибка хітбокс повністю сходить з опори відриву (далі onGround=false).
-         */
+        /** Де вздовж стрибка хітбокс повністю сходить з опори відриву (далі onGround=false). */
         public double lose(double dirX, double dirZ, double halfWidth) {
             return this.plan != null ? this.plan.loseAlong() : GapJumpPhysics.plainLoseAlong(dirX, dirZ, halfWidth);
         }

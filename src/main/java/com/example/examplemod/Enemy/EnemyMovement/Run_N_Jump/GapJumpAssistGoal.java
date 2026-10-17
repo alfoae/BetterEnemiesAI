@@ -31,7 +31,10 @@ import java.util.EnumSet;
  *       ванільний моб у повітрі має втричі менше, тому без цього він літав би значно коротше за гравця. Вимикається
  *       константою {@code GapJumpPhysics.AIR_CONTROL_SCALE = 0.0} (суто балістичний політ);</li>
  *   <li>відкидання, лід, слайм і мед працюють самі, бо швидкість мобу не перезаписується (виявлення імпульсу,
- *       збереження швидкості на землі й жорстке ведення в польоті прибрано).</li>
+ *       збереження швидкості на землі й жорстке ведення в польоті прибрано);</li>
+ *   <li>єдиний «одноразовий» елемент - невеликий додатковий підштовх на відриві
+ *       ({@code GapJumpPhysics.TAKEOFF_EXTRA_BOOST}, лише зі спринтом): зомбі стрибає трохи сильніше за гравця, щоб граф не
+ *       втрачав довгі стрибки. Політ після нього ванільний. {@code 0.0} - рівно як гравець.</li>
  * </ul>
  * Рятувальний стрибок ({@link #tryRescueJump}) лишено: він лікує інше - запізніле передавання керування, а не фізику.
  * <p>
@@ -137,9 +140,7 @@ public class GapJumpAssistGoal extends Goal {
      */
     private static final double RESCUE_MAX_DROP = 0.3;
 
-    /**
-     * Рятувальний стрибок не летить далі ніж на стільки блоків за довжину сегмента (запобіжник від зламаної геометрії).
-     */
+    /** Рятувальний стрибок не летить далі ніж на стільки блоків за довжину сегмента (запобіжник від зламаної геометрії). */
     private static final double RESCUE_MAX_EXTRA_BLOCKS = 2.0;
 
     /**
@@ -173,25 +174,15 @@ public class GapJumpAssistGoal extends Goal {
      * прискорення розбігу, і політ ({@link #computeSegmentPhysics}).
      */
     private GapJumpPhysics.Takeoff takeoff = GapJumpPhysics.ORDINARY_TAKEOFF;
-    /**
-     * Δy поточного сегмента (приземлення мінус відрив), округлений до 1/256, як і в графі.
-     */
+    /** Δy поточного сегмента (приземлення мінус відрив), округлений до 1/256, як і в графі. */
     private double segDeltaY;
-    /**
-     * Чи вистачає моби просто збігти з краю (без стрибка): тоді {@code jumpControl.jump()} не викликається.
-     */
+    /** Чи вистачає моби просто збігти з краю (без стрибка): тоді {@code jumpControl.jump()} не викликається. */
     private boolean segNoJump;
-    /**
-     * Остання уставка швидкості розбігу (для діагностики).
-     */
+    /** Остання уставка швидкості розбігу (для діагностики). */
     private double lastSetpoint;
-    /**
-     * Чи тримаємо спринт на розбігу (поштовх +0.2 при відриві); для коротких стрибків відпускаємо - див. chooseRunPlan.
-     */
+    /** Чи тримаємо спринт на розбігу (поштовх +0.2 при відриві); для коротких стрибків відпускаємо - див. chooseRunPlan. */
     private boolean runBoost = true;
-    /**
-     * Прогноз помилки приземлення в момент відриву (для порівняння з фактичною в лозі); NaN - прогнозу нема.
-     */
+    /** Прогноз помилки приземлення в момент відриву (для порівняння з фактичною в лозі); NaN - прогнозу нема. */
     private double launchPredictedError = Double.NaN;
 
     // =========================================
@@ -775,20 +766,31 @@ public class GapJumpAssistGoal extends Goal {
         // стрибка, поки моб ще бачить ціль - саме це й пояснювало "пригнув лише з одного люка,
         // далі йде пішки" у довших паркурах.
         if (this.chainCount >= MAX_CHAIN_SEGMENTS) {
+            jumpLog("[DEBUG GAP JUMP] ЛАНЦЮЖОК ЗАВЕРШЕНО: ліміт " + MAX_CHAIN_SEGMENTS + " стрибків підряд | pos=" + formatVec(this.mob.position()));
             return false;
         }
         GapJumpUtils.GapJump next = GapJumpUtils.findFreshJumpSegment(this.mob);
         if (next == null) {
+            // Найчастіша причина, чому моб "вертається й обходить": граф від місця приземлення не дає наступного стрибка
+            // (розрив/висота поза дальністю - див. макс. розрив у заголовку сегмента) і A* веде пішки чи в обхід.
+            jumpLog("[DEBUG GAP JUMP] ЛАНЦЮЖОК ЗАВЕРШЕНО: свіжий шлях від місця приземлення не містить стрибка"
+                    + " (або шляху нема) | pos=" + formatVec(this.mob.position())
+                    + " | макс. розрив рівно=" + GapJumpUtils.estimateMaxJumpRangeBlocks(this.mob));
             return false;
         }
         // Не той самий сегмент, що щойно пройшли (шлях міг бути порахований до приземлення).
         if (next.edge().equals(this.jump.edge()) && next.landing().distanceTo(this.jump.landing()) < 1.0E-6) {
+            jumpLog("[DEBUG GAP JUMP] ЛАНЦЮЖОК ЗАВЕРШЕНО: свіжий шлях ще веде в той самий сегмент (порахований до приземлення)");
             return false;
         }
         // Початок сегмента має бути поруч з мобом (той самий рівень і в межах видимості Path).
         Vec3 nextEdgeCenter = next.takeoffPoint();
         if (horizontalDistance(this.mob.position(), nextEdgeCenter) > CHAIN_MAX_EDGE_DISTANCE
                 || Math.abs(nextEdgeCenter.y - this.mob.getY()) > 1.0) {
+            jumpLog("[DEBUG GAP JUMP] ЛАНЦЮЖОК ЗАВЕРШЕНО: наступний край задалеко/на іншій висоті | pos=" + formatVec(this.mob.position())
+                    + " | наступний край=" + next.edge()
+                    + " | відстань=" + String.format("%.3f", horizontalDistance(this.mob.position(), nextEdgeCenter))
+                    + " (поріг " + CHAIN_MAX_EDGE_DISTANCE + ") | Δy=" + String.format("%.3f", nextEdgeCenter.y - this.mob.getY()));
             return false;
         }
         this.chainCount++;
@@ -839,6 +841,16 @@ public class GapJumpAssistGoal extends Goal {
             GapJumpPhysics.Prediction prediction = GapJumpPhysics.predict(
                     along, speedAlong, setpoint, this.takeoff, forecast, nominal);
             this.launchPredictedError = prediction == null ? Double.NaN : prediction.touchdown() - geometry.length();
+
+            // ОДНОРАЗОВИЙ додатковий підштовх на відриві (GapJumpPhysics.TAKEOFF_EXTRA_BOOST): зомбі «стрибає трохи сильніше
+            // за гравця», бо інакше граф втрачає довгі стрибки й моб віддає перевагу обходу. Це не ведення: політ далі
+            // ванільний. Додаємо ДО ванільного jumpFromGround() (воно виконається в цьому ж тіку після цілі), уздовж погляду;
+            // лише зі спринтом (для коротких стрибків його відпущено) і лише раз - на першому виклику.
+            if (!this.segNoJump && this.runBoost && GapJumpPhysics.TAKEOFF_EXTRA_BOOST > 0.0 && realDistance > 1.0E-6) {
+                Vec3 v = this.mob.getDeltaMovement();
+                double k = GapJumpPhysics.TAKEOFF_EXTRA_BOOST / realDistance;
+                this.mob.setDeltaMovement(v.x + dx * k, v.y, v.z + dz * k);
+            }
 
             jumpLog(
                     "[DEBUG GAP JUMP] " + (this.segNoJump ? "ЗБІГ З КРАЮ (без стрибка)" : "СТРИБОК! (природний: розбіг -> ванільний відрив -> політ)")
