@@ -270,7 +270,7 @@ public class GapJumpNodeEvaluator extends ShapeAwareNodeEvaluator {
         // міг приземлитись саме на НАЙБЛИЖЧУ доступну сходинку, а не тільки на найглибшу з можливих (наприклад,
         // сходи в 3 рівні - Δy=-1 на першу, Δy=-2 на другу, Δy=-3 на третю, кожна свій кандидат).
         for (int dy = -GapJumpPhysics.JUMP_DOWN_LIMIT_BLOCKS; dy <= GapJumpPhysics.JUMP_UP_LIMIT_BLOCKS; dy++) {
-            // v14: дальність - з балістичної моделі (розбіг + спринт-стрибок + повітряне керування як у гравця), для блока
+            // v15: дальність - з балістичної моделі (розбіг + спринт-стрибок + повітряне керування як у гравця), для блока
             // відриву й цього Δy; 0 - недосяжно (напр. вгору з меду).
             int legacyGap = GapJumpUtils.maxJumpGap(this.mob, takeoff, dy);
             int scanGap = legacyGap;

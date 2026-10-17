@@ -185,7 +185,7 @@ public final class EnemyBreak_N_BuildUtils {
      * розрахований на повторний виклик у тому самому тіку.
      * <p>
      * Ціль рахується через {@code getOnPos()} гравця (реальний блок опори через колізію
-     * хітбокса, не голий floor координати) — АЛЕ тільки коли {@link PursuitEnemyBehavior#isLiveChasing}
+     * хітбокса, не голий floor координати; для гравця в ПОВІТРІ - {@link PursuitTargetResolver}) — АЛЕ тільки коли {@link PursuitEnemyBehavior#isLiveChasing}
      * (інакше під час GOING_TO_LAST_SEEN/SEARCHING це підмінило б НАВМИСНО застиглу точку живою
      * позицією гравця — саме така підміна ламала "переслідування по пам'яті").
      */
@@ -195,7 +195,9 @@ public final class EnemyBreak_N_BuildUtils {
             return naiveTarget;
         }
         Player trackedPlayer = PursuitEnemyBehavior.getTrackedPlayer(mob);
-        return trackedPlayer != null ? trackedPlayer.getOnPos().above() : naiveTarget;
+        // v15.2: getOnPos() лишається для гравця на землі, але в ПОВІТРІ він бреше (береться клітинка за центром, що на краю
+        // блока опиняється над порожнечею) - тож ціль для стрибаючого гравця стабілізує PursuitTargetResolver.
+        return trackedPlayer != null ? PursuitTargetResolver.groundedTarget(mob, trackedPlayer) : naiveTarget;
     }
 
     /**
