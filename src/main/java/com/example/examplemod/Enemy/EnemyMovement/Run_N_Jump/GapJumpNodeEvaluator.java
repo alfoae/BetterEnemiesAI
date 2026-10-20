@@ -4,6 +4,7 @@ import com.example.examplemod.Enemy.EnemyMovement.TerrainShape.HopNode;
 import com.example.examplemod.Enemy.EnemyMovement.TerrainShape.ShapeAwareNodeEvaluator;
 import com.example.examplemod.Enemy.EnemyMovement.TerrainShape.ShapeSettings;
 import com.example.examplemod.Enemy.EnemyMovement.TerrainShape.ShapeWalk.Spot;
+import com.example.examplemod.debug.DebugLog;
 import com.example.examplemod.debug.GraphProbe;
 import net.minecraft.core.BlockPos;
 import net.minecraft.world.entity.Mob;
@@ -130,6 +131,13 @@ import java.util.List;
  * що починаються з прохідної клітинки. Три проходи (рівно/вгору/вниз) діляться ОДНИМ frontCache
  * (перевірка на рівні старту від Δy не залежить), тож зайвих запитів до світу через це не додається.
  * <p>
+ * <b>v16 - буфер сусідів ділиться між Δy ({@link NeighborBudget}).</b> Ванільний PathFinder дає буфер на 32 вузли. Раніше
+ * усі Δy (від -3 до +1) писали в нього підряд, тож велика платформа внизу (десятки посадок з Δy=-1) забирала всі слоти, і
+ * кандидати з Δy=0 та Δy=+1 не потрапляли в граф зовсім: з одиночного блока над землею ребро на наступну сходинку
+ * {@code ▣▢▢▢▣▢▢▢▣} вгору просто не існувало, A* не бачив продовження, а ланцюжок стрибків обривався на приземленні.
+ * Тепер кандидати збираються окремо для кожного Δy й лише потім ділять буфер порівну; поки все вміщується - порядок і
+ * склад сусідів такі самі, як були.
+ * <p>
  * ЧЕСНО, найменш перевірений шматок у всій справі: {@code this.mob} і {@code this.currentContext} тут —
  * поля, успадковані від базового {@code NodeEvaluator} (виставляються в {@code prepare(...)}
  * перед пошуком) — самі назви полів і API світу лишились ТІ САМІ, що були в попередній версії цього файлу
@@ -238,6 +246,21 @@ public class GapJumpNodeEvaluator extends ShapeAwareNodeEvaluator {
         return this.exactJumps && this.source != null && this.dims != null;
     }
 
+    /**
+     * {@code Δy:кількість} для кожної групи кандидатів - для рядка про переповнення буфера.
+     */
+    private static String describeLevels(int[] perLevel, int downLimit) {
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < perLevel.length; i++) {
+            if (i > 0) {
+                sb.append(' ');
+            }
+            int dy = i - downLimit;
+            sb.append(dy > 0 ? "+" : "").append(dy).append(':').append(perLevel[i]);
+        }
+        return sb.toString();
+    }
+
     @Override
     public int getNeighbors(Node[] nodes, Node node) {
         int count = super.getNeighbors(nodes, node);
@@ -269,7 +292,14 @@ public class GapJumpNodeEvaluator extends ShapeAwareNodeEvaluator {
         // ПОВНИЙ діапазон -JUMP_DOWN_LIMIT_BLOCKS..+JUMP_UP_LIMIT_BLOCKS (не лише крайні значення): щоб моб
         // міг приземлитись саме на НАЙБЛИЖЧУ доступну сходинку, а не тільки на найглибшу з можливих (наприклад,
         // сходи в 3 рівні - Δy=-1 на першу, Δy=-2 на другу, Δy=-3 на третю, кожна свій кандидат).
-        for (int dy = -GapJumpPhysics.JUMP_DOWN_LIMIT_BLOCKS; dy <= GapJumpPhysics.JUMP_UP_LIMIT_BLOCKS; dy++) {
+        // v16: кандидати збираємо ОКРЕМО для кожного Δy й лише потім ділимо буфер (NeighborBudget). Раніше всі Δy писали в
+        // один буфер за зростанням Δy (-3..+1): велика платформа внизу (десятки посадок з Δy=-1) займала всі 32 слоти, а Δy=0
+        // і Δy=+1 лишались без жодного - ребра вгору на наступну сходинку в графі не було (див. NeighborBudget).
+        final int downLimit = GapJumpPhysics.JUMP_DOWN_LIMIT_BLOCKS;
+        final int levels = downLimit + GapJumpPhysics.JUMP_UP_LIMIT_BLOCKS + 1;
+        Node[][] buckets = new Node[levels][];
+        int[] sizes = new int[levels];
+        for (int dy = -downLimit; dy <= GapJumpPhysics.JUMP_UP_LIMIT_BLOCKS; dy++) {
             // v15: дальність - з балістичної моделі (розбіг + спринт-стрибок + повітряне керування як у гравця), для блока
             // відриву й цього Δy; 0 - недосяжно (напр. вгору з меду).
             int legacyGap = GapJumpUtils.maxJumpGap(this.mob, takeoff, dy);
@@ -283,11 +313,34 @@ public class GapJumpNodeEvaluator extends ShapeAwareNodeEvaluator {
             if (scanGap < 1) {
                 continue; // цей Δy з цього блока недосяжний (напр. вгору з меду, чи просто задалеко) - не пробуємо
             }
+            Node[] bucket = new Node[nodes.length];
+            int found = 0;
             for (GapJumpRays.Ray ray : GapJumpRays.forMaxGap(scanGap)) {
-                if (count >= nodes.length) {
-                    break; // буфер сусідів повний - більше нема куди писати (промені відсортовані: спершу найближчі)
+                if (found >= bucket.length) {
+                    break; // одна група вже заповнила цілий буфер - більше з неї однаково не візьмемо (промені відсортовані: спершу найближчі)
                 }
-                count = tryRay(nodes, count, ctx, ray, frontCache, dy);
+                found = tryRay(bucket, found, ctx, ray, frontCache, dy);
+            }
+            buckets[dy + downLimit] = bucket;
+            sizes[dy + downLimit] = found;
+        }
+        int roomForJumps = nodes.length - count;
+        int candidates = 0;
+        for (int size : sizes) {
+            candidates += size;
+        }
+        count = NeighborBudget.merge(buckets, sizes, nodes, count);
+        if (candidates > roomForJumps) {
+            // Буфер не вмістив усіх кандидатів - далі решту відсікає NeighborBudget (порівну між Δy). Показуємо це в лозі: раніше
+            // така втрата була мовчазною й виглядала як "моб не бачить наступного стрибка".
+            final String overflow = "буфер сусідів (" + nodes.length + ") переповнено у вузлі (" + node.x + "," + node.y + "," + node.z
+                    + "): кандидатів на стрибок=" + candidates + " за Δy [" + describeLevels(sizes, downLimit)
+                    + "], місця було " + roomForJumps + " -> взято ["
+                    + describeLevels(NeighborBudget.share(sizes, roomForJumps), downLimit) + "]";
+            if (probe) {
+                GraphProbe.logText(this.mob, overflow);
+            } else {
+                DebugLog.logThrottled(DebugLog.Cat.GRAPH, this.mob, "graph-overflow-" + this.mob.getId(), 3000L, () -> overflow);
             }
         }
         count = addHops(nodes, count, ctx, frontCache);

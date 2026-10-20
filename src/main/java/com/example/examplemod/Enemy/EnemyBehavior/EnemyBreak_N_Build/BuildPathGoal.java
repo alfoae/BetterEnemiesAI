@@ -253,6 +253,21 @@ public class BuildPathGoal extends Goal {
         BlockPos step = EnemyBreak_N_BuildUtils.nextHorizontalStep(this.mob, this.buildTarget);
         BlockPos stepBelow = step.below();
 
+        // v16: моб міг зійти ЦЕНТРОМ за край опори (хітбокс ще на блоці, onGround=true) - наприклад, після стрибка на одиночний
+        // блок: інерція виносить центр за край на кілька сотих блока. Тоді blockPosition() - це клітинка ПОВЗ опору, а "наступний
+        // крок" лежить за 2 блоки від останнього твердого блока: hasAdjacentSolid() для нього false, placeBlock мовчки відмовляє
+        // ("нема суміжного isSolid()-блока для опори"), і моб висить на краю назавжди. Спершу добудовуємо опору під самою
+        // клітинкою моба (вона вже дотикається до опори), а наступного циклу міст іде далі звичайним шляхом.
+        if (!level.getBlockState(stepBelow).isSolid() && !EnemyBreak_N_BuildUtils.hasAdjacentSolid(level, stepBelow)) {
+            BlockPos under = this.mob.blockPosition().below();
+            if (!level.getBlockState(under).isSolid() && EnemyBreak_N_BuildUtils.hasAdjacentSolid(level, under)) {
+                EnemyBreak_N_BuildUtils.debugMsg(this.mob, "[DEBUG BuildPathGoal] bridge: моб за краєм опори, спершу блок під ним "
+                        + under + " (крок " + step + " не має суміжної опори)"); // DEBUG
+                EnemyBreak_N_BuildUtils.placeBlock(level, under, this.mob);
+                return;
+            }
+        }
+
         boolean place = !level.getBlockState(stepBelow).isSolid();
         if (DebugLog.on(DebugLog.Cat.BUILD)) {
             DebugLog.log(DebugLog.Cat.BUILD, this.mob, "handleBridge: step=" + step.toShortString() + " stepBelow="
