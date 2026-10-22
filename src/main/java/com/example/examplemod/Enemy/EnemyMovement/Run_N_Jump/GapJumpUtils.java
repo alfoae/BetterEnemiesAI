@@ -5,6 +5,7 @@ import com.example.examplemod.Enemy.EnemyBehavior.EnemyPursuit_N_Search.PursuitB
 import com.example.examplemod.Enemy.EnemyMovement.TerrainShape.*;
 import com.example.examplemod.Enemy.EnemyMovement.TerrainShape.ShapeWalk.BodyDims;
 import com.example.examplemod.Enemy.EnemyMovement.TerrainShape.ShapeWalk.Spot;
+import com.example.examplemod.debug.DebugLog;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.server.level.ServerLevel;
@@ -324,15 +325,43 @@ public final class GapJumpUtils {
     }
 
     /**
+     * v17: множник швидкості ходьби при підході до входу на паркур (звичайна ходьба, без бігу).
+     */
+    public static final double ENTRY_CREEP_SPEED_MODIFIER = 1.0;
+    /**
+     * v17: допуск по висоті між ногами моба й клітинкою відриву: ноги мають бути в межах клітинки. Трохи нижче її дна
+     * теж можна: плити/нерівності, похибки float, а головне - "запізніле керування" ({@code GapJumpAssistGoal}
+     * рятує моба, що вже зійшов з краю й просів до {@code RESCUE_MAX_DROP}=0.3 блока), тому допуск із запасом більший за 0.3.
+     * Різниця рівнів, яку гейт має ловити (підлога проти першого блока паркуру), - ціла клітинка.
+     */
+    static final double TAKEOFF_LEVEL_TOLERANCE = 0.35;
+    /**
+     * v17: з якої відстані (по горизонталі до центру клітинки відриву) моб починає підходити до входу повільно. Спринт
+     * гаситься тертям за ~3 тіки (~1.5 блока), але швидкі типи мобів гальмують довше: на симуляції підходу до стовпчика 1x1
+     * (ванільні MoveControl/колізії, випадкові кути й швидкості) зомбі потрапляє на блок із першого стрибка в 100% випадків
+     * уже з 4 блоків, а мобу в півтора раза швидшому за зомбі (атрибут 0.35 проти 0.231) потрібно 5. Константа (а не залежна
+     * від швидкості моба), щоб на межі не було тремтіння "біг/ходьба": атрибут швидкості моба змінюється разом зі спринтом.
+     */
+    static final double ENTRY_CREEP_RADIUS = 5.0;
+    /**
+     * v17: на скільки клітинка відриву має бути ВИЩЕ за ноги моба, щоб вважати це підйомом (а не рівною підлогою).
+     */
+    static final double ENTRY_STEP_MIN_RISE = 0.5;
+
+    /**
      * Дивиться в РЕАЛЬНИЙ поточний Path моба (уже побудований {@link GapJumpNodeEvaluator}-ом,
      * якщо на мобі стоїть {@link GapJumpPathNavigation}) і шукає, чи серед НАЙБЛИЖЧИХ пари
      * сусідніх вузлів попереду є "стрибковий" сегмент — тобто пара вузлів, що лежать далі одне
      * від одного, ніж дає звичайний крок. Не пересканює місцевість сама — тільки читає те, що
      * вже порахував pathfinder.
      *
+     * <p>
+     * v17: це "що ЗАПЛАНОВАНО попереду" - БЕЗ перевірки, де моб стоїть зараз. Для рішення "вже пора стрибати" (поступитись
+     * гоалу, стартувати гоал) бери {@link #findUpcomingJumpSegment}.
+     *
      * @return дані про стрибок, або {@code null}, якщо найближчий відрізок шляху - звичайний крок
      */
-    public static GapJump findUpcomingJumpSegment(Mob mob) {
+    public static GapJump findPlannedJumpSegment(Mob mob) {
         Path path = mob.getNavigation().getPath();
         if (path == null) {
             return null;
@@ -352,11 +381,93 @@ public final class GapJumpUtils {
     }
 
     /**
+     * v17: стрибок, який моб може виконувати ПРЯМО ЗАРАЗ: {@link #findPlannedJumpSegment} плюс одна умова - моб стоїть на
+     * ТОМУ Ж рівні, що й клітинка відриву.
+     * <p>
+     * Раніше сюди віддавався ПЕРШИЙ стрибок будь-де в шляху. Над урвищем цього вистачало (моб, що біжить до краю платформи,
+     * завжди стоїть на ній), а коли під паркуром є ПІДЛОГА, шлях починається з ходьби по підлозі (обхід, підйом на перший
+     * блок): Pursuit одразу поступався, а GapJumpAssistGoal стартував прямо з підлоги, за кілька блоків від краю й нижче за
+     * нього, - "запізніле керування" (along>front) вистрілювало стрибок у нікуди, а далі моб лишався без керування й
+     * перехоплював будівельник. Тепер, поки моб не піднявся на рівень відриву, тут {@code null}: Pursuit сам іде шляхом (не
+     * поступається), гоал не стартує.
+     */
+    public static GapJump findUpcomingJumpSegment(Mob mob) {
+        GapJump jump = findPlannedJumpSegment(mob);
+        if (jump == null) {
+            return null;
+        }
+        if (!isReadyToJump(mob, jump)) {
+            final BlockPos edge = jump.edge();
+            DebugLog.logThrottled(DebugLog.Cat.JUMP, mob, "jump-notready-" + mob.getId(), 1000L, () ->
+                    "стрибок у шляху є (edge=" + edge.toShortString() + "), але моб ще не готовий до відриву (не на рівні краю або "
+                            + "в польоті поза вікном порятунку): моб.y=" + String.format("%.2f", mob.getY()) + " edge.y=" + edge.getY()
+                            + " onGround=" + mob.onGround() + " -> Pursuit іде шляхом далі, GapJumpAssistGoal не стартує");
+            return null;
+        }
+        return jump;
+    }
+
+    /**
+     * v17: чи може моб почати цей стрибок просто зараз - ТІ САМІ правила, за якими {@code GapJumpAssistGoal.canUse()} його
+     * прийме (інакше Pursuit поступився б, а гоал відмовив - моб лишився б без керування):
+     * <ul>
+     *   <li>ноги моба в діапазоні висот клітинки відриву (моб на тому ж рівні, що й край);</li>
+     *   <li>на землі - готовий; у повітрі - лише у вікні "запізнілого керування": просів не більше за
+     *       {@code RESCUE_MAX_DROP} і не летить угору (стрибок-підйом на перший блок паркуру - це політ угору, тут він
+     *       ще не готовий).</li>
+     * </ul>
+     */
+    static boolean isReadyToJump(Mob mob, GapJump jump) {
+        double y = mob.getY();
+        BlockPos edge = jump.edge();
+        if (y < edge.getY() - TAKEOFF_LEVEL_TOLERANCE || y >= edge.getY() + 1.0) {
+            return false;
+        }
+        if (!mob.onGround()) {
+            double drop = jump.takeoffPoint().y - y;
+            return drop >= -0.05 && drop <= GapJumpAssistGoal.RESCUE_MAX_DROP && mob.getDeltaMovement().y <= 0.1;
+        }
+        return true;
+    }
+
+    /**
+     * v17: чи треба підходити ПОВІЛЬНО до входу на паркур.
+     * <p>
+     * Перший стрибок шляху стартує з клітинки, яка ВИЩЕ за моба (перший блок паркуру на підлозі): на нього треба ВЗІЙТИ, а
+     * це ванільний стрибок-підйом (MoveControl сам відриває, коли до вузла менше блока). Зі спринту він летить 5 блоків
+     * (ванільний поштовх спринту + швидкість бігу), тож по блоку 1x1 моб гарантовано промахується й приземляється на
+     * підлогу далі (так і було в логу). Пішки (без спринту, множник 1.0) той самий стрибок летить &lt;1 блока - і моб
+     * лишається на блоці. Умова вузька (тільки вхід перед СТРИБКОМ паркуру), тож звичайні підйоми по сходах і виступах
+     * не гальмуються.
+     */
+    public static boolean shouldCreepToEntry(Mob mob) {
+        GapJump planned = findPlannedJumpSegment(mob);
+        if (planned == null) {
+            return false;
+        }
+        BlockPos edge = planned.edge();
+        if (edge.getY() <= mob.getY() + ENTRY_STEP_MIN_RISE) {
+            return false; // моб уже на рівні відриву (або вище) - підйом не потрібен
+        }
+        double dx = edge.getX() + 0.5 - mob.getX();
+        double dz = edge.getZ() + 0.5 - mob.getZ();
+        return dx * dx + dz * dz <= ENTRY_CREEP_RADIUS * ENTRY_CREEP_RADIUS;
+    }
+
+    /**
+     * v17: чи є в шляху хоч один стрибковий сегмент (шлях паркуром). Для {@code EnemyBreak_N_BuildUtils.isPathBlocked}:
+     * досяжна ціль нагорі, до якої веде паркур, не "заблокована" - будувати вежу не треба.
+     */
+    public static boolean pathHasJump(Path path) {
+        return path != null && findJumpSegmentInPath(path, 0) != null;
+    }
+
+    /**
      * Те саме, що {@link #findUpcomingJumpSegment}, але від ПОТОЧНОГО положення моба й по СВІЖОМУ шляху:
      * бере спільний кеш {@code EnemyBreak_N_BuildUtils.getOrComputePath} (той самий, з якого їде
      * Pursuit; рахується не більше разу на тік на моба, тож додаткового createPath() це не дає).
      * Потрібне для ланцюжка стрибків: у тіку приземлення навігатор моба порожній (ціль його зупиняє на
-     * старті), тож {@link #findUpcomingJumpSegment} нічого не бачить, і наступний стрибок мусив би чекати,
+     * старті), тож {@link #findPlannedJumpSegment} нічого не бачить, і наступний стрибок мусив би чекати,
      * поки Pursuit заново покладе шлях у навігатор (~2 тіки, поки моб "повзе" без керування).
      *
      * @return наступний стрибок від поточного положення, або {@code null}, якщо шляху нема чи поруч лише кроки

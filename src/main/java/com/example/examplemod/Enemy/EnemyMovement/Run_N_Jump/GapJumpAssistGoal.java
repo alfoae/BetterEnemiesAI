@@ -138,7 +138,7 @@ public class GapJumpAssistGoal extends Goal {
      * Наскільки (у блоках) моб міг просісти нижче рівня краю, щоб його ще можна було врятувати
      * рятувальним стрибком ({@link #tryRescueJump}). 1 тік падіння = 0.078, 2 тіки = 0.23.
      */
-    private static final double RESCUE_MAX_DROP = 0.3;
+    static final double RESCUE_MAX_DROP = 0.3;
 
     /** Рятувальний стрибок не летить далі ніж на стільки блоків за довжину сегмента (запобіжник від зламаної геометрії). */
     private static final double RESCUE_MAX_EXTRA_BLOCKS = 2.0;

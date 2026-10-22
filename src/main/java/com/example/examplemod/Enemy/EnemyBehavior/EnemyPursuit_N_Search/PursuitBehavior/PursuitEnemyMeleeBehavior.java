@@ -271,10 +271,17 @@ public class PursuitEnemyMeleeBehavior extends Goal {
         // беремо ГОТОВИЙ Path із того самого спільного кешу, яким користуються і Build/Dig -
         // реальний createPath() рахується не більше разу на тік на моба, хто б не питав першим.
         Path sharedPath = EnemyBreak_N_BuildUtils.getOrComputePath(this.mob, chasePos);
-        this.mob.getNavigation().moveTo(sharedPath, sprintSpeed);
+        // v17: вхід на паркур з нижчого рівня (перший стрибок шляху стартує з клітинки ВИЩЕ за моба): на перший блок треба
+        // ВЗІЙТИ ванільним стрибком-підйомом, а зі спринту він летить ~5 блоків і по блоку 1x1 промахується. Тож перед входом
+        // іде пішки (див. GapJumpUtils.shouldCreepToEntry); звичайні підйоми по сходах цим не гальмуються.
+        boolean creepToEntry = GapJumpUtils.shouldCreepToEntry(this.mob);
+        this.mob.getNavigation().moveTo(sharedPath, creepToEntry ? GapJumpUtils.ENTRY_CREEP_SPEED_MODIFIER : sprintSpeed);
         this.mob.getLookControl().setLookAt(
                 chasePos.x, chasePos.y + this.mob.getBbHeight() * 0.5, chasePos.z, 30.0F, 30.0F);
         Run_N_JumpUtils.applyDefaultRun(this.mob);
+        if (creepToEntry) {
+            this.mob.setSprinting(false); // стрибок зі спринтом дає поштовх уперед - по блоку 1x1 він промахнувся б
+        }
 
         // А атака — дійсно тільки коли реально бачимо ціль, незалежно від того, з якого
         // стану взявся chasePos.

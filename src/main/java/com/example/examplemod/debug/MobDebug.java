@@ -304,10 +304,19 @@ public final class MobDebug {
         });
 
         section(sb, "СТРИБКОВИЙ СЕГМЕНТ У ШЛЯХУ (те, що бачить Pursuit/GapJumpAssist)", s -> {
-            GapJumpUtils.GapJump seg = GapJumpUtils.findUpcomingJumpSegment(mob);
+            GapJumpUtils.GapJump seg = GapJumpUtils.findPlannedJumpSegment(mob);
             if (seg == null) {
-                s.append("    нема (findUpcomingJumpSegment=null)\n");
+                s.append("    нема (у шляху попереду стрибка немає)\n");
                 return;
+            }
+            // v17: "запланований" стрибок і "можна виконувати зараз" - різні речі: гоал/Pursuit бачать його лише коли моб стоїть
+            // на рівні клітинки відриву (див. GapJumpUtils.findUpcomingJumpSegment)
+            boolean ready = GapJumpUtils.findUpcomingJumpSegment(mob) != null;
+            s.append("    моб.y=").append(f(mob.getY())).append(" edge.y=").append(seg.edge().getY())
+                    .append(" готовий_до_відриву=").append(ready)
+                    .append(" підхід_пішки(creep)=").append(GapJumpUtils.shouldCreepToEntry(mob)).append('\n');
+            if (!ready) {
+                s.append("    (поки моб не готовий - не на рівні відриву або в польоті поза вікном порятунку - Pursuit не поступається, GapJumpAssistGoal не стартує)\n");
             }
             s.append("    edge=").append(seg.edge().toShortString()).append(" landing=").append(v(seg.landing()))
                     .append(" розрив=").append(seg.gapBlocks()).append(" exact=").append(seg.exact())

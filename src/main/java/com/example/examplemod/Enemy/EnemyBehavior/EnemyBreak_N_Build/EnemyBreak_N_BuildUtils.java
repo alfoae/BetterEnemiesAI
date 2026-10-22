@@ -4,6 +4,7 @@ import com.example.examplemod.Config;
 import com.example.examplemod.Enemy.EnemyBehavior.EnemyPursuit_N_Search.PursuitBehavior.PursuitEnemyBehavior;
 import com.example.examplemod.Enemy.EnemyInventory.EnemyStorage.IMobBlockStorage;
 import com.example.examplemod.Enemy.EnemyMovement.Run_N_Jump.GapJumpAssistGoal;
+import com.example.examplemod.Enemy.EnemyMovement.Run_N_Jump.GapJumpUtils;
 import com.example.examplemod.debug.DebugLog;
 import com.example.examplemod.debug.MobDebug;
 import net.minecraft.core.BlockPos;
@@ -158,6 +159,13 @@ public final class EnemyBreak_N_BuildUtils {
         // виклик кешується на тік спільно з усіма іншими викликачами.
         Path navPath = getOrComputePath(mob, chasePos);
         boolean rawNavBlocked = navPath == null || !navPath.canReach();
+        // v17: ціль на 2+ блоки вище НЕ "заблокована", якщо до неї є ДОСЯЖНИЙ шлях зі стрибками (паркур): туди можна
+        // дострибати, будувати вежу не треба. Раніше правило висоти на шлях не дивилось узагалі й запускало будівельника
+        // навіть тоді, коли моб якраз ішов паркуром (підлога під паркуром, гравець на 3 блоки вище за моба).
+        boolean parkourRoute = rawHeightBlocked && !rawNavBlocked && GapJumpUtils.pathHasJump(navPath);
+        if (parkourRoute) {
+            rawHeightBlocked = false;
+        }
         boolean rawBlockedNow = rawHeightBlocked || rawNavBlocked;
 
         boolean pastGrace = pastGracePeriod(PATH_BLOCKED_SINCE_TICK, mob, rawBlockedNow);
@@ -167,8 +175,8 @@ public final class EnemyBreak_N_BuildUtils {
             int duration = since != null ? mob.tickCount - since : 0;
             debugMsg(mob, String.format(
                     "[DEBUG isPathBlocked] висота=%.2f (поріг 2.0, сире=%s) навігація(сире)=%s "
-                            + "заблоковано_тіків=%d/%d минув_grace=%s",
-                    heightDifference, rawHeightBlocked, rawNavBlocked,
+                            + "паркур_у_шляху=%s заблоковано_тіків=%d/%d минув_grace=%s",
+                    heightDifference, rawHeightBlocked, rawNavBlocked, parkourRoute,
                     duration, PURSUIT_GRACE_PERIOD_TICKS, pastGrace));
         }
         return pastGrace;
