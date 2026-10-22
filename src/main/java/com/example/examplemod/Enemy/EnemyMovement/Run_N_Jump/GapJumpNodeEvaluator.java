@@ -247,6 +247,20 @@ public class GapJumpNodeEvaluator extends ShapeAwareNodeEvaluator {
     }
 
     /**
+     * v17: чи є серед перших {@code count} сусідів хоч один СПУСК (ноги нижче, ніж у вузла). Лише в напрямку спуску клітинка на
+     * рівні старту - справжнє провалля, з якого можливий стрибок; сусіди на тому ж рівні чи вище його не дають.
+     */
+    private static boolean hasStepDownNeighbor(Node[] nodes, int count, Node node) {
+        for (int i = 0; i < count; i++) {
+            Node n = nodes[i];
+            if (n != null && n.y < node.y) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
      * {@code Δy:кількість} для кожної групи кандидатів - для рядка про переповнення буфера.
      */
     private static String describeLevels(int[] perLevel, int downLimit) {
@@ -265,12 +279,21 @@ public class GapJumpNodeEvaluator extends ShapeAwareNodeEvaluator {
     public int getNeighbors(Node[] nodes, Node node) {
         int count = super.getNeighbors(nodes, node);
         boolean probe = isProbeStart(node);
-        if (count >= ALL_NORMAL_NEIGHBORS) {
+        // v17: "повністю відкрита клітинка" - це 8 сусідів БЕЗ СПУСКІВ (суцільна поверхня на одному рівні): жоден напрямок не має
+        // провалля на рівні старту, тож скан дав би порожньо. Але коли ПІД платформою є ще одна поверхня (підлога під паркуром),
+        // кожен із 8 напрямків теж "прохідний" - як спуск на 1+ блок, - і рівно 8 сусідів має САМ край платформи, звідки стрибок
+        // якраз потрібен. Раніше скан для такого вузла пропускався: ребра на наступну сходинку не було (A* вів моба в обхід),
+        // а гоал "підстрибував на місці". Ванільні сусіди не містять уже закритих вузлів, тому рівно 8 зазвичай буває у стартового
+        // вузла пошуку (поруч іще нічого не закрито): саме від нього починається кожен свіжий шлях, зокрема ланцюжок стрибків.
+        if (count >= ALL_NORMAL_NEIGHBORS && !hasStepDownNeighbor(nodes, count, node)) {
             if (probe) {
-                GraphProbe.logText(this.mob, "стрибкові ребра НЕ скануються: клітинка повністю відкрита (" + count + " сусідів)");
+                GraphProbe.logText(this.mob, "стрибкові ребра НЕ скануються: клітинка повністю відкрита (" + count + " сусідів, без спусків)");
                 GraphProbe.disarm();
             }
-            return count; // повністю відкрита клітинка - тут стрибок ніколи не потрібен, не скануємо
+            return count; // суцільна поверхня на одному рівні - тут стрибок ніколи не потрібен, не скануємо
+        }
+        if (probe && count >= ALL_NORMAL_NEIGHBORS) {
+            GraphProbe.logText(this.mob, "8 сусідів, але серед них є спуски (під платформою інша поверхня): стрибкові ребра СКАНУЮТЬСЯ");
         }
         BlockPos origin = new BlockPos(node.x, node.y, node.z);
         BlockPos floorPos = origin.below();

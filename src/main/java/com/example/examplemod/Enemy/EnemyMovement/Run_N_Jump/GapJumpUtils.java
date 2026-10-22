@@ -325,30 +325,6 @@ public final class GapJumpUtils {
     }
 
     /**
-     * v17: множник швидкості ходьби при підході до входу на паркур (звичайна ходьба, без бігу).
-     */
-    public static final double ENTRY_CREEP_SPEED_MODIFIER = 1.0;
-    /**
-     * v17: допуск по висоті між ногами моба й клітинкою відриву: ноги мають бути в межах клітинки. Трохи нижче її дна
-     * теж можна: плити/нерівності, похибки float, а головне - "запізніле керування" ({@code GapJumpAssistGoal}
-     * рятує моба, що вже зійшов з краю й просів до {@code RESCUE_MAX_DROP}=0.3 блока), тому допуск із запасом більший за 0.3.
-     * Різниця рівнів, яку гейт має ловити (підлога проти першого блока паркуру), - ціла клітинка.
-     */
-    static final double TAKEOFF_LEVEL_TOLERANCE = 0.35;
-    /**
-     * v17: з якої відстані (по горизонталі до центру клітинки відриву) моб починає підходити до входу повільно. Спринт
-     * гаситься тертям за ~3 тіки (~1.5 блока), але швидкі типи мобів гальмують довше: на симуляції підходу до стовпчика 1x1
-     * (ванільні MoveControl/колізії, випадкові кути й швидкості) зомбі потрапляє на блок із першого стрибка в 100% випадків
-     * уже з 4 блоків, а мобу в півтора раза швидшому за зомбі (атрибут 0.35 проти 0.231) потрібно 5. Константа (а не залежна
-     * від швидкості моба), щоб на межі не було тремтіння "біг/ходьба": атрибут швидкості моба змінюється разом зі спринтом.
-     */
-    static final double ENTRY_CREEP_RADIUS = 5.0;
-    /**
-     * v17: на скільки клітинка відриву має бути ВИЩЕ за ноги моба, щоб вважати це підйомом (а не рівною підлогою).
-     */
-    static final double ENTRY_STEP_MIN_RISE = 0.5;
-
-    /**
      * Дивиться в РЕАЛЬНИЙ поточний Path моба (уже побудований {@link GapJumpNodeEvaluator}-ом,
      * якщо на мобі стоїть {@link GapJumpPathNavigation}) і шукає, чи серед НАЙБЛИЖЧИХ пари
      * сусідніх вузлів попереду є "стрибковий" сегмент — тобто пара вузлів, що лежать далі одне
@@ -381,6 +357,11 @@ public final class GapJumpUtils {
     }
 
     /**
+     * v17: множник швидкості ходьби при підході до входу на паркур (звичайна ходьба, без бігу).
+     */
+    public static final double ENTRY_CREEP_SPEED_MODIFIER = 1.0;
+
+    /**
      * v17: стрибок, який моб може виконувати ПРЯМО ЗАРАЗ: {@link #findPlannedJumpSegment} плюс одна умова - моб стоїть на
      * ТОМУ Ж рівні, що й клітинка відриву.
      * <p>
@@ -406,6 +387,30 @@ public final class GapJumpUtils {
         }
         return jump;
     }
+    /**
+     * v17: допуск по висоті між ногами моба й клітинкою відриву: ноги мають бути в межах клітинки. Трохи нижче її дна
+     * теж можна: плити/нерівності, похибки float, а головне - "запізніле керування" ({@code GapJumpAssistGoal}
+     * рятує моба, що вже зійшов з краю й просів до {@code RESCUE_MAX_DROP}=0.3 блока), тому допуск із запасом більший за 0.3.
+     * Різниця рівнів, яку гейт має ловити (підлога проти першого блока паркуру), - ціла клітинка.
+     */
+    static final double TAKEOFF_LEVEL_TOLERANCE = 0.35;
+    /**
+     * v17: наскільки далеко за центр краю (вздовж осі стрибка) моб ще може бути, щоб це було "запізніле керування" (Pursuit
+     * біг ~2 тіки до передачі: до 1.5-2 блоків на швидкому мобі), а не хибний старт з точки приземлення.
+     */
+    static final double MAX_PAST_EDGE = 2.5;
+    /**
+     * v17: з якої відстані (по горизонталі до центру клітинки відриву) моб починає підходити до входу повільно. Спринт
+     * гаситься тертям за ~3 тіки (~1.5 блока), але швидкі типи мобів гальмують довше: на симуляції підходу до стовпчика 1x1
+     * (ванільні MoveControl/колізії, випадкові кути й швидкості) зомбі потрапляє на блок із першого стрибка в 100% випадків
+     * уже з 4 блоків, а мобу в півтора раза швидшому за зомбі (атрибут 0.35 проти 0.231) потрібно 5. Константа (а не залежна
+     * від швидкості моба), щоб на межі не було тремтіння "біг/ходьба": атрибут швидкості моба змінюється разом зі спринтом.
+     */
+    static final double ENTRY_CREEP_RADIUS = 5.0;
+    /**
+     * v17: на скільки клітинка відриву має бути ВИЩЕ за ноги моба, щоб вважати це підйомом (а не рівною підлогою).
+     */
+    static final double ENTRY_STEP_MIN_RISE = 0.5;
 
     /**
      * v17: чи може моб почати цей стрибок просто зараз - ТІ САМІ правила, за якими {@code GapJumpAssistGoal.canUse()} його
@@ -414,7 +419,9 @@ public final class GapJumpUtils {
      *   <li>ноги моба в діапазоні висот клітинки відриву (моб на тому ж рівні, що й край);</li>
      *   <li>на землі - готовий; у повітрі - лише у вікні "запізнілого керування": просів не більше за
      *       {@code RESCUE_MAX_DROP} і не летить угору (стрибок-підйом на перший блок паркуру - це політ угору, тут він
-     *       ще не готовий).</li>
+     *       ще не готовий);</li>
+     *   <li>шлях до краю йде по тій самій поверхні (усі вузли до краю на його висоті), а не в обхід через підлогу;</li>
+     *   <li>моб не далі {@link #MAX_PAST_EDGE} за краєм по осі стрибка (інакше це не запізніле керування, а хибний старт).</li>
      * </ul>
      */
     static boolean isReadyToJump(Mob mob, GapJump jump) {
@@ -425,9 +432,70 @@ public final class GapJumpUtils {
         }
         if (!mob.onGround()) {
             double drop = jump.takeoffPoint().y - y;
-            return drop >= -0.05 && drop <= GapJumpAssistGoal.RESCUE_MAX_DROP && mob.getDeltaMovement().y <= 0.1;
+            if (drop < -0.05 || drop > GapJumpAssistGoal.RESCUE_MAX_DROP || mob.getDeltaMovement().y > 0.1) {
+                return false;
+            }
+        }
+        // Збіг рівнів ще не означає, що моб може просто добігти до краю: край може бути на ТОМУ Ж рівні, але в іншому місці, куди
+        // шлях веде в обхід (вниз на підлогу й назад), а не по поверхні, на якій моб стоїть. Старт гоала посеред такого
+        // шляху - це біг прямо до краю через порожнечу або "запізніле керування" далеко за краєм (стрибок на місці).
+        return isWalkToTakeoffLevel(mob, edge) && !isPastTakeoff(mob, jump);
+    }
+
+    /**
+     * v17: індекс вузла відриву в шляху: перша пара (i, i+1) від {@code from}, що є стрибком за тим самим критерієм, що й у
+     * {@link #findJumpSegmentInPath}, і вузол i якої - це клітинка {@code edge}. {@code -1}, якщо не знайдено.
+     */
+    private static int takeoffIndexOf(Path path, int from, BlockPos edge) {
+        int lookahead = path.getNodeCount() - 1;
+        for (int i = from; i < lookahead; i++) {
+            Node a = path.getNode(i);
+            if (a.x != edge.getX() || a.y != edge.getY() || a.z != edge.getZ()) {
+                continue;
+            }
+            Node b = path.getNode(i + 1);
+            double dx = b.x - a.x;
+            double dz = b.z - a.z;
+            if (b instanceof HopNode || dx * dx + dz * dz > JUMP_SEGMENT_THRESHOLD * JUMP_SEGMENT_THRESHOLD) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    /**
+     * v17: чи веде шлях до клітинки відриву {@code edge} ПО ТІЙ САМІЙ ПОВЕРХНІ: усі вузли від наступного за поточним до самого
+     * краю - на висоті краю. Якщо шлях спускається/піднімається (обхід через підлогу, сходинки), прямого бігу до краю нема:
+     * мобу спершу треба пройти шлях, а не стрибати. Не знайшли вузла краю (застарілий кеш) - не блокуємо.
+     */
+    private static boolean isWalkToTakeoffLevel(Mob mob, BlockPos edge) {
+        Path path = mob.getNavigation().getPath();
+        if (path == null) {
+            return true;
+        }
+        int from = Math.max(0, path.getNextNodeIndex() - 1);
+        int takeoffIndex = takeoffIndexOf(path, from, edge);
+        for (int i = from + 1; i <= takeoffIndex; i++) {
+            if (path.getNode(i).y != edge.getY()) {
+                return false;
+            }
         }
         return true;
+    }
+
+    /**
+     * v17: чи моб уже далеко ЗА краєм (по осі від краю до точки приземлення) - тоді стрибок з цього краю робити нема звідки.
+     */
+    private static boolean isPastTakeoff(Mob mob, GapJump jump) {
+        Vec3 takeoff = jump.takeoffPoint();
+        double dx = jump.landing().x - takeoff.x;
+        double dz = jump.landing().z - takeoff.z;
+        double length = Math.sqrt(dx * dx + dz * dz);
+        if (length < 1.0E-6) {
+            return false;
+        }
+        double along = ((mob.getX() - takeoff.x) * dx + (mob.getZ() - takeoff.z) * dz) / length;
+        return along > MAX_PAST_EDGE;
     }
 
     /**
