@@ -23,6 +23,7 @@ import net.minecraft.world.phys.Vec3;
 
 import java.util.Map;
 import java.util.WeakHashMap;
+import java.util.function.Supplier;
 
 public final class EnemyBreak_N_BuildUtils {
 
@@ -55,11 +56,15 @@ public final class EnemyBreak_N_BuildUtils {
     // встигав перехопити керування й повести моба по частковому шляху вниз/убік. Тепер ОДИН
     // трекер на СИРИЙ комбінований сигнал (висота АБО навігація) - перехід через поріг більше не
     // скидає накопичений час.
-    private static final Map<Mob, Integer> PATH_BLOCKED_SINCE_TICK = new WeakHashMap<>();
+    // v18: замість Map<Mob, Integer> (тік першого "заблоковано") - автомат TerraformRules.BlockedTracker: його годують лише
+    // НОВІ справжні обчислення шляху, а не застигла відповідь тротлінгу (див. isPathBlocked).
+    private static final Map<Mob, TerraformRules.BlockedTracker> PATH_BLOCKED_TRACKER = new WeakHashMap<>();
     // Окремий трекер лишається лише для {@link #isNavigationBlocked} самого по собі - його
     // незалежно й напряму викликає {@link DigThroughWallsGoal} (без надбавки за висоту), тож його
     // власний grace-таймер має рахуватись сам по собі, не змішуючись із isPathBlocked.
-    private static final Map<Mob, Integer> NAV_BLOCKED_SINCE_TICK = new WeakHashMap<>();
+    private static final Map<Mob, TerraformRules.BlockedTracker> NAV_BLOCKED_TRACKER = new WeakHashMap<>();
+    // v18: чи "завис" моб на маршруті паркуру (див. parkourRouteAhead).
+    private static final Map<Mob, TerraformRules.StallDetector> PARKOUR_STALL = new WeakHashMap<>();
     private static final int PURSUIT_GRACE_PERIOD_TICKS = 30; // 1.5с - скільки часу дається pursuit перш ніж підключати будівництво/копання
     private static final Map<Mob, NavCache> NAV_CACHE = new WeakHashMap<>();
 
@@ -110,20 +115,6 @@ public final class EnemyBreak_N_BuildUtils {
     private EnemyBreak_N_BuildUtils() {
     }
 
-    /**
-     * Реєструє "сире" (без grace-періоду) заблоковано/ні для цього тіку в переданому трекері, і
-     * повертає, чи минув {@link #PURSUIT_GRACE_PERIOD_TICKS}. Якщо в якийсь момент rawBlockedNow
-     * стає false (шлях знову вільний, навіть на 1 тік) - таймер скидається повністю: pursuit
-     * отримує свіжий шанс щоразу, коли перепона зникає, а не просто "накопичує" заблокованість.
-     */
-    private static boolean pastGracePeriod(Map<Mob, Integer> tracker, Mob mob, boolean rawBlockedNow) {
-        if (!rawBlockedNow) {
-            tracker.remove(mob);
-            return false;
-        }
-        int sinceTick = tracker.computeIfAbsent(mob, m -> mob.tickCount);
-        return (mob.tickCount - sinceTick) >= PURSUIT_GRACE_PERIOD_TICKS;
-    }
     // Затримка між постановками блоків одним і тим самим мобом - "у ванілі у гравця є задержка
     // перед установкою блока" (короткий per-mob кулдаун, ОКРЕМИЙ від ACTION_COOLDOWN_TICKS
     // конкретних Goal-ів: цей рахується на РІВНІ самого API постановки блоку, тож діє
@@ -140,16 +131,46 @@ public final class EnemyBreak_N_BuildUtils {
     }
 
     /**
-     * "Заблоковано" з надбавкою за різницю висот: ціль на 2+ блоки вище вважається заблокованою,
-     * навіть якщо ванільний шлях технічно існує — так тригериться підйом у {@link BuildPathGoal}.
+     * "Заблоковано" з надбавкою за різницю висот: ціль на 2+ блоки вище вважається заблокованою, якщо до неї немає ні
+     * маршруту паркуром, ні розумного звичайного проходу - так тригериться підйом у {@link BuildPathGoal}.
      * {@link DigThroughWallsGoal} висота сама по собі не цікавить (копання не залежить від того,
      * наскільки вище ціль) — там використовується чистіший {@link #isNavigationBlocked} без цієї
      * надбавки. Дві різні назви навмисно — щоб однакова назва не наштовхувала на думку, що це
      * один і той самий тест.
+     * <p>
+     * <b>v18: будівництво - крайній засіб, тому "заблоковано" лише коли нічого іншого не лишилось.</b>
+     * <ol>
+     *   <li><b>Паркур має пріоритет.</b> Поки {@link GapJumpAssistGoal} веде моба й ще
+     *       {@link TerraformRules#PARKOUR_COOLDOWN_TICKS} тіків після нього - false (раніше будівельник вклинювався між
+     *       двома стрибками ланцюжка й ставив блок під стрибок).</li>
+     *   <li><b>Grace годують лише справжні обчислення шляху.</b> Тротлінг недосяжної цілі віддає застиглу відповідь до
+     *       {@code unreachableRecomputeIntervalTicks}=40 тіків, а grace - 30: стара відповідь сама "дорощувала" grace, хоч
+     *       реальність уже змінилась (збій A* на кілька тіків = вежа/міст посеред паркуру). Тепер вердикт змінюється
+     *       лише на новому обчисленні, а саме обчислення планується рівно на кінець grace
+     *       ({@link NavCache#wantFreshTickPath}), тож реальна перепона й далі дає будівництво через ті самі 30 тіків.</li>
+     *   <li><b>Маршрут паркуром ПОПЕРЕДУ</b> (повний, а також частковий - коли A* не дотягнувся до гравця) - не
+     *       "заблоковано": спершу пройти його. Виправдання діє, лише поки моб рухається ({@link #parkourRouteAhead}).</li>
+     *   <li><b>Звичайний прохід</b> (сходи/схил) до цілі на 2+ вище не потребує вежі, якщо він не нерозумно довгий.</li>
+     *   <li>Висота міряється до ЗЕМЛІ під гравцем (та сама ціль, що й у шляху), а не до його живої позиції: гравець, що
+     *       підстрибує, додавав до різниці до 1.25 бл.</li>
+     * </ol>
      */
     public static boolean isPathBlocked(Mob mob, Vec3 chasePos) {
-        double heightDifference = chasePos.y - mob.getY();
-        boolean rawHeightBlocked = heightDifference >= 2.0;
+        TerraformRules.BlockedTracker tracker =
+                PATH_BLOCKED_TRACKER.computeIfAbsent(mob, m -> new TerraformRules.BlockedTracker());
+
+        // v18 (1): паркур має пріоритет над будівництвом.
+        if (isParkourBusy(mob)) {
+            tracker.reset();
+            markComputesSeen(mob, tracker);
+            gateLog(mob, "path-parkour", () -> "isPathBlocked=false: паркур триває або щойно скінчився (GapJumpAssistGoal) - "
+                    + "будівництво не втручається");
+            return false;
+        }
+
+        BlockPos pathTarget = resolvePathTarget(mob, chasePos);
+        // v18: різниця висот - до землі під гравцем, а не до його живої позиції (стрибок гравця не "піднімає" ціль).
+        double heightDifference = pathTarget.getY() - mob.getY();
 
         // Той самий кеш на тік, що й isNavigationBlocked/PursuitEnemyMeleeBehavior.tick()
         // використовують через getOrComputePath - рахуємо це тут БЕЗУМОВНО (а не лише коли
@@ -158,28 +179,179 @@ public final class EnemyBreak_N_BuildUtils {
         // далеко/явно нижче, шлях і так майже завжди недосяжний (rawNavBlocked теж true), а сам
         // виклик кешується на тік спільно з усіма іншими викликачами.
         Path navPath = getOrComputePath(mob, chasePos);
-        boolean rawNavBlocked = navPath == null || !navPath.canReach();
+        NavCache cache = NAV_CACHE.get(mob);
+        // v18 (2): нового справжнього обчислення від минулого разу нема (застигла відповідь тротлінгу або політ) - це
+        // НЕ спостереження: grace не росте, вердикт лишається таким, яким був.
+        if (cache == null || cache.computeSeq == tracker.seenComputeSeq()) {
+            return tracker.verdict();
+        }
+        tracker.markSeen(cache.computeSeq);
+
+        boolean navReachable = navPath != null && navPath.canReach();
+        boolean heightRaw = heightDifference >= 2.0;
+        boolean navRaw = !navReachable;
+        boolean rawHeightBlocked = heightRaw;
+        boolean rawNavBlocked = navRaw;
+
         // v17: ціль на 2+ блоки вище НЕ "заблокована", якщо до неї є ДОСЯЖНИЙ шлях зі стрибками (паркур): туди можна
-        // дострибати, будувати вежу не треба. Раніше правило висоти на шлях не дивилось узагалі й запускало будівельника
-        // навіть тоді, коли моб якраз ішов паркуром (підлога під паркуром, гравець на 3 блоки вище за моба).
-        boolean parkourRoute = rawHeightBlocked && !rawNavBlocked && GapJumpUtils.pathHasJump(navPath);
-        if (parkourRoute) {
+        // дострибати, будувати вежу не треба. v18: те саме для ЧАСТКОВОГО маршруту паркуром (A* не дотягнувся до гравця,
+        // але попереду є стрибки) - до його кінця Pursuit іде сам; і для звичайного проходу (сходи/схил).
+        boolean routeAhead = (heightRaw || navRaw) && parkourRouteAhead(mob, navPath); // є що виправдовувати
+        boolean walkWaiver = false;
+        if (routeAhead) {
             rawHeightBlocked = false;
+            rawNavBlocked = false;
+        } else if (rawHeightBlocked && navReachable
+                && TerraformRules.isReasonableWalk(navPath.getNodeCount(), horizontalDistance(mob, pathTarget))) {
+            rawHeightBlocked = false;
+            walkWaiver = true;
         }
         boolean rawBlockedNow = rawHeightBlocked || rawNavBlocked;
 
-        boolean pastGrace = pastGracePeriod(PATH_BLOCKED_SINCE_TICK, mob, rawBlockedNow);
-        // ТИМЧАСОВИЙ DEBUG: раз/сек - показує ОБИДВІ сирі причини і спільний статус grace-періоду.
-        if (mob.tickCount % 20 == 0) {
-            Integer since = PATH_BLOCKED_SINCE_TICK.get(mob);
-            int duration = since != null ? mob.tickCount - since : 0;
+        boolean pastGrace = tracker.observe(cache.lastRealComputeTick, rawBlockedNow, PURSUIT_GRACE_PERIOD_TICKS,
+                observationGapLimit());
+        scheduleFresh(cache, false, tracker, rawBlockedNow, pastGrace);
+
+        // ТИМЧАСОВИЙ DEBUG: раз/сек - показує сирі причини, виправдання й спільний статус grace-періоду.
+        if (DebugLog.on(DebugLog.Cat.BUILD) && DebugLog.throttle("ipb|" + mob.getId(), 1000L)) {
             debugMsg(mob, String.format(
-                    "[DEBUG isPathBlocked] висота=%.2f (поріг 2.0, сире=%s) навігація(сире)=%s "
-                            + "паркур_у_шляху=%s заблоковано_тіків=%d/%d минув_grace=%s",
-                    heightDifference, rawHeightBlocked, rawNavBlocked, parkourRoute,
-                    duration, PURSUIT_GRACE_PERIOD_TICKS, pastGrace));
+                    "[DEBUG isPathBlocked] висота=%.2f (поріг 2.0, сире=%s) навігація(сире)=%s | виправдання: "
+                            + "паркур_попереду=%s звичайний_прохід=%s -> висота=%s навігація=%s | "
+                            + "заблоковано_тіків=%d/%d минув_grace=%s",
+                    heightDifference, heightRaw, navRaw, routeAhead, walkWaiver, rawHeightBlocked, rawNavBlocked,
+                    tracker.blockedTicks(mob.tickCount), PURSUIT_GRACE_PERIOD_TICKS, pastGrace));
         }
         return pastGrace;
+    }
+
+    /**
+     * v18: чи триває паркур для цього моба: GapJumpAssistGoal активний АБО був активний щойно
+     * ({@link TerraformRules#PARKOUR_COOLDOWN_TICKS}). Між двома стрибками ланцюжка й після приземлення ціль на 1-3 тіки
+     * неактивна - саме в цю щілину раніше вклинювався будівельник.
+     */
+    public static boolean isParkourBusy(Mob mob) {
+        return GapJumpAssistGoal.wasActiveWithin(mob, TerraformRules.PARKOUR_COOLDOWN_TICKS);
+    }
+
+    /**
+     * v18: чи можна підкласти блок під мобом, що зараз у повітрі (аварійна підлога). Єдине місце правила для
+     * {@link BuildPathGoal} і {@link TowerClimbGoal}; логіка - {@link TerraformRules#allowAirborneFloor}.
+     *
+     * @param pillaring true, якщо моб саме будує вежу (підстрибує на місці) - тоді підлога в польоті дозволена
+     */
+    public static boolean allowAirborneFloor(Mob mob, boolean pillaring) {
+        return TerraformRules.allowAirborneFloor(mob.onGround(), GapJumpAssistGoal.isActive(mob), pillaring,
+                mob.getDeltaMovement().y, mob.fallDistance);
+    }
+
+    /**
+     * v18: центральний гейт постановки блока. Повертає причину відмови або {@code null}, якщо можна.
+     * <ul>
+     *   <li>під час паркур-стрибка ({@link GapJumpAssistGoal#isActive}) не ставимо НІЧОГО, крім клатча: блок під моба
+     *       посеред стрибка ламає сам стрибок;</li>
+     *   <li>клатч після нокбеку не потрібен, поки паркур-політ іде за планом (моб ще вище нижньої межі польоту) - це
+     *       звичайний політ, а не падіння.</li>
+     * </ul>
+     */
+    static String placementVeto(Mob mob, PlaceReason reason) {
+        if (reason == PlaceReason.CLUTCH) {
+            return GapJumpAssistGoal.isFlightOnTrack(mob)
+                    ? "паркур-політ іде за планом (моб вище нижньої межі польоту) - клатч не потрібен" : null;
+        }
+        if (GapJumpAssistGoal.isActive(mob)) {
+            return "активний паркур-стрибок (GapJumpAssistGoal): будівництво під час нього заборонене";
+        }
+        return null;
+    }
+
+    /**
+     * v18: є ЧАСТКОВИЙ чи повний маршрут паркуром ПОПЕРЕДУ моба, і моб по ньому реально рухається. Тоді "заблоковано"
+     * не буває: спершу пройти маршрут. Коли стрибки закінчились (мертвий кінець) або моб завис на
+     * {@link TerraformRules#PARKOUR_STALL_TICKS} тіків - виправдання знято, і далі працює звичайний grace.
+     */
+    private static boolean parkourRouteAhead(Mob mob, Path path) {
+        if (!GapJumpUtils.hasJumpAhead(path, mob)) {
+            TerraformRules.StallDetector old = PARKOUR_STALL.get(mob);
+            if (old != null) {
+                old.reset();
+            }
+            return false;
+        }
+        TerraformRules.StallDetector stall = PARKOUR_STALL.computeIfAbsent(mob, m -> new TerraformRules.StallDetector());
+        boolean stalled = stall.stalled(mob.tickCount, mob.getX(), mob.getY(), mob.getZ(),
+                TerraformRules.STALL_MIN_MOVE, TerraformRules.PARKOUR_STALL_TICKS, observationGapLimit());
+        if (stalled) {
+            gateLog(mob, "route-stalled", () -> "маршрут паркуром попереду є, але моб не рухається "
+                    + TerraformRules.PARKOUR_STALL_TICKS + "+ тіків: виправдання знято, працює звичайний grace");
+            return false;
+        }
+        gateLog(mob, "route-ahead", () -> "попереду маршрут паркуром (повний чи частковий): не 'заблоковано', "
+                + "спершу пройти його");
+        return true;
+    }
+
+    private static double horizontalDistance(Mob mob, BlockPos pos) {
+        double dx = pos.getX() + 0.5 - mob.getX();
+        double dz = pos.getZ() + 0.5 - mob.getZ();
+        return Math.sqrt(dx * dx + dz * dz);
+    }
+
+    /**
+     * Найдовша законна перерва між двома спостереженнями (тротлінг) + запас; довша - серія застаріла.
+     */
+    private static int observationGapLimit() {
+        return Config.UNREACHABLE_RECOMPUTE_INTERVAL_TICKS.get() + 20;
+    }
+
+    /**
+     * Усі наявні обчислення вважаємо баченими (паркур триває - вони не мають права рахуватись у grace).
+     */
+    private static void markComputesSeen(Mob mob, TerraformRules.BlockedTracker tracker) {
+        NavCache cache = NAV_CACHE.get(mob);
+        if (cache != null) {
+            tracker.markSeen(cache.computeSeq);
+        }
+    }
+
+    /**
+     * Просить кеш шляху зробити СВІЖЕ обчислення рівно на кінець grace-періоду: інакше тротлінг (інтервал із конфігу)
+     * міг би відкласти вердикт на десятки тіків, а при великому інтервалі - на хвилини.
+     */
+    private static void scheduleFresh(NavCache cache, boolean forNav, TerraformRules.BlockedTracker tracker,
+                                      boolean rawBlocked, boolean pastGrace) {
+        int wanted = TerraformRules.NO_TICK;
+        if (rawBlocked && !pastGrace && tracker.sinceTick() != TerraformRules.NO_TICK) {
+            wanted = tracker.sinceTick() + PURSUIT_GRACE_PERIOD_TICKS;
+        }
+        if (forNav) {
+            cache.wantFreshTickNav = wanted;
+        } else {
+            cache.wantFreshTickPath = wanted;
+        }
+    }
+
+    /**
+     * Найближчий ТІК у майбутньому (після останнього справжнього обчислення), на який просили свіжий шлях.
+     */
+    private static int nextWantedTick(NavCache cache) {
+        int last = cache.lastRealComputeTick;
+        int best = TerraformRules.NO_TICK;
+        int p = cache.wantFreshTickPath;
+        if (p != TerraformRules.NO_TICK && p > last) {
+            best = p;
+        }
+        int n = cache.wantFreshTickNav;
+        if (n != TerraformRules.NO_TICK && n > last && (best == TerraformRules.NO_TICK || n < best)) {
+            best = n;
+        }
+        return best;
+    }
+
+    /**
+     * Лог рішень гейта: не частіше разу на секунду на (моб, ключ); рядок будується лише коли лог увімкнено.
+     */
+    private static void gateLog(Mob mob, String key, Supplier<String> msg) {
+        DebugLog.logThrottled(DebugLog.Cat.BUILD, mob, "gate|" + key + "|" + mob.getId(), 1000L, msg);
     }
 
     /**
@@ -226,12 +398,15 @@ public final class EnemyBreak_N_BuildUtils {
         BlockPos pathTarget = resolvePathTarget(mob, chasePos);
         NavCache cache = NAV_CACHE.computeIfAbsent(mob, m -> new NavCache());
 
-        // v14 - у ПОЛЬОТІ стрибка GapJumpAssistGoal шлях не рахуємо. Поки моб у повітрі, стартова точка A*
-        // (getStart для !onGround) "провалюється" вниз - до ями/землі під розривом, тож шлях виходить про ІНШЕ місце
-        // (часто недосяжний). BuildPath/Dig/TowerClimb/Pursuit опитують цей метод щотіку й під час польоту теж,
-        // лічильник недосяжності ріс, і ПІСЛЯ приземлення тротлінг (unreachableRecomputeIntervalTicks) віддавав цей
-        // застарілий шлях: ланцюжок стрибків обривався, а моб стояв до наступного справжнього перерахунку (~1 с).
-        if (cache.path != null && !mob.onGround() && GapJumpAssistGoal.isActive(mob)) {
+        // v14 (v18: для БУДЬ-ЯКОГО польоту, не лише паркурового) - у ПОВІТРІ шлях не рахуємо. Поки моб у повітрі, стартова
+        // точка A* (getStart для !onGround) "провалюється" вниз - до ями/землі під розривом, тож шлях виходить про ІНШЕ
+        // місце (часто недосяжний; можливо, ванільна навігація в повітрі взагалі не рахує шлях - це не перевірялось). BuildPath/Dig/TowerClimb/
+        // Pursuit опитують цей метод щотіку й під час польоту теж, лічильник недосяжності ріс, і ПІСЛЯ приземлення
+        // тротлінг (unreachableRecomputeIntervalTicks) віддавав цей застарілий шлях: ланцюжок стрибків обривався, моб
+        // стояв до наступного справжнього перерахунку (~1 с), а сигнал "недосяжно" запускав будівництво. У v14 це було
+        // закрито лише для GapJumpAssistGoal; але так само отруює кеш звичайний гоп на сходинку, падіння й нокбек.
+        // У воді/лаві шлях рахується як і раніше (там createPath() працює).
+        if (!mob.onGround() && !mob.isInWaterOrBubble() && !mob.isInLava()) {
             return cache.path;
         }
 
@@ -248,6 +423,15 @@ public final class EnemyBreak_N_BuildUtils {
         boolean targetChanged = !pathTarget.equals(cache.pathTarget);
         if (!targetChanged && cache.consecutiveUnreachableTicks > 0) {
             int interval = recomputeIntervalFor(cache.consecutiveUnreachableTicks);
+            // v18: isPathBlocked/isNavigationBlocked просять свіжий шлях рівно на кінець grace-періоду - інакше вердикт
+            // чекав би на наступне планове обчислення (інтервал із конфігу, до хвилин).
+            int wanted = nextWantedTick(cache);
+            if (wanted != TerraformRules.NO_TICK) {
+                int untilWanted = wanted - cache.lastRealComputeTick;
+                if (untilWanted > 0 && untilWanted < interval) {
+                    interval = untilWanted;
+                }
+            }
             if (mob.tickCount - cache.lastRealComputeTick < interval) {
                 cache.tickComputed = mob.tickCount; // той самий тік - не рахувати ще раз із getOrComputePath()
                 if (DebugLog.on(DebugLog.Cat.PATH) && DebugLog.throttle("path-skip-" + mob.getId(), 1000L)) {
@@ -262,6 +446,7 @@ public final class EnemyBreak_N_BuildUtils {
 
         Path path = mob.getNavigation().createPath(pathTarget, 0);
         cache.lastRealComputeTick = mob.tickCount;
+        cache.computeSeq++;
         cache.consecutiveUnreachableTicks = (path != null && path.canReach()) ? 0 : cache.consecutiveUnreachableTicks + 1;
 
         // [PATH DEBUG] - лишаю (корисно знайшли не я): тепер спрацьовує лише на СПРАВЖНЬОМУ
@@ -311,10 +496,35 @@ public final class EnemyBreak_N_BuildUtils {
      * Чисто "чи існує прохідний шлях" до точки переслідування — без надбавки за висоту з
      * {@link #isPathBlocked}. Використовується {@link DigThroughWallsGoal}, якому висота не
      * заважає: копання йде в напрямку цілі незалежно від того, вище вона чи нижче.
+     * <p>
+     * v18: ті самі правила, що й у {@link #isPathBlocked}: паркур має пріоритет, grace годують лише справжні
+     * обчислення шляху, маршрут паркуром попереду виправдовує очікування.
      */
     public static boolean isNavigationBlocked(Mob mob, Vec3 chasePos) {
+        TerraformRules.BlockedTracker tracker =
+                NAV_BLOCKED_TRACKER.computeIfAbsent(mob, m -> new TerraformRules.BlockedTracker());
+
+        if (isParkourBusy(mob)) {
+            tracker.reset();
+            markComputesSeen(mob, tracker);
+            return false;
+        }
+
         Path path = getOrComputePath(mob, chasePos);
+        NavCache cache = NAV_CACHE.get(mob);
+        if (cache == null || cache.computeSeq == tracker.seenComputeSeq()) {
+            return tracker.verdict();
+        }
+        tracker.markSeen(cache.computeSeq);
+
         boolean rawBlocked = path == null || !path.canReach();
+        boolean routeAhead = rawBlocked && parkourRouteAhead(mob, path);
+        if (routeAhead) {
+            rawBlocked = false;
+        }
+        boolean pastGrace = tracker.observe(cache.lastRealComputeTick, rawBlocked, PURSUIT_GRACE_PERIOD_TICKS,
+                observationGapLimit());
+        scheduleFresh(cache, true, tracker, rawBlocked, pastGrace);
 
         // ТИМЧАСОВИЙ DEBUG: тільки коли RAW заблоковано (щоб не спамити щотіку в межах
         // grace-періоду). Дублювання між Goal-ами того самого тіку більше нема - getOrComputePath
@@ -325,8 +535,7 @@ public final class EnemyBreak_N_BuildUtils {
             Player trackedPlayer = PursuitEnemyBehavior.getTrackedPlayer(mob);
             boolean naivePassable = isPassableColumn(mob.level(), naiveTarget);
             boolean pathTargetPassable = isPassableColumn(mob.level(), pathTarget);
-            Integer since = NAV_BLOCKED_SINCE_TICK.get(mob);
-            int duration = since != null ? mob.tickCount - since : 0;
+            int duration = tracker.blockedTicks(mob.tickCount);
             debugMsg(mob, String.format(
                     "[DEBUG isNavigationBlocked] RAW=true (canReach=%s вузлів=%s) заблоковано_тіків=%d/%d "
                             + "naive-блок=%s(прохідна=%s) path-ціль=%s(прохідна=%s) liveChasing=%s "
@@ -343,7 +552,7 @@ public final class EnemyBreak_N_BuildUtils {
                     mob.getX(), mob.getY(), mob.getZ()));
         }
 
-        return pastGracePeriod(NAV_BLOCKED_SINCE_TICK, mob, rawBlocked);
+        return pastGrace;
     }
 
     public static BlockPos findNearestOpenArea(Mob mob, Level level, Vec3 chasePos) {
@@ -402,23 +611,59 @@ public final class EnemyBreak_N_BuildUtils {
     }
 
     /**
-     * КЕШ createPath() НА ТІК (знайдено користувачем через окремий debug-лог "[PATH DEBUG]"):
-     * {@code mob.getNavigation()} — той самий спільний об'єкт щоразу, а
-     * {@code BuildPathGoal.canUse()} і {@code DigThroughWallsGoal.canUse()} ОБИДВА опитуються
-     * GoalSelector-ом щотіку й ОБИДВА незалежно кличуть createPath() на ньому — навіть коли
-     * жоден не "виграє" пріоритет. Лог показав: два послідовні виклики createPath() з ОДНІЄЮ
-     * й тією ж ціллю в межах одного тіка давали РІЗНІ результати (canReach=true/8 вузлів, потім
-     * canReach=false/22 вузли, інший endNode) — ванільний NodeEvaluator не розрахований на
-     * повторний виклик у тому самому тіку. Тепер рахуємо не більше разу на тік на моба.
+     * Ставить блок від імені {@code mob}. Перевірки, усі "тихі" (просто нічого не робить,
+     * якщо не пройшли) — знайдені живим тестуванням:
+     * <ol>
+     *   <li>v18: гейт контексту ({@link #placementVeto}) - під час паркур-стрибка нічого, крім клатча, не ставимо;</li>
+     *   <li>НЕ переписує вже існуючий (не-replaceable) блок — {@code canBeReplaced()}, той самий
+     *       критерій, що й у ванільного розміщення, а не вужчий {@code !isSolid()} (який
+     *       пропускав, наприклад, квіти/факели/рейки — вони не "solid", але явно не порожні).</li>
+     *   <li>Не частіше, ніж раз на {@link Config#MOB_PLACE_DELAY_TICKS} тіків для ЦЬОГО моба.</li>
+     *   <li>{@link #hasAdjacentSolid} — інакше не ставить.</li>
+     * </ol>
+     *
+     * @param reason навіщо ставимо (див. {@link PlaceReason}); потрапляє в лог, і від нього залежить гейт
      */
-    private static final class NavCache {
-        int tickComputed = -1;
-        BlockPos pathTarget;
-        boolean canReach;
-        Path path;
-        // v12 - троттлінг недосяжної цілі, див. getOrComputePath вище.
-        int consecutiveUnreachableTicks = 0;
-        int lastRealComputeTick = Integer.MIN_VALUE;
+    public static void placeBlock(ServerLevel level, BlockPos pos, Mob mob, PlaceReason reason) {
+        String veto = placementVeto(mob, reason);
+        if (veto != null) {
+            buildLog(mob, "placeBlock[" + reason + "](" + pos.toShortString() + ") ВІДМОВА (гейт): " + veto);
+            return;
+        }
+        // ДЕБАГ: кожна "тиха" відмова тепер лишає слід у лозі - раніше placeBlock мовчки робив return.
+        BlockState existing = level.getBlockState(pos);
+        if (!existing.canBeReplaced()) {
+            buildLog(mob, "placeBlock[" + reason + "](" + pos.toShortString() + ") ВІДМОВА: клітинка не замінювана: " + existing);
+            return;
+        }
+        if (!hasAdjacentSolid(level, pos)) {
+            buildLog(mob, "placeBlock[" + reason + "](" + pos.toShortString() + ") ВІДМОВА: нема суміжного isSolid()-блока для опори");
+            return;
+        }
+
+        long now = level.getGameTime();
+        Long lastTick = LAST_PLACE_TICK.get(mob);
+        if (lastTick != null && now - lastTick < Config.MOB_PLACE_DELAY_TICKS.get()) {
+            buildLog(mob, "placeBlock[" + reason + "](" + pos.toShortString() + ") ВІДМОВА: затримка між блоками, лишилось "
+                    + (Config.MOB_PLACE_DELAY_TICKS.get() - (now - lastTick)) + " тіків");
+            return;
+        }
+
+        Block block = DigBlockResolver.getDigBlock(level);
+        BlockState state = block.defaultBlockState();
+
+        level.setBlock(pos, state, 3);
+        level.playSound(null, pos, state.getSoundType().getPlaceSound(), SoundSource.HOSTILE, 1.0F, 1.0F);
+        LAST_PLACE_TICK.put(mob, now);
+        if (DebugLog.on(DebugLog.Cat.BUILD)) {
+            DebugLog.log(DebugLog.Cat.BUILD, mob, "placeBlock[" + reason + "] ПОСТАВЛЕНО " + state.getBlock().getDescriptionId()
+                    + " у " + pos.toShortString() + " | моб=" + mob.position() + " onGround=" + mob.onGround()
+                    + " паркур_активний=" + GapJumpAssistGoal.isActive(mob)
+                    + " | поруч: " + MobDebug.cellBrief(level, pos));
+        }
+
+        long expireAt = now + (long) Config.PLACED_BLOCK_LIFETIME_SECONDS.get() * 20L;
+        TemporaryBlockData.get(level).track(pos, expireAt);
     }
 
     private static boolean isPassableColumn(Level level, BlockPos pos) {
@@ -509,49 +754,28 @@ public final class EnemyBreak_N_BuildUtils {
     }
 
     /**
-     * Ставить блок від імені {@code mob}. Три перевірки, усі "тихі" (просто нічого не робить,
-     * якщо не пройшли) — знайдені живим тестуванням:
-     * <ol>
-     *   <li>НЕ переписує вже існуючий (не-replaceable) блок — {@code canBeReplaced()}, той самий
-     *       критерій, що й у ванільного розміщення, а не вужчий {@code !isSolid()} (який
-     *       пропускав, наприклад, квіти/факели/рейки — вони не "solid", але явно не порожні).</li>
-     *   <li>Не частіше, ніж раз на {@link Config#MOB_PLACE_DELAY_TICKS} тіків для ЦЬОГО моба.</li>
-     *   <li>{@link #hasAdjacentSolid} — інакше не ставить.</li>
-     * </ol>
+     * КЕШ createPath() НА ТІК (знайдено користувачем через окремий debug-лог "[PATH DEBUG]"):
+     * {@code mob.getNavigation()} — той самий спільний об'єкт щоразу, а
+     * {@code BuildPathGoal.canUse()} і {@code DigThroughWallsGoal.canUse()} ОБИДВА опитуються
+     * GoalSelector-ом щотіку й ОБИДВА незалежно кличуть createPath() на ньому — навіть коли
+     * жоден не "виграє" пріоритет. Лог показав: два послідовні виклики createPath() з ОДНІЄЮ
+     * й тією ж ціллю в межах одного тіка давали РІЗНІ результати (canReach=true/8 вузлів, потім
+     * canReach=false/22 вузли, інший endNode) — ванільний NodeEvaluator не розрахований на
+     * повторний виклик у тому самому тіку. Тепер рахуємо не більше разу на тік на моба.
      */
-    public static void placeBlock(ServerLevel level, BlockPos pos, Mob mob) {
-        // ДЕБАГ: кожна "тиха" відмова тепер лишає слід у лозі - раніше placeBlock мовчки робив return.
-        BlockState existing = level.getBlockState(pos);
-        if (!existing.canBeReplaced()) {
-            buildLog(mob, "placeBlock(" + pos.toShortString() + ") ВІДМОВА: клітинка не замінювана: " + existing);
-            return;
-        }
-        if (!hasAdjacentSolid(level, pos)) {
-            buildLog(mob, "placeBlock(" + pos.toShortString() + ") ВІДМОВА: нема суміжного isSolid()-блока для опори");
-            return;
-        }
-
-        long now = level.getGameTime();
-        Long lastTick = LAST_PLACE_TICK.get(mob);
-        if (lastTick != null && now - lastTick < Config.MOB_PLACE_DELAY_TICKS.get()) {
-            buildLog(mob, "placeBlock(" + pos.toShortString() + ") ВІДМОВА: затримка між блоками, лишилось "
-                    + (Config.MOB_PLACE_DELAY_TICKS.get() - (now - lastTick)) + " тіків");
-            return;
-        }
-
-        Block block = DigBlockResolver.getDigBlock(level);
-        BlockState state = block.defaultBlockState();
-
-        level.setBlock(pos, state, 3);
-        level.playSound(null, pos, state.getSoundType().getPlaceSound(), SoundSource.HOSTILE, 1.0F, 1.0F);
-        LAST_PLACE_TICK.put(mob, now);
-        if (DebugLog.on(DebugLog.Cat.BUILD)) {
-            DebugLog.log(DebugLog.Cat.BUILD, mob, "placeBlock ПОСТАВЛЕНО " + state.getBlock().getDescriptionId()
-                    + " у " + pos.toShortString() + " | моб=" + mob.position() + " onGround=" + mob.onGround()
-                    + " | поруч: " + MobDebug.cellBrief(level, pos));
-        }
-
-        long expireAt = now + (long) Config.PLACED_BLOCK_LIFETIME_SECONDS.get() * 20L;
-        TemporaryBlockData.get(level).track(pos, expireAt);
+    private static final class NavCache {
+        int tickComputed = -1;
+        BlockPos pathTarget;
+        boolean canReach;
+        Path path;
+        // v12 - троттлінг недосяжної цілі, див. getOrComputePath вище.
+        int consecutiveUnreachableTicks = 0;
+        int lastRealComputeTick = Integer.MIN_VALUE;
+        // v18: лічильник СПРАВЖНІХ обчислень - isPathBlocked/isNavigationBlocked бачать лише нові (див. вище).
+        int computeSeq = 0;
+        // v18: на який тік (мобів tickCount) isPathBlocked / isNavigationBlocked просять свіже обчислення - рівно на кінець
+        // свого grace-періоду, щоб вердикт не залежав від інтервалу тротлінгу. NO_TICK = не просять.
+        int wantFreshTickPath = TerraformRules.NO_TICK;
+        int wantFreshTickNav = TerraformRules.NO_TICK;
     }
 }

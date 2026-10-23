@@ -176,10 +176,16 @@ public class BuildPathGoal extends Goal {
         // Правильне місце для нового блоку - це стара позиція під ногами, яка звільняється
         // ПІСЛЯ стрибка; перевіряти це потрібно щотіку, бо вікно "у повітрі" коротке і по
         // 10-тіковому кулдауну його легко проґавити повністю (моб просто впаде назад).
-        if (!this.mob.onGround()) {
+        // v18: АЛЕ не під час БУДЬ-ЯКОГО польоту. Раніше це спрацьовувало на кожен стрибок моба (паркур, гоп на сходинку,
+        // нокбек) і ставило блок під самий відрив: стрибок приземлявся на власний блок, а не на платформу. Тепер: піларинг
+        // (підйом) - як і було; міст - лише коли моб щойно зійшов з краю й падає (не летить угору); під час паркур-стрибка
+        // - ніколи (див. EnemyBreak_N_BuildUtils.allowAirborneFloor / placementVeto).
+        boolean pillaring = needsClimb(this.buildTarget);
+        if (EnemyBreak_N_BuildUtils.allowAirborneFloor(this.mob, pillaring)) {
             BlockPos below = this.mob.blockPosition().below();
             if (!level.getBlockState(below).isSolid()) {
-                EnemyBreak_N_BuildUtils.placeBlock(level, below, this.mob);
+                EnemyBreak_N_BuildUtils.placeBlock(level, below, this.mob,
+                        pillaring ? PlaceReason.PILLAR_FLOOR : PlaceReason.EDGE_CATCH);
             }
         }
 
@@ -263,7 +269,7 @@ public class BuildPathGoal extends Goal {
             if (!level.getBlockState(under).isSolid() && EnemyBreak_N_BuildUtils.hasAdjacentSolid(level, under)) {
                 EnemyBreak_N_BuildUtils.debugMsg(this.mob, "[DEBUG BuildPathGoal] bridge: моб за краєм опори, спершу блок під ним "
                         + under + " (крок " + step + " не має суміжної опори)"); // DEBUG
-                EnemyBreak_N_BuildUtils.placeBlock(level, under, this.mob);
+                EnemyBreak_N_BuildUtils.placeBlock(level, under, this.mob, PlaceReason.BRIDGE_UNDER_MOB);
                 return;
             }
         }
@@ -278,7 +284,7 @@ public class BuildPathGoal extends Goal {
         if (place) {
             EnemyBreak_N_BuildUtils.debugMsg(this.mob, "[DEBUG BuildPathGoal] bridge: ставлю блок " + stepBelow
                     + " (крок " + step + ")"); // DEBUG
-            EnemyBreak_N_BuildUtils.placeBlock(level, stepBelow, this.mob);
+            EnemyBreak_N_BuildUtils.placeBlock(level, stepBelow, this.mob, PlaceReason.BRIDGE_STEP);
         }
     }
 

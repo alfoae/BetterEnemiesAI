@@ -168,6 +168,20 @@ public class GapJumpAssistGoal extends Goal {
     private static final int MAX_APPROACH_TICKS = 160;
     private static final java.util.Set<Mob> ACTIVE_MOBS =
             java.util.Collections.newSetFromMap(new java.util.WeakHashMap<>());
+    /**
+     * v18: тік моба ({@code mob.tickCount}), коли ціль востаннє була активна (start/tick/stop). Для вікна "паркур щойно
+     * скінчився" ({@link #wasActiveWithin}): між двома стрибками ланцюжка й після приземлення ціль на 1-3 тіки
+     * неактивна (GoalSelector перевіряє canContinueToUse лише на парних тіках, Pursuit перехоплює керування), і саме в
+     * цю щілину раніше вклинювався будівельник.
+     */
+    private static final java.util.Map<Mob, Integer> LAST_ACTIVE_TICK = new java.util.WeakHashMap<>();
+    /**
+     * v18: висота, нижче за яку політ поточного сегмента вважається ПРОВАЛЕНИМ (моб упав мимо маршруту):
+     * {@code min(відрив, приземлення) - FLIGHT_FLOOR_MARGIN}. Поки моб вище - це звичайний політ, і клатч (рятувальний
+     * блок після нокбеку) не потрібен.
+     */
+    private static final java.util.Map<Mob, Double> FLIGHT_FLOOR_Y = new java.util.WeakHashMap<>();
+    private static final double FLIGHT_FLOOR_MARGIN = 1.5;
     private int chainCount;
     /**
      * Властивості опори відриву поточного сегмента (тертя, гальмо ходьби, jumpFactor): з них рахується і наземне
@@ -280,6 +294,30 @@ public class GapJumpAssistGoal extends Goal {
         return ACTIVE_MOBS.contains(mob);
     }
 
+    /**
+     * v18: ціль активна зараз АБО була активна не більше ніж {@code ticks} тіків тому. Для будівництва: паркур, що щойно
+     * скінчився (приземлення, перерахунок шляху), ще "триває" - см. {@code EnemyBreak_N_BuildUtils.isParkourBusy}.
+     */
+    public static boolean wasActiveWithin(Mob mob, int ticks) {
+        if (ACTIVE_MOBS.contains(mob)) {
+            return true;
+        }
+        Integer last = LAST_ACTIVE_TICK.get(mob);
+        return last != null && mob.tickCount - last <= ticks;
+    }
+
+    /**
+     * v18: ціль активна й моб ще вище нижньої межі польоту сегмента ({@link #FLIGHT_FLOOR_Y}) - політ іде за планом, а не
+     * падіння. Клатч у цей момент зайвий.
+     */
+    public static boolean isFlightOnTrack(Mob mob) {
+        if (!ACTIVE_MOBS.contains(mob)) {
+            return false;
+        }
+        Double floorY = FLIGHT_FLOOR_Y.get(mob);
+        return floorY != null && mob.getY() >= floorY;
+    }
+
     @Override
     public boolean canContinueToUse() {
         // v13 - те саме прибране обмеження, що й у canUse() (див. коментар там): раніше тут був
@@ -309,6 +347,7 @@ public class GapJumpAssistGoal extends Goal {
         //    moveControl.setWantedPosition() у бік старого шляху (до гравця, ЧЕРЕЗ розрив), затираючи
         //    наш steerTo(). Зупиняємо стару навігацію тут.
         ACTIVE_MOBS.add(this.mob);
+        LAST_ACTIVE_TICK.put(this.mob, this.mob.tickCount);
         // Підхід до краю: якщо є вузли шляху до вузла відриву (а опора нестандартна або шлях уточнений -
         // GapJumpUtils.buildApproach), віддаємо їх навігатору: він іде тим самим рухом, що й Pursuit (точні
         // точки біля люків/плит, гальмо на краях), а не прямою до центру краю, яка на кривих блоках веде повз
@@ -372,6 +411,7 @@ public class GapJumpAssistGoal extends Goal {
         Vec3 edgeCenter = this.jump.takeoffPoint();
         double axisLength = horizontalDistance(edgeCenter, this.jump.landing());
         computeSegmentPhysics(axisLength);
+        FLIGHT_FLOOR_Y.put(this.mob, Math.min(edgeCenter.y, this.jump.landing().y) - FLIGHT_FLOOR_MARGIN);
 
         jumpLog(
                 "[DEBUG GAP JUMP] ===============================" + (chained ? " (ЛАНЦЮЖОК: без передачі керування)" : "")
@@ -432,6 +472,7 @@ public class GapJumpAssistGoal extends Goal {
 
     @Override
     public void tick() {
+        LAST_ACTIVE_TICK.put(this.mob, this.mob.tickCount);
 
         // Ціль уже завершена (приземлився / пройшов ногами / розбіг затягнувся). GoalSelector перевіряє
         // canContinueToUse() лише на ПАРНИХ тіках, а на непарних тікає запущені цілі з
@@ -890,6 +931,8 @@ public class GapJumpAssistGoal extends Goal {
         }
         this.lastCanUseSig = "";
         ACTIVE_MOBS.remove(this.mob);
+        LAST_ACTIVE_TICK.put(this.mob, this.mob.tickCount);
+        FLIGHT_FLOOR_Y.remove(this.mob);
 
         this.jump = null;
         this.approachActive = false;

@@ -1,9 +1,11 @@
 package com.example.examplemod.Enemy.EnemyBehavior.EnemyBreak_N_Build;
 
 import com.example.examplemod.Config;
+import com.example.examplemod.Enemy.EnemyMovement.Run_N_Jump.GapJumpAssistGoal;
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.entity.Mob;
+import net.minecraft.world.level.GameRules;
 import net.neoforged.bus.api.SubscribeEvent;
 import net.neoforged.fml.common.EventBusSubscriber;
 import net.neoforged.neoforge.event.entity.living.LivingKnockBackEvent;
@@ -37,8 +39,11 @@ public final class MobClutchRecovery {
     @SubscribeEvent
     public static void onKnockback(LivingKnockBackEvent event) {
         if (!(event.getEntity() instanceof Mob mob)) return;
-        if (!(mob.level() instanceof ServerLevel)) return;
+        if (!(mob.level() instanceof ServerLevel serverLevel)) return;
         if (!Config.ENABLE_MOB_TERRAFORMING.get()) return; // той самий вимикач, що й уся система
+        // v18: і той самий mobGriefing, що й решта системи (див. Config: "якщо він вимкнений на сервері, ця система теж не діятиме") -
+        // клатч раніше його ігнорував і ставив блоки навіть при mobGriefing=false.
+        if (!serverLevel.getGameRules().getBoolean(GameRules.RULE_MOBGRIEFING)) return;
 
         // Новий нокбек ПОВЕРХ уже активного клатчу (наприклад друга стріла) - починаємо рахунок
         // спроб заново: логічно, це вже "новий" зліт, а не продовження попереднього падіння.
@@ -71,6 +76,11 @@ public final class MobClutchRecovery {
      * true, якщо це була фінальна дія для цього моба (більше приходити не треба).
      */
     private static boolean tickOne(Mob mob, ServerLevel level, ClutchState state) {
+        // v18: поки паркур-політ іде за планом (моб вище нижньої межі польоту), це звичайний стрибок, а не падіння: клатч на
+        // паузі (спроби не витрачаються). Якщо політ провалився - моб упав нижче межі, і клатч працює як і раніше.
+        if (GapJumpAssistGoal.isFlightOnTrack(mob)) {
+            return false;
+        }
         if (state.attemptsUsed == 0) {
             attemptQuickSave(mob, level, state, Config.CLUTCH_FIRST_ATTEMPT_CHANCE.get());
             return false;
@@ -101,7 +111,7 @@ public final class MobClutchRecovery {
         // перевірить, але тут важливо саме НЕ витратити шанс на завідомо неможливу спробу).
         if (!EnemyBreak_N_BuildUtils.hasAdjacentSolid(level, spot)) return;
         if (mob.getRandom().nextDouble() < chance) {
-            EnemyBreak_N_BuildUtils.placeBlock(level, spot, mob);
+            EnemyBreak_N_BuildUtils.placeBlock(level, spot, mob, PlaceReason.CLUTCH);
         }
     }
 
@@ -127,7 +137,7 @@ public final class MobClutchRecovery {
         BlockPos spot = mob.blockPosition().below();
         if (!EnemyBreak_N_BuildUtils.hasAdjacentSolid(level, spot)) return; // нема до чого приліпити - падає до кінця
         if (mob.getRandom().nextDouble() < chance) {
-            EnemyBreak_N_BuildUtils.placeBlock(level, spot, mob);
+            EnemyBreak_N_BuildUtils.placeBlock(level, spot, mob, PlaceReason.CLUTCH);
         }
     }
 

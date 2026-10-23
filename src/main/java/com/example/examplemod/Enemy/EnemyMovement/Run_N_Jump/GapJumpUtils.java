@@ -531,6 +531,33 @@ public final class GapJumpUtils {
     }
 
     /**
+     * v18: чи є стрибковий сегмент у шляху ПОПЕРЕДУ моба - від найближчого до нього вузла й далі. Відрізняється від
+     * {@link #pathHasJump} (той дивиться весь шлях, включно з уже пройденими стрибками) і працює для ЧАСТКОВИХ шляхів
+     * (A* не дотягнувся до гравця, але попереду ще є стрибки): для них {@code Path.canReach()==false}, і раніше це читалось
+     * як "заблоковано", хоча мобу є куди йти паркуром. Для {@code EnemyBreak_N_BuildUtils}: маршрут паркуром попереду -
+     * будувати рано.
+     */
+    public static boolean hasJumpAhead(Path path, Mob mob) {
+        if (path == null || path.getNodeCount() < 2) {
+            return false;
+        }
+        int nearest = 0;
+        double best = Double.MAX_VALUE;
+        for (int i = 0; i < path.getNodeCount(); i++) {
+            Node n = path.getNode(i);
+            double dx = n.x + 0.5 - mob.getX();
+            double dy = (n.y - mob.getY()) * 2.0; // по висоті суворіше: вузол над/під мобом не "найближчий"
+            double dz = n.z + 0.5 - mob.getZ();
+            double d = dx * dx + dy * dy + dz * dz;
+            if (d < best) {
+                best = d;
+                nearest = i;
+            }
+        }
+        return findJumpSegmentInPath(path, nearest) != null;
+    }
+
+    /**
      * Те саме, що {@link #findUpcomingJumpSegment}, але від ПОТОЧНОГО положення моба й по СВІЖОМУ шляху:
      * бере спільний кеш {@code EnemyBreak_N_BuildUtils.getOrComputePath} (той самий, з якого їде
      * Pursuit; рахується не більше разу на тік на моба, тож додаткового createPath() це не дає).

@@ -319,12 +319,12 @@ public class TowerClimbGoal extends Goal {
         for (Direction dir : CARDINALS) {
             BlockPos armFloor = floor.relative(dir);
             if (!level.getBlockState(armFloor).isSolid()) {
-                EnemyBreak_N_BuildUtils.placeBlock(level, armFloor, this.mob);
+                EnemyBreak_N_BuildUtils.placeBlock(level, armFloor, this.mob, PlaceReason.TOWER_STRUCTURE);
                 return true;
             }
             BlockPos armParapet = armFloor.above(); // тепер на висоті ніг моба - правильна висота "паркану"
             if (!level.getBlockState(armParapet).isSolid()) {
-                EnemyBreak_N_BuildUtils.placeBlock(level, armParapet, this.mob);
+                EnemyBreak_N_BuildUtils.placeBlock(level, armParapet, this.mob, PlaceReason.TOWER_STRUCTURE);
                 return true;
             }
         }
@@ -342,7 +342,7 @@ public class TowerClimbGoal extends Goal {
         EnemyBreak_N_BuildUtils.breakBlock(level, overhead, this.mob);
         if (lavaAbove) {
             EnemyBreak_N_BuildUtils.debugMsg(this.mob, "[DEBUG TowerClimbGoal] лава над проломом - перекриваю");
-            EnemyBreak_N_BuildUtils.placeBlock(level, overhead.above(), this.mob);
+            EnemyBreak_N_BuildUtils.placeBlock(level, overhead.above(), this.mob, PlaceReason.HAZARD_COVER);
         }
     }
 
@@ -542,12 +542,12 @@ public class TowerClimbGoal extends Goal {
     private void placeWallColumn(ServerLevel level, BlockPos base) {
         BlockPos floorExtension = base.below();
         if (!level.getBlockState(floorExtension).isSolid()) {
-            EnemyBreak_N_BuildUtils.placeBlock(level, floorExtension, this.mob);
+            EnemyBreak_N_BuildUtils.placeBlock(level, floorExtension, this.mob, PlaceReason.TOWER_STRUCTURE);
         }
         for (int dy = 0; dy < WALL_HEIGHT; dy++) {
             BlockPos pos = base.above(dy);
             if (!level.getBlockState(pos).isSolid()) {
-                EnemyBreak_N_BuildUtils.placeBlock(level, pos, this.mob);
+                EnemyBreak_N_BuildUtils.placeBlock(level, pos, this.mob, PlaceReason.TOWER_STRUCTURE);
             }
         }
     }
@@ -635,19 +635,24 @@ public class TowerClimbGoal extends Goal {
         neutralizeHazardIfPlayerPlaced(level, step.above());
         BlockPos stepBelow = step.below();
         if (!level.getBlockState(stepBelow).isSolid()) {
-            EnemyBreak_N_BuildUtils.placeBlock(level, stepBelow, this.mob);
+            EnemyBreak_N_BuildUtils.placeBlock(level, stepBelow, this.mob, PlaceReason.BRIDGE_STEP);
         }
     }
 
     /**
      * ФІКС, той самий що й у BuildPathGoal: підкладає підлогу під ноги КОЖЕН тік, поки моб у
      * повітрі - коротке вікно, 10-тіковий кулдаун легко його пропускає повністю.
+     * <p>
+     * v18: лише коли це справді потрібно - піларинг (стадії CROSS_AND_DIG/CLIMBING: моб сам підстрибує на місці) або моб
+     * щойно зійшов з краю й падає; під час паркур-стрибка - ніколи ({@link EnemyBreak_N_BuildUtils#allowAirborneFloor}).
      */
     private void ensureFloorUnderneathWhileAirborne(ServerLevel level) {
-        if (!this.mob.onGround()) {
+        boolean pillaring = this.stage == Stage.CLIMBING || this.stage == Stage.CROSS_AND_DIG;
+        if (EnemyBreak_N_BuildUtils.allowAirborneFloor(this.mob, pillaring)) {
             BlockPos below = this.mob.blockPosition().below();
             if (!level.getBlockState(below).isSolid()) {
-                EnemyBreak_N_BuildUtils.placeBlock(level, below, this.mob);
+                EnemyBreak_N_BuildUtils.placeBlock(level, below, this.mob,
+                        pillaring ? PlaceReason.PILLAR_FLOOR : PlaceReason.EDGE_CATCH);
             }
         }
     }
@@ -674,7 +679,7 @@ public class TowerClimbGoal extends Goal {
         neutralizeHazardIfPlayerPlaced(level, step.above());
         BlockPos stepBelow = step.below();
         if (!level.getBlockState(stepBelow).isSolid()) {
-            EnemyBreak_N_BuildUtils.placeBlock(level, stepBelow, this.mob);
+            EnemyBreak_N_BuildUtils.placeBlock(level, stepBelow, this.mob, PlaceReason.BRIDGE_STEP);
         }
         return false;
     }
@@ -698,7 +703,7 @@ public class TowerClimbGoal extends Goal {
         if (isFire || isHazardFluidSource) {
             EnemyBreak_N_BuildUtils.debugMsg(this.mob, "[DEBUG TowerClimbGoal] гравецький хазард на шляху - "
                     + "перекриваю " + pos);
-            EnemyBreak_N_BuildUtils.placeBlock(level, pos, this.mob);
+            EnemyBreak_N_BuildUtils.placeBlock(level, pos, this.mob, PlaceReason.HAZARD_COVER);
         }
     }
 
