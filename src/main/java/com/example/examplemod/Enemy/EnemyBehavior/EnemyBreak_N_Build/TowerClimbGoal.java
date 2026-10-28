@@ -123,7 +123,7 @@ public class TowerClimbGoal extends Goal {
         this.wallDirA = null;
         this.wallDirB = null;
         this.actionCooldown = 0;
-        EnemyBreak_N_BuildUtils.debugMsg(this.mob, "[DEBUG TowerClimbGoal] START моб=" + this.mob.blockPosition());
+        EnemyBreak_N_BuildUtils.debugMsg(this.mob, "[DEBUG TowerClimbGoal] START моб=" + EnemyBreak_N_BuildUtils.feetCell(this.mob));
     }
 
     // ================= DECIDE =================
@@ -131,7 +131,7 @@ public class TowerClimbGoal extends Goal {
     @Override
     public void stop() {
         EnemyBreak_N_BuildUtils.debugMsg(this.mob, "[DEBUG TowerClimbGoal] STOP stage=" + this.stage
-                + " моб=" + this.mob.blockPosition());
+                + " моб=" + EnemyBreak_N_BuildUtils.feetCell(this.mob));
         this.mob.getNavigation().stop();
     }
 
@@ -150,6 +150,8 @@ public class TowerClimbGoal extends Goal {
         }
 
         if (!(this.mob.level() instanceof ServerLevel level)) return;
+        // v19: блок, відкладений через власний хітбокс моба, повторюємо щотіку, поки моб підстрибнув (див. placeBlock).
+        EnemyBreak_N_BuildUtils.retryPendingPlacement(level, this.mob);
         Player player = PursuitEnemyBehavior.getTrackedPlayer(this.mob);
         if (player == null) return;
 
@@ -157,7 +159,7 @@ public class TowerClimbGoal extends Goal {
         if (zone == null) return; // теоретично неможливо тут (player != null вище), про всяк випадок
 
         if (this.mob.tickCount % 20 == 0) {
-            BlockPos herePos = this.mob.blockPosition();
+            BlockPos herePos = EnemyBreak_N_BuildUtils.feetCell(this.mob);
             EnemyBreak_N_BuildUtils.debugMsg(this.mob, "[DEBUG TowerClimbGoal] tick stage=" + this.stage
                     + " моб=" + herePos + " roofY(тут)=" + zone.getLocalRoofY(herePos.getX(), herePos.getZ()));
         }
@@ -193,7 +195,7 @@ public class TowerClimbGoal extends Goal {
         BlockPos exit = findNearestPointOutsideFootprint(zone, playerPos);
         // Узгоджений фолбек: валідної точки старту нема (заблоковано з усіх боків) - будуємось
         // де стоїмо, а не софтлочимось без дій.
-        commitPillar(exit != null ? exit : this.mob.blockPosition());
+        commitPillar(exit != null ? exit : EnemyBreak_N_BuildUtils.feetCell(this.mob));
         EnemyBreak_N_BuildUtils.debugMsg(this.mob, "[DEBUG TowerClimbGoal] DECIDE -> CLIMBING, комітнуто "
                 + this.pillarColumn);
         this.stage = Stage.CLIMBING;
@@ -213,7 +215,7 @@ public class TowerClimbGoal extends Goal {
     private boolean tryEnter7x7IfReachable(TowerZoneData zone) {
         BlockPos found7x7 = zone.getFull7x7Center();
         if (found7x7 == null) return false;
-        if (this.mob.blockPosition().getY() < found7x7.getY()) return false; // ще занадто низько
+        if (EnemyBreak_N_BuildUtils.feetCell(this.mob).getY() < found7x7.getY()) return false; // ще занадто низько
 
         this.target7x7 = found7x7;
         this.stage = Stage.TO_7X7;
@@ -225,7 +227,7 @@ public class TowerClimbGoal extends Goal {
     // ================= TO_7X7 / CROSS_AND_DIG =================
 
     private void commitPillar(BlockPos column) {
-        this.pillarColumn = new BlockPos(column.getX(), this.mob.blockPosition().getY(), column.getZ());
+        this.pillarColumn = new BlockPos(column.getX(), EnemyBreak_N_BuildUtils.feetCell(this.mob).getY(), column.getZ());
         this.layerY = Integer.MIN_VALUE; // форсує заморозку напрямку стіни на найпершому шарі
     }
 
@@ -257,7 +259,7 @@ public class TowerClimbGoal extends Goal {
      * цього заходу й повертаємось до звичайного підйому.
      */
     private void tickTo7x7() {
-        BlockPos mobPos = this.mob.blockPosition();
+        BlockPos mobPos = EnemyBreak_N_BuildUtils.feetCell(this.mob);
         if (mobPos.distSqr(this.target7x7) <= NAV_ARRIVE_DIST_SQ) {
             this.stage = Stage.CROSS_AND_DIG;
             EnemyBreak_N_BuildUtils.debugMsg(this.mob, "[DEBUG TowerClimbGoal] TO_7X7 -> CROSS_AND_DIG "
@@ -268,7 +270,7 @@ public class TowerClimbGoal extends Goal {
         if (++this.to7x7StuckTicks > TO_7X7_STUCK_TIMEOUT_TICKS) {
             EnemyBreak_N_BuildUtils.debugMsg(this.mob, "[DEBUG TowerClimbGoal] TO_7X7 застряг - відмовляюсь, "
                     + "комітюсь на місці й лізу звичайним шляхом");
-            commitPillar(this.mob.blockPosition());
+            commitPillar(EnemyBreak_N_BuildUtils.feetCell(this.mob));
             this.stage = Stage.CLIMBING;
             return;
         }
@@ -287,7 +289,7 @@ public class TowerClimbGoal extends Goal {
         if (--this.actionCooldown > 0) return;
         this.actionCooldown = ACTION_COOLDOWN_TICKS;
 
-        BlockPos center = this.mob.blockPosition();
+        BlockPos center = EnemyBreak_N_BuildUtils.feetCell(this.mob);
         if (buildCrossSupportStep(level, center)) return; // один блок за раз - ще не все готово
 
         BlockPos overhead = center.above(2);
@@ -382,7 +384,7 @@ public class TowerClimbGoal extends Goal {
      * виходить із тіку. false — обходити нема куди, викликач сам ламає й перекриває (фолбек).
      */
     private boolean tryAvoidLavaBySidestep(ServerLevel level, BlockPos overhead) {
-        BlockPos altColumn = findLavaFreeAdjacentColumn(level, this.mob.blockPosition(), overhead.getY());
+        BlockPos altColumn = findLavaFreeAdjacentColumn(level, EnemyBreak_N_BuildUtils.feetCell(this.mob), overhead.getY());
         if (altColumn == null) return false;
         this.sidestepTarget = altColumn;
         this.stage = Stage.SIDESTEP;
@@ -406,16 +408,16 @@ public class TowerClimbGoal extends Goal {
         // TowerZoneData#getLocalRoofY.
         int localRoof = zone.getLocalRoofY(this.pillarColumn.getX(), this.pillarColumn.getZ());
         boolean roofKnown = localRoof != Integer.MIN_VALUE; // захист від того самого сентинел-багу
-        boolean aboveRoof = roofKnown && this.mob.blockPosition().getY() >= localRoof;
+        boolean aboveRoof = roofKnown && EnemyBreak_N_BuildUtils.feetCell(this.mob).getY() >= localRoof;
         // "якщо моб на границі висоти то він просто йде прямо до ближайшої площі без того щоб
         // простроїтися више" - лишаємо запас в WALL_HEIGHT+1, бо на цьому ж кроці ще треба буде
         // місце під стіну поверх підлоги.
-        boolean atWorldHeightLimit = this.mob.blockPosition().getY() >= level.getMaxBuildHeight() - (WALL_HEIGHT + 1);
+        boolean atWorldHeightLimit = EnemyBreak_N_BuildUtils.feetCell(this.mob).getY() >= level.getMaxBuildHeight() - (WALL_HEIGHT + 1);
         if (aboveRoof || atWorldHeightLimit) {
             this.stage = Stage.BRIDGE_TO_PLAYER;
             EnemyBreak_N_BuildUtils.debugMsg(this.mob, "[DEBUG TowerClimbGoal] CLIMBING -> BRIDGE_TO_PLAYER "
                     + (atWorldHeightLimit ? "(межа висоти світу) " : "(вище даху зони) ")
-                    + "Y=" + this.mob.blockPosition().getY() + " roofY(тут)=" + localRoof);
+                    + "Y=" + EnemyBreak_N_BuildUtils.feetCell(this.mob).getY() + " roofY(тут)=" + localRoof);
             return;
         }
 
@@ -424,16 +426,16 @@ public class TowerClimbGoal extends Goal {
         if (--this.actionCooldown > 0) return;
         this.actionCooldown = ACTION_COOLDOWN_TICKS;
 
-        if (this.mob.blockPosition().getY() != this.layerY) {
+        if (EnemyBreak_N_BuildUtils.feetCell(this.mob).getY() != this.layerY) {
             lockWallDirectionForNewLayer(player);
         }
 
-        BlockPos overhead = this.mob.blockPosition().above(2);
+        BlockPos overhead = EnemyBreak_N_BuildUtils.feetCell(this.mob).above(2);
         if (EnemyBreak_N_BuildUtils.isBreakable(level, overhead)) {
             if (isLavaAbove(level, overhead) && tryAvoidLavaBySidestep(level, overhead)) {
                 return; // пішли в обхід - до лому цього конкретного блоку тут не дійшло
             }
-            if (ceilingIsThinWithAirBeyond(level, overhead) && buildCrossSupportStep(level, this.mob.blockPosition())) {
+            if (ceilingIsThinWithAirBeyond(level, overhead) && buildCrossSupportStep(level, EnemyBreak_N_BuildUtils.feetCell(this.mob))) {
                 return; // хрест ще не добудований - продовжимо наступного кулдауну
             }
             EnemyBreak_N_BuildUtils.debugMsg(this.mob, "[DEBUG TowerClimbGoal] climb: ламаю стелю " + overhead);
@@ -463,7 +465,7 @@ public class TowerClimbGoal extends Goal {
     private void tickSidestep(ServerLevel level, TowerZoneData zone) {
         ensureFloorUnderneathWhileAirborne(level);
 
-        BlockPos mobPos = this.mob.blockPosition();
+        BlockPos mobPos = EnemyBreak_N_BuildUtils.feetCell(this.mob);
         // ВИПРАВЛЕНО (живий тест): раніше завершували сайдстеп щойно мобу опинявся в межах
         // generic-порогу відстані від sidestepTarget - а сусідня клітинка ЗАВЖДИ в цих межах від
         // старту, тож перевірка проходила МИТТЄВО, без жодного реального кроку. Моб комітився
@@ -487,7 +489,7 @@ public class TowerClimbGoal extends Goal {
      * гравця не смикав моба між кутовим і кардинальним варіантом посеред одного й того ж рівня.
      */
     private void lockWallDirectionForNewLayer(Player player) {
-        this.layerY = this.mob.blockPosition().getY();
+        this.layerY = EnemyBreak_N_BuildUtils.feetCell(this.mob).getY();
 
         double dx = player.getX() - this.mob.getX();
         double dz = player.getZ() - this.mob.getZ();
@@ -522,7 +524,7 @@ public class TowerClimbGoal extends Goal {
      * лишають щілину, крізь яку може "виглядати" ребро хітбокса моба.
      */
     private void buildWallForCurrentLayer(ServerLevel level) {
-        BlockPos feet = this.mob.blockPosition();
+        BlockPos feet = EnemyBreak_N_BuildUtils.feetCell(this.mob);
         placeWallColumn(level, feet.relative(this.wallDirA));
         if (this.wallDirB != null) {
             placeWallColumn(level, feet.relative(this.wallDirB));
@@ -562,10 +564,10 @@ public class TowerClimbGoal extends Goal {
         if (zone.isSafeLandingTile(playerPos.getX(), playerPos.getZ())) {
             return playerPos;
         }
-        BlockPos safe = zone.findSafeLandingTile(this.mob.blockPosition());
+        BlockPos safe = zone.findSafeLandingTile(EnemyBreak_N_BuildUtils.feetCell(this.mob));
         if (safe != null) return safe;
 
-        BlockPos any = zone.findAnyLandingTile(this.mob.blockPosition());
+        BlockPos any = zone.findAnyLandingTile(EnemyBreak_N_BuildUtils.feetCell(this.mob));
         if (any != null) return any;
 
         return playerPos; // площа порожня (не мало б траплятись) - фолбек на самого гравця
@@ -573,7 +575,7 @@ public class TowerClimbGoal extends Goal {
 
     private void tickBridgeToPlayer(ServerLevel level, Player player, TowerZoneData zone) {
         BlockPos landingTarget = chooseLandingTarget(player, zone);
-        BlockPos mobPos = this.mob.blockPosition();
+        BlockPos mobPos = EnemyBreak_N_BuildUtils.feetCell(this.mob);
         double dx = landingTarget.getX() - mobPos.getX();
         double dz = landingTarget.getZ() - mobPos.getZ();
         double horizontalDistSq = dx * dx + dz * dz;
@@ -649,8 +651,8 @@ public class TowerClimbGoal extends Goal {
     private void ensureFloorUnderneathWhileAirborne(ServerLevel level) {
         boolean pillaring = this.stage == Stage.CLIMBING || this.stage == Stage.CROSS_AND_DIG;
         if (EnemyBreak_N_BuildUtils.allowAirborneFloor(this.mob, pillaring)) {
-            BlockPos below = this.mob.blockPosition().below();
-            if (!level.getBlockState(below).isSolid()) {
+            BlockPos below = EnemyBreak_N_BuildUtils.floorCellToFill(level, this.mob); // v19: null - опора вже є
+            if (below != null) {
                 EnemyBreak_N_BuildUtils.placeBlock(level, below, this.mob,
                         pillaring ? PlaceReason.PILLAR_FLOOR : PlaceReason.EDGE_CATCH);
             }
@@ -666,7 +668,7 @@ public class TowerClimbGoal extends Goal {
      * практично на місці по X/Z.
      */
     private boolean stepToward(ServerLevel level, BlockPos targetColumn) {
-        BlockPos mobPos = this.mob.blockPosition();
+        BlockPos mobPos = EnemyBreak_N_BuildUtils.feetCell(this.mob);
         double dx = targetColumn.getX() - mobPos.getX();
         double dz = targetColumn.getZ() - mobPos.getZ();
         if (dx * dx + dz * dz <= NAV_ARRIVE_DIST_SQ) return true;

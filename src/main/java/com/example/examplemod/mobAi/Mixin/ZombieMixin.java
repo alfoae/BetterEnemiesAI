@@ -63,6 +63,7 @@ public class ZombieMixin {
         // сам віддає йому чергу в цьому випадку (canUse()/canContinueToUse() повертають false) -
         // конкретна цифра пріоритету тут другорядна порівняно з тим явним yield-ом, але нижче за
         // pursuit і вище за "наївний" BuildPathGoal для наочності.
+
         mob.goalSelector.addGoal(2, new TowerClimbGoal(mob));
         // GapJumpAssistGoal — номер пріоритету тут насправді другорядний (він виконується лише
         // коли PursuitEnemyMeleeBehavior сам звільнив MOVE/LOOK/JUMP через shouldYieldToGapJump,

@@ -30,19 +30,13 @@ final class TerraformRules {
      */
     static final int PARKOUR_COOLDOWN_TICKS = 10;
 
-    /**
-     * Падіння (блоків), яке ще вважаємо "щойно зійшов з краю"; більше - це вже падіння, а не крок з мосту.
-     */
+    /** Падіння (блоків), яке ще вважаємо "щойно зійшов з краю"; більше - це вже падіння, а не крок з мосту. */
     static final double JUST_LEFT_EDGE_FALL = 1.0;
 
-    /**
-     * Скільки тіків без руху моб на маршруті паркуру вважається завислим (тоді маршрут не виправдовує очікування).
-     */
+    /** Скільки тіків без руху моб на маршруті паркуру вважається завислим (тоді маршрут не виправдовує очікування). */
     static final int PARKOUR_STALL_TICKS = 60;
 
-    /**
-     * Мінімальне зрушення (блоків), яке вважається рухом.
-     */
+    /** Мінімальне зрушення (блоків), яке вважається рухом. */
     static final double STALL_MIN_MOVE = 0.5;
 
     /**
@@ -52,12 +46,108 @@ final class TerraformRules {
     static final double WALK_DETOUR_FACTOR = 2.0;
     static final int WALK_DETOUR_SLACK = 16;
 
+    /**
+     * v19: допуск при порівнянні висоти ніг моба з верхівкою колізії блока. Мед має колізію 15/16 = 0.9375, пісок душ
+     * 14/16, плита 8/16 - значення точні, але позиція моба бувала із похибкою у соті частки.
+     */
+    static final double FEET_EPS = 1.0E-3;
+
+    /**
+     * v19: допуск перетину боксів - торкання гранями (нога моба рівно на верхівці блока) НЕ перетин.
+     */
+    static final double OVERLAP_EPS = 1.0E-4;
+
+    /**
+     * v19: на скільки блоків угору стрибок моба звільняє клітинку з-під хітбокса (звичайний стрибок ~1.25, на меді/піску
+     * душ - значно менше; беремо з запасом нижню межу). Якщо потрібно підняти більше - стрибок не допоможе.
+     */
+    static final double MAX_JUMP_LIFT = 1.0;
+
+    /**
+     * v19: скільки тіків відкладений (через хітбокс) блок чекає на повторну спробу, поки моб у стрибку.
+     */
+    static final int PENDING_PLACEMENT_TTL_TICKS = 24;
+
+    /**
+     * v19: скільки разів поспіль підстрибуємо заради однієї клітинки, перш ніж здатись (далі повторить сама ціль).
+     */
+    static final int PENDING_MAX_JUMPS = 3;
+
+    /**
+     * v19: пауза (тіків) без нових стрибків заради хітбокса після {@link #PENDING_MAX_JUMPS} невдалих - щоб моб не скакав вічно.
+     */
+    static final int PENDING_GIVE_UP_COOLDOWN_TICKS = 40;
+
+    /**
+     * v19: точки ВСЕРЕДИНІ клітинки (частки 0..1 по x,y,z), у які ціляться променем від очей моба: центр і по одній
+     * точці біля кожної з 6 граней. Блок можна ставити, якщо промінь бодай до однієї точки не впирається в чужий блок.
+     * Усі точки відступають від межі клітинки на 0.15, щоб промінь не "протікав" крізь щілину в 1/16 по краях
+     * неповних блоків (мед має колізію 14x15x14).
+     */
+    static final double[][] LOS_SAMPLES = {
+            {0.5, 0.5, 0.5},
+            {0.5, 0.85, 0.5},
+            {0.5, 0.15, 0.5},
+            {0.15, 0.5, 0.5},
+            {0.85, 0.5, 0.5},
+            {0.5, 0.5, 0.15},
+            {0.5, 0.5, 0.85}
+    };
+
     private TerraformRules() {
     }
 
     /**
-     * Чи розумний звичайний прохід до вищої цілі (див. {@link #WALK_DETOUR_FACTOR}).
+     * v19: ноги моба стоять НА блоці клітинки (на верхівці його колізії або вище), а не всередині нього. Для моба на меді
+     * {@code blockPosition()} - це клітинка САМОГО меду (ноги на 15/16, тобто все ще "в" клітинці), і код, що брав
+     * {@code blockPosition().below()} за "підлогу", ставив блок ПІД медом. Якщо true - реальна клітинка ніг на 1 вища.
+     *
+     * @param feetY              висота ніг моба
+     * @param cellY              Y клітинки {@code blockPosition()}
+     * @param collisionTopInCell найвища точка колізії блока в цій клітинці (0..1+, відносно низу клітинки)
      */
+    static boolean feetAtOrAboveCollisionTop(double feetY, int cellY, double collisionTopInCell) {
+        return feetY >= cellY + collisionTopInCell - FEET_EPS;
+    }
+
+    /**
+     * v19: Y клітинки, у якій стоять ноги моба.
+     * <ul>
+     *   <li>на землі: клітинка НАД опорою ({@code supportY + 1}), якщо колізія опори вміщується в її клітинку (мед 15/16,
+     *       пісок душ 14/16, плита 8/16, сходинка, повний блок 1.0). Опору дає ванільний {@code getOnPos()} - блок під
+     *       хітбоксом, а не під центром моба, тож випадок "центр уже за краєм опори" (v16) рахується правильно;</li>
+     *   <li>опора вища за клітинку (паркан/мур, 1.5) або її нема - ноги вже в клітинці {@code blockPosition()};</li>
+     *   <li>у польоті - {@code blockPosition()}.</li>
+     * </ul>
+     *
+     * @param supportCollisionTop верх колізії опори в її клітинці (0..1.5) або {@link Double#NaN}, якщо опори/колізії нема
+     */
+    static int feetCellY(boolean onGround, int blockPosY, int supportY, double supportCollisionTop) {
+        if (!onGround || Double.isNaN(supportCollisionTop) || supportCollisionTop > 1.0 + FEET_EPS) {
+            return blockPosY;
+        }
+        return supportY + 1;
+    }
+
+    /**
+     * v19: чи перетинаються два паралелепіпеди (торкання гранями не рахується).
+     */
+    static boolean boxesOverlap(double aMinX, double aMinY, double aMinZ, double aMaxX, double aMaxY, double aMaxZ,
+                                double bMinX, double bMinY, double bMinZ, double bMaxX, double bMaxY, double bMaxZ) {
+        return aMinX < bMaxX - OVERLAP_EPS && aMaxX > bMinX + OVERLAP_EPS
+                && aMinY < bMaxY - OVERLAP_EPS && aMaxY > bMinY + OVERLAP_EPS
+                && aMinZ < bMaxZ - OVERLAP_EPS && aMaxZ > bMinZ + OVERLAP_EPS;
+    }
+
+    /**
+     * v19: чи звільнить стрибок клітинку з-під хітбокса: потрібно підняти моба на {@code liftNeeded} блоків (верх клітинки
+     * мінус низ хітбокса). Для клітинки на рівні меду це соті частки; для стіни по голову - 2 блоки (стрибок не допоможе).
+     */
+    static boolean jumpClears(double liftNeeded) {
+        return liftNeeded > 0.0 && liftNeeded <= MAX_JUMP_LIFT;
+    }
+
+    /** Чи розумний звичайний прохід до вищої цілі (див. {@link #WALK_DETOUR_FACTOR}). */
     static boolean isReasonableWalk(int nodeCount, double horizontalDistance) {
         return nodeCount <= WALK_DETOUR_FACTOR * horizontalDistance + WALK_DETOUR_SLACK;
     }
@@ -109,23 +199,17 @@ final class TerraformRules {
             this.seenComputeSeq = computeSeq;
         }
 
-        /**
-         * Перший тік поточної серії "заблоковано" або {@link #NO_TICK}.
-         */
+        /** Перший тік поточної серії "заблоковано" або {@link #NO_TICK}. */
         int sinceTick() {
             return this.sinceTick;
         }
 
-        /**
-         * Скільки тіків триває поточна серія (0, якщо не заблоковано).
-         */
+        /** Скільки тіків триває поточна серія (0, якщо не заблоковано). */
         int blockedTicks(int nowTick) {
             return this.sinceTick == NO_TICK ? 0 : Math.max(0, nowTick - this.sinceTick);
         }
 
-        /**
-         * Скидає серію й вердикт (але не те, які обчислення вже бачили).
-         */
+        /** Скидає серію й вердикт (але не те, які обчислення вже бачили). */
         void reset() {
             this.sinceTick = NO_TICK;
             this.lastObservedTick = NO_TICK;

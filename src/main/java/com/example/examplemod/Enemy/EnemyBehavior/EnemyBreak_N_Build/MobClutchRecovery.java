@@ -106,7 +106,8 @@ public final class MobClutchRecovery {
      */
     private static void attemptQuickSave(Mob mob, ServerLevel level, ClutchState state, double chance) {
         state.attemptsUsed++;
-        BlockPos spot = mob.blockPosition().below();
+        BlockPos spot = EnemyBreak_N_BuildUtils.floorCellToFill(level, mob);
+        if (spot == null) return; // v19: опора вже є (моб щойно відірвався від меду/піску душ/плити)
         // Геометрично нема до чого приліпити - не рахуємо навіть шанс (placeBlock і сам це
         // перевірить, але тут важливо саме НЕ витратити шанс на завідомо неможливу спробу).
         if (!EnemyBreak_N_BuildUtils.hasAdjacentSolid(level, spot)) return;
@@ -134,7 +135,8 @@ public final class MobClutchRecovery {
     }
 
     private static void attemptFinalSave(Mob mob, ServerLevel level, double chance) {
-        BlockPos spot = mob.blockPosition().below();
+        BlockPos spot = EnemyBreak_N_BuildUtils.floorCellToFill(level, mob);
+        if (spot == null) return; // v19: опора вже є
         if (!EnemyBreak_N_BuildUtils.hasAdjacentSolid(level, spot)) return; // нема до чого приліпити - падає до кінця
         if (mob.getRandom().nextDouble() < chance) {
             EnemyBreak_N_BuildUtils.placeBlock(level, spot, mob, PlaceReason.CLUTCH);

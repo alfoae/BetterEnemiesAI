@@ -118,6 +118,9 @@ public class BuildPathGoal extends Goal {
 
         if (!(this.mob.level() instanceof ServerLevel level)) return;
 
+        // v19: блок, відкладений через власний хітбокс моба, повторюємо щотіку, поки моб підстрибнув (див. placeBlock).
+        EnemyBreak_N_BuildUtils.retryPendingPlacement(level, this.mob);
+
         Vec3 chasePos = PursuitEnemyBehavior.getChasePosition(this.mob);
         if (chasePos == null) {
             this.buildTarget = null;
@@ -147,7 +150,7 @@ public class BuildPathGoal extends Goal {
             }
         }
 
-        if (this.mob.blockPosition().distSqr(this.buildTarget) <= ARRIVED_DIST_SQ
+        if (EnemyBreak_N_BuildUtils.feetCell(this.mob).distSqr(this.buildTarget) <= ARRIVED_DIST_SQ
                 && !EnemyBreak_N_BuildUtils.isPathBlocked(this.mob, chasePos)) {
             // ТИМЧАСОВИЙ DEBUG: якщо ЦЕ спрацьовує майже одразу після старту - схоже на кейс
             // "добіг до найближчої точки, миттєво вирішив що прийшов, і все скинулось".
@@ -182,8 +185,10 @@ public class BuildPathGoal extends Goal {
         // - ніколи (див. EnemyBreak_N_BuildUtils.allowAirborneFloor / placementVeto).
         boolean pillaring = needsClimb(this.buildTarget);
         if (EnemyBreak_N_BuildUtils.allowAirborneFloor(this.mob, pillaring)) {
-            BlockPos below = this.mob.blockPosition().below();
-            if (!level.getBlockState(below).isSolid()) {
+            // v19: null - опора вже є (моб щойно відірвався від меду/піску душ/плити: їхня клітинка і є опорою);
+            // раніше тут брали blockPosition().below() і ставили блок ПІД медом.
+            BlockPos below = EnemyBreak_N_BuildUtils.floorCellToFill(level, this.mob);
+            if (below != null) {
                 EnemyBreak_N_BuildUtils.placeBlock(level, below, this.mob,
                         pillaring ? PlaceReason.PILLAR_FLOOR : PlaceReason.EDGE_CATCH);
             }
@@ -235,7 +240,7 @@ public class BuildPathGoal extends Goal {
     }
 
     private void handleClimb(ServerLevel level) {
-        BlockPos feet = this.mob.blockPosition();
+        BlockPos feet = EnemyBreak_N_BuildUtils.feetCell(this.mob);
         BlockPos overhead = feet.above(2);
 
         // Спочатку прибираємо перепону над головою, якщо є ("якщо перекриває блок - ламає") -
@@ -265,7 +270,7 @@ public class BuildPathGoal extends Goal {
         // ("нема суміжного isSolid()-блока для опори"), і моб висить на краю назавжди. Спершу добудовуємо опору під самою
         // клітинкою моба (вона вже дотикається до опори), а наступного циклу міст іде далі звичайним шляхом.
         if (!level.getBlockState(stepBelow).isSolid() && !EnemyBreak_N_BuildUtils.hasAdjacentSolid(level, stepBelow)) {
-            BlockPos under = this.mob.blockPosition().below();
+            BlockPos under = EnemyBreak_N_BuildUtils.feetCell(this.mob).below(); // v19: опора, а не клітинка під медом
             if (!level.getBlockState(under).isSolid() && EnemyBreak_N_BuildUtils.hasAdjacentSolid(level, under)) {
                 EnemyBreak_N_BuildUtils.debugMsg(this.mob, "[DEBUG BuildPathGoal] bridge: моб за краєм опори, спершу блок під ним "
                         + under + " (крок " + step + " не має суміжної опори)"); // DEBUG
