@@ -78,6 +78,10 @@ public class TowerClimbGoal extends Goal {
     private Direction wallDirB;      // != null лише для діагонального (кутового) випадку
     private int actionCooldown;
 
+    // v20 (Config.TOWER_JUMP_FIRST): проба "чи вже можна допригнути до гравця" - не частіше за цей інтервал (тіків).
+    private static final int JUMP_PROBE_MIN_INTERVAL_TICKS = 8;
+    private int lastJumpProbeTick = -1_000_000;
+
     public TowerClimbGoal(Mob mob) {
         this.mob = mob;
         this.setFlags(EnumSet.of(Goal.Flag.MOVE, Goal.Flag.LOOK, Goal.Flag.JUMP));
@@ -426,6 +430,9 @@ public class TowerClimbGoal extends Goal {
         if (--this.actionCooldown > 0) return;
         this.actionCooldown = ACTION_COOLDOWN_TICKS;
 
+        // v20: новий шар - перевіряємо СВІЖИМ шляхом, чи вже є маршрут стрибком до гравця (він міг з'явитись саме зараз)
+        probeJumpRoute("climb");
+
         if (EnemyBreak_N_BuildUtils.feetCell(this.mob).getY() != this.layerY) {
             lockWallDirectionForNewLayer(player);
         }
@@ -448,6 +455,27 @@ public class TowerClimbGoal extends Goal {
         if (this.mob.onGround()) {
             this.mob.getJumpControl().jump();
         }
+    }
+
+    /**
+     * v20: просить свіжий шлях до гравця (див. {@link EnemyBreak_N_BuildUtils#requestFreshPath}). Якщо з поточної висоти вже
+     * є маршрут зі стрибком, {@link EnemyBreak_N_BuildUtils#isPathBlocked} стане false, {@link #canContinueToUse} зупинить
+     * вежу, а Pursuit + GapJumpAssistGoal стрибнуть. Без цього тротлінг недосяжної цілі (до 40 тіків) змушував моба
+     * добудовувати ще кілька зайвих шарів, хоча допригнути вже було можна.
+     */
+    private void probeJumpRoute(String where) {
+        if (!Config.TOWER_JUMP_FIRST.get()) {
+            return;
+        }
+        if (this.mob.tickCount - this.lastJumpProbeTick < JUMP_PROBE_MIN_INTERVAL_TICKS) {
+            return;
+        }
+        if (!EnemyBreak_N_BuildUtils.requestFreshPath(this.mob)) {
+            return; // загальний бюджет запитів цього тіку вичерпано (багато башт одразу) - спробуємо наступного разу
+        }
+        this.lastJumpProbeTick = this.mob.tickCount;
+        EnemyBreak_N_BuildUtils.logJumpProbe(this.mob, "TowerClimbGoal[" + where + "]: свіжий шлях - чи вже можна допригнути до гравця (Y="
+                + EnemyBreak_N_BuildUtils.feetCell(this.mob).getY() + ")");
     }
 
     private void beginSidestep(TowerZoneData zone) {
@@ -580,7 +608,12 @@ public class TowerClimbGoal extends Goal {
         double dz = landingTarget.getZ() - mobPos.getZ();
         double horizontalDistSq = dx * dx + dz * dz;
 
+        // v20: міст і поштовх-падіння нижче - ФОЛБЕК. Спершу з кожним кроком перевіряємо СВІЖИМ шляхом, чи вже можна
+        // допригнути до гравця через Run_N_Jump (стрибок вниз на платформу в межах того, що моб переживе, теж рахується).
+        probeJumpRoute("bridge");
+
         if (horizontalDistSq <= FALL_ZONE_DIST_SQ) {
+            EnemyBreak_N_BuildUtils.logJumpProbe(this.mob, "ФОЛБЕК: стрибком до гравця не вийшло - поштовх-падіння на ціль");
             // ВИПРАВЛЕНО (живий тест: моб "ступорився" рівно тут замість стрибка): це був той
             // самий "vanilla-навігація мовчки відмовляється будувати шлях" баг, що описаний нижче
             // для travelY - тільки пропущений саме в тому місці, де моб і мав нарешті стрибнути.

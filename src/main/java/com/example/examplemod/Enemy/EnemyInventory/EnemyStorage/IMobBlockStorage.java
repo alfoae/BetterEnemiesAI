@@ -7,7 +7,8 @@ import java.util.List;
 /**
  * "Інвентар" мобу для блоків, які він сам викопав під час копання до гравця. Наповнюється, коли
  * моб ламає блок ({@code addDugBlock}), спорожняється при смерті (дроп) — див.
- * {@code ModEntityEvents}. Той самий підхід, що й {@link IWeaponStorage} — Mixin на
+ * {@code EnemyBreak_N_BuildEvents#onLivingDeath}. Блоки, які мод поставив сам (тимчасові), сюди не потрапляють - див.
+ * {@code EnemyBreak_N_BuildUtils#breakBlock}. Той самий підхід, що й {@link IWeaponStorage} — Mixin на
  * {@code Mob.class} глобально, реалізовано в {@code MobBlockStorageMixin}.
  */
 public interface IMobBlockStorage {

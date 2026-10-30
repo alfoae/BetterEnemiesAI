@@ -52,9 +52,7 @@ final class TerraformRules {
      */
     static final double FEET_EPS = 1.0E-3;
 
-    /**
-     * v19: допуск перетину боксів - торкання гранями (нога моба рівно на верхівці блока) НЕ перетин.
-     */
+    /** v19: допуск перетину боксів - торкання гранями (нога моба рівно на верхівці блока) НЕ перетин. */
     static final double OVERLAP_EPS = 1.0E-4;
 
     /**
@@ -63,19 +61,13 @@ final class TerraformRules {
      */
     static final double MAX_JUMP_LIFT = 1.0;
 
-    /**
-     * v19: скільки тіків відкладений (через хітбокс) блок чекає на повторну спробу, поки моб у стрибку.
-     */
+    /** v19: скільки тіків відкладений (через хітбокс) блок чекає на повторну спробу, поки моб у стрибку. */
     static final int PENDING_PLACEMENT_TTL_TICKS = 24;
 
-    /**
-     * v19: скільки разів поспіль підстрибуємо заради однієї клітинки, перш ніж здатись (далі повторить сама ціль).
-     */
+    /** v19: скільки разів поспіль підстрибуємо заради однієї клітинки, перш ніж здатись (далі повторить сама ціль). */
     static final int PENDING_MAX_JUMPS = 3;
 
-    /**
-     * v19: пауза (тіків) без нових стрибків заради хітбокса після {@link #PENDING_MAX_JUMPS} невдалих - щоб моб не скакав вічно.
-     */
+    /** v19: пауза (тіків) без нових стрибків заради хітбокса після {@link #PENDING_MAX_JUMPS} невдалих - щоб моб не скакав вічно. */
     static final int PENDING_GIVE_UP_COOLDOWN_TICKS = 40;
 
     /**
@@ -102,8 +94,8 @@ final class TerraformRules {
      * {@code blockPosition()} - це клітинка САМОГО меду (ноги на 15/16, тобто все ще "в" клітинці), і код, що брав
      * {@code blockPosition().below()} за "підлогу", ставив блок ПІД медом. Якщо true - реальна клітинка ніг на 1 вища.
      *
-     * @param feetY              висота ніг моба
-     * @param cellY              Y клітинки {@code blockPosition()}
+     * @param feetY             висота ніг моба
+     * @param cellY             Y клітинки {@code blockPosition()}
      * @param collisionTopInCell найвища точка колізії блока в цій клітинці (0..1+, відносно низу клітинки)
      */
     static boolean feetAtOrAboveCollisionTop(double feetY, int cellY, double collisionTopInCell) {
@@ -129,9 +121,7 @@ final class TerraformRules {
         return supportY + 1;
     }
 
-    /**
-     * v19: чи перетинаються два паралелепіпеди (торкання гранями не рахується).
-     */
+    /** v19: чи перетинаються два паралелепіпеди (торкання гранями не рахується). */
     static boolean boxesOverlap(double aMinX, double aMinY, double aMinZ, double aMaxX, double aMaxY, double aMaxZ,
                                 double bMinX, double bMinY, double bMinZ, double bMaxX, double bMaxY, double bMaxZ) {
         return aMinX < bMaxX - OVERLAP_EPS && aMaxX > bMinX + OVERLAP_EPS

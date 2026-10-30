@@ -1,5 +1,6 @@
 package com.example.examplemod.Enemy.EnemyBehavior.EnemyBreak_N_Build;
 
+import com.example.examplemod.BetterEnemiesAI;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.server.level.ServerLevel;
@@ -19,7 +20,7 @@ import net.neoforged.neoforge.event.entity.player.PlayerInteractEvent;
  * методів у вашій точній версії NeoForge — це ізольовано ламає ЛИШЕ файл, ловити (розмежування
  * "гравцем/не гравцем" деінде не постраждає), спокійно кажіть, поправлю.
  */
-@EventBusSubscriber(modid = "betterenemysai")
+@EventBusSubscriber(modid = BetterEnemiesAI.MODID)
 public final class PlacedHazardEvents {
 
     private PlacedHazardEvents() {

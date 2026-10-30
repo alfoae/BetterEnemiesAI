@@ -1,5 +1,6 @@
 package com.example.examplemod.Enemy.EnemyBehavior.EnemyBreak_N_Build;
 
+import com.example.examplemod.BetterEnemiesAI;
 import com.example.examplemod.Config;
 import com.example.examplemod.Enemy.EnemyMovement.Run_N_Jump.GapJumpAssistGoal;
 import net.minecraft.core.BlockPos;
@@ -28,7 +29,7 @@ import java.util.WeakHashMap;
  * щотіку веде вже зареєстрованих мобів крізь три стадії, поки не приземляться або не вичерпають
  * усі спроби.
  */
-@EventBusSubscriber(modid = "betterenemysai")
+@EventBusSubscriber(modid = BetterEnemiesAI.MODID)
 public final class MobClutchRecovery {
 
     private static final Map<Mob, ClutchState> PENDING = new WeakHashMap<>();

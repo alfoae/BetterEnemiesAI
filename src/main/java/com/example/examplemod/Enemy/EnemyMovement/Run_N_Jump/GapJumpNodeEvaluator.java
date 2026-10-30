@@ -1,5 +1,6 @@
 package com.example.examplemod.Enemy.EnemyMovement.Run_N_Jump;
 
+import com.example.examplemod.Config;
 import com.example.examplemod.Enemy.EnemyMovement.TerrainShape.HopNode;
 import com.example.examplemod.Enemy.EnemyMovement.TerrainShape.ShapeAwareNodeEvaluator;
 import com.example.examplemod.Enemy.EnemyMovement.TerrainShape.ShapeSettings;
@@ -233,10 +234,50 @@ public class GapJumpNodeEvaluator extends ShapeAwareNodeEvaluator {
      */
     private boolean exactJumps = true;
 
+    /**
+     * v20: максимальна дальність променів (блоків) для рівнів глибше старого -3: захист пошуку шляху від розростання вартості.
+     */
+    private static final int DEEP_LEVEL_MAX_SCAN_GAP = 6;
+
+    // v20: шкода від падіння. fallProfile == null - стара логіка (фіксований нижній предел -3 без штрафів).
+    private FallMath.Profile fallProfile;
+    private int dynamicDownLimit = GapJumpPhysics.JUMP_DOWN_LIMIT_BLOCKS;
+    private float fallCostPerHp;
+    /**
+     * Апекс стрибка з поточного вузла (блоків): стрибок додає його до висоти падіння - ванільний лічильник рахує лише рух униз.
+     */
+    private double takeoffApex;
+    /**
+     * Найменша шкода серед вузлів-стрибків, створених у ПОТОЧНОМУ getNeighbors (керує ліниво-глибшим скануванням).
+     */
+    private float minJumpDamage;
+    /**
+     * Штраф за шкоду останнього jumpNode (щоб не рахувати його вдруге в anchorCost перестрибувань).
+     */
+    private float lastJumpPenalty;
+
     @Override
     public void prepare(PathNavigationRegion level, Mob mob) {
         super.prepare(level, mob);
         this.exactJumps = ShapeSettings.enabledFor(mob);
+        // v20: профіль падіння моба на час ЦЬОГО пошуку (здоров'я, золоті серця, Опір, чари, безпечна висота). Динамічний
+        // нижній предел = те, що моб переживе на звичайний блок (не менше старого -3, не більше стелі з конфігу).
+        this.fallProfile = null;
+        this.dynamicDownLimit = GapJumpPhysics.JUMP_DOWN_LIMIT_BLOCKS;
+        if (mob != null && Config.FALL_DAMAGE_AWARE_JUMPS.get()) {
+            try {
+                FallMath.Profile profile = FallDamage.profileOf(mob);
+                int cap = Config.JUMP_DOWN_MAX_BLOCKS.get();
+                double apex = FallMath.apexHeight(GapJumpPhysics.JUMP_VERTICAL_VELOCITY, GapJumpPhysics.GRAVITY_PER_TICK,
+                        GapJumpPhysics.VERTICAL_DRAG_PER_TICK);
+                this.fallProfile = profile;
+                this.fallCostPerHp = Config.FALL_DAMAGE_COST_PER_HP.get().floatValue();
+                this.dynamicDownLimit = Math.max(GapJumpPhysics.JUMP_DOWN_LIMIT_BLOCKS,
+                        Math.min(cap, FallMath.maxSurvivableDrop(profile, apex, cap)));
+            } catch (RuntimeException ex) {
+                this.fallProfile = null; // будь-яка проблема з читанням моба - стара поведінка, а не зламаний пошук шляху
+            }
+        }
     }
 
     /**
@@ -318,34 +359,31 @@ public class GapJumpNodeEvaluator extends ShapeAwareNodeEvaluator {
         // v16: кандидати збираємо ОКРЕМО для кожного Δy й лише потім ділимо буфер (NeighborBudget). Раніше всі Δy писали в
         // один буфер за зростанням Δy (-3..+1): велика платформа внизу (десятки посадок з Δy=-1) займала всі 32 слоти, а Δy=0
         // і Δy=+1 лишались без жодного - ребра вгору на наступну сходинку в графі не було (див. NeighborBudget).
-        final int downLimit = GapJumpPhysics.JUMP_DOWN_LIMIT_BLOCKS;
+        final int legacyDown = GapJumpPhysics.JUMP_DOWN_LIMIT_BLOCKS;
+        // v20: нижній предел ДИНАМІЧНИЙ (див. prepare): що моб переживе, але не менше старого -3. Глибші за -3 рівні скануються
+        // нижче лише за потреби (scanLevel).
+        final int downLimit = Math.max(legacyDown, this.dynamicDownLimit);
         final int levels = downLimit + GapJumpPhysics.JUMP_UP_LIMIT_BLOCKS + 1;
         Node[][] buckets = new Node[levels][];
         int[] sizes = new int[levels];
-        for (int dy = -downLimit; dy <= GapJumpPhysics.JUMP_UP_LIMIT_BLOCKS; dy++) {
-            // v15: дальність - з балістичної моделі (розбіг + спринт-стрибок + повітряне керування як у гравця), для блока
-            // відриву й цього Δy; 0 - недосяжно (напр. вгору з меду).
-            int legacyGap = GapJumpUtils.maxJumpGap(this.mob, takeoff, dy);
-            int scanGap = legacyGap;
-            if (ctx.originIrregular) {
-                // З нестандартної опори (плита 0.5, люк...) реальний Δy інший, ніж ціла різниця рівнів: для
-                // підйому з плити на блок на клітинку вище це +0.5, а не +1 - дальність відчутно більша. Промені
-                // скануємо за найсприятливішою оцінкою; кожного кандидата все одно вирішує точна перевірка.
-                scanGap = Math.max(scanGap, irregularScanGap(ctx, dy));
-            }
-            if (scanGap < 1) {
-                continue; // цей Δy з цього блока недосяжний (напр. вгору з меду, чи просто задалеко) - не пробуємо
-            }
-            Node[] bucket = new Node[nodes.length];
-            int found = 0;
-            for (GapJumpRays.Ray ray : GapJumpRays.forMaxGap(scanGap)) {
-                if (found >= bucket.length) {
-                    break; // одна група вже заповнила цілий буфер - більше з неї однаково не візьмемо (промені відсортовані: спершу найближчі)
+        this.takeoffApex = this.fallProfile == null ? 0.0
+                : FallMath.apexHeight(GapJumpPhysics.JUMP_VERTICAL_VELOCITY * takeoff.jumpFactor(),
+                GapJumpPhysics.GRAVITY_PER_TICK, GapJumpPhysics.VERTICAL_DRAG_PER_TICK);
+        this.minJumpDamage = Float.MAX_VALUE;
+        int shallowCandidates = 0;
+        for (int dy = -legacyDown; dy <= GapJumpPhysics.JUMP_UP_LIMIT_BLOCKS; dy++) {
+            shallowCandidates += scanLevel(nodes, ctx, takeoff, frontCache, dy, buckets, sizes, downLimit);
+        }
+        // v20: ЛІНИВО глибші рівні (-4..-downLimit): лише коли мілких приземлень нема зовсім або жодне не БЕЗКОШТОВНЕ (є шкода).
+        // Тоді шукаємо місце, з якого можна стрибнути з НАЙМЕНШОЮ шкодою (вода, сіно, нижча платформа), і зупиняємось, щойно
+        // знайшли приземлення без шкоди. У звичайному паркурі (є безкоштовна платформа поруч) це нічого не додає до вартості пошуку.
+        if (downLimit > legacyDown && (shallowCandidates == 0 || this.minJumpDamage > 0.0F)) {
+            for (int dy = -legacyDown - 1; dy >= -downLimit; dy--) {
+                scanLevel(nodes, ctx, takeoff, frontCache, dy, buckets, sizes, downLimit);
+                if (this.minJumpDamage <= 0.0F) {
+                    break;
                 }
-                found = tryRay(bucket, found, ctx, ray, frontCache, dy);
             }
-            buckets[dy + downLimit] = bucket;
-            sizes[dy + downLimit] = found;
         }
         int roomForJumps = nodes.length - count;
         int candidates = 0;
@@ -425,6 +463,15 @@ public class GapJumpNodeEvaluator extends ShapeAwareNodeEvaluator {
                 }
                 continue;
             }
+            // v20: приземлення, яке моб не переживе (з урахуванням здоров'я, ефектів, чарів і блока внизу) - як відсутнє:
+            // кандидат НЕ створюється, промінь триває (далі може бути безпечніша платформа чи вода).
+            if (dy < 0 && !landingAllowed(origin, dx, dz, dy)) {
+                if (landed) {
+                    voidBehind = true;
+                    unreachableBehind = false;
+                }
+                continue;
+            }
             // Придатна клітинка. Кандидат - якщо це перше приземлення, або перед нею була порожнеча
             // (інакше це просто продовження тієї ж платформи, ногами й так дійдемо).
             if (!landed || voidBehind) {
@@ -452,7 +499,7 @@ public class GapJumpNodeEvaluator extends ShapeAwareNodeEvaluator {
                                 : jumpNode(origin, dx, dz, dy, false);
                         if (!landed) {
                             anchorDistance = Math.sqrt((double) dx * dx + (double) dz * dz);
-                            anchorCost = anchorDistance + jump.costMalus;
+                            anchorCost = anchorDistance + jump.costMalus - this.lastJumpPenalty; // v20: штраф за шкоду кожне приземлення рахує саме
                         }
                         if (extra) {
                             ctx.addExtra(jump);
@@ -476,7 +523,7 @@ public class GapJumpNodeEvaluator extends ShapeAwareNodeEvaluator {
                     nodes[count++] = jump;
                     if (!landed) {
                         anchorDistance = Math.sqrt((double) dx * dx + (double) dz * dz);
-                        anchorCost = anchorDistance + jump.costMalus;
+                        anchorCost = anchorDistance + jump.costMalus - this.lastJumpPenalty; // v20: штраф за шкоду кожне приземлення рахує саме
                     }
                     landed = true;
                 }
@@ -594,6 +641,7 @@ public class GapJumpNodeEvaluator extends ShapeAwareNodeEvaluator {
         double ratePerBlock = IRREGULAR_SKIP_COST_PER_BLOCK + (dy > 0 ? UP_JUMP_EXTRA_MALUS_PER_BLOCK : 0.0F);
         double cost = firstCost + (distance - firstDistance) * ratePerBlock;
         jumpNode.costMalus = (float) Math.max(0.0, cost - distance);
+        jumpNode.costMalus += fallPenalty(origin, dx, dz, dy); // v20: власна шкода цього приземлення (firstCost її не містить)
         return jumpNode;
     }
 
@@ -639,6 +687,85 @@ public class GapJumpNodeEvaluator extends ShapeAwareNodeEvaluator {
         return isBodyZoneClear(column.getX(), column.getY(), column.getZ()) ? VOID : BLOCKED;
     }
 
+    /**
+     * v20: скан одного рівня Δy (раніше це було тілом циклу в getNeighbors). Повертає кількість знайдених кандидатів.
+     */
+    private int scanLevel(Node[] nodes, JumpCtx ctx, GapJumpPhysics.Takeoff takeoff, byte[] frontCache, int dy,
+                          Node[][] buckets, int[] sizes, int downLimit) {
+        // v15: дальність - з балістичної моделі (розбіг + спринт-стрибок + повітряне керування як у гравця), для блока
+        // відриву й цього Δy; 0 - недосяжно (напр. вгору з меду).
+        int legacyGap = GapJumpUtils.maxJumpGap(this.mob, takeoff, dy);
+        int scanGap = legacyGap;
+        if (ctx.originIrregular) {
+            // З нестандартної опори (плита 0.5, люк...) реальний Δy інший, ніж ціла різниця рівнів: для
+            // підйому з плити на блок на клітинку вище це +0.5, а не +1 - дальність відчутно більша. Промені
+            // скануємо за найсприятливішою оцінкою; кожного кандидата все одно вирішує точна перевірка.
+            scanGap = Math.max(scanGap, irregularScanGap(ctx, dy));
+        }
+        if (dy < -GapJumpPhysics.JUMP_DOWN_LIMIT_BLOCKS) {
+            // v20: глибокі рівні (нижче старого -3) скануємо з обмеженою дальністю: кількість променів росте квадратично, а
+            // сенс глибокого стрибка - зазвичай "зістрибнути на найближчу нижчу платформу/воду", а не перелетіти далеко.
+            scanGap = Math.min(scanGap, DEEP_LEVEL_MAX_SCAN_GAP);
+        }
+        if (scanGap < 1) {
+            return 0; // цей Δy з цього блока недосяжний (напр. вгору з меду, чи просто задалеко) - не пробуємо
+        }
+        Node[] bucket = new Node[nodes.length];
+        int found = 0;
+        for (GapJumpRays.Ray ray : GapJumpRays.forMaxGap(scanGap)) {
+            if (found >= bucket.length) {
+                break; // одна група вже заповнила цілий буфер - більше з неї однаково не візьмемо (промені відсортовані: спершу найближчі)
+            }
+            found = tryRay(bucket, found, ctx, ray, frontCache, dy);
+        }
+        buckets[dy + downLimit] = bucket;
+        sizes[dy + downLimit] = found;
+        return found;
+    }
+
+    /**
+     * v20: шкода (HP, після Опору й чарів, до поглинання) від приземлення на {@code origin + (dx,dy,dz)} стрибком із цього вузла.
+     */
+    private float fallDamageOf(BlockPos origin, int dx, int dz, int dy) {
+        FallMath.Profile profile = this.fallProfile;
+        if (profile == null) {
+            return 0.0F;
+        }
+        double fall = FallMath.fallBlocks(this.takeoffApex, dy);
+        if (fall <= profile.safeFall()) {
+            return 0.0F; // швидкий вихід: без звернень до світу
+        }
+        BlockPos landing = origin.offset(dx, dy, dz);
+        BlockState below = getBlockStateAt(landing.below());
+        BlockState feet = getBlockStateAt(landing);
+        BlockState head = getBlockStateAt(landing.above());
+        double multiplier = below == null || feet == null || head == null
+                ? 1.0 : FallDamage.landingMultiplier(below, feet, head);
+        return FallMath.damageAfterReductions(profile, fall, multiplier);
+    }
+
+    /**
+     * v20: штраф у вартості ребра за шкоду від падіння; заодно запам'ятовує найменшу шкоду (див. getNeighbors).
+     */
+    private float fallPenalty(BlockPos origin, int dx, int dz, int dy) {
+        float damage = fallDamageOf(origin, dx, dz, dy);
+        if (damage < this.minJumpDamage) {
+            this.minJumpDamage = damage;
+        }
+        return damage > 0.0F ? damage * this.fallCostPerHp : 0.0F;
+    }
+
+    /**
+     * v20: чи переживе моб це приземлення (за вимогою конфігу лишивши {@code fallDamageReserveHp} HP).
+     */
+    private boolean landingAllowed(BlockPos origin, int dx, int dz, int dy) {
+        FallMath.Profile profile = this.fallProfile;
+        if (profile == null || dy >= 0) {
+            return true;
+        }
+        return FallMath.survives(profile, fallDamageOf(origin, dx, dz, dy));
+    }
+
     private Node jumpNode(BlockPos origin, int dx, int dz, int dy, boolean skip) {
         BlockPos landing = origin.offset(dx, dy, dz);
         Node jumpNode = new Node(landing.getX(), landing.getY(), landing.getZ());
@@ -649,6 +776,9 @@ public class GapJumpNodeEvaluator extends ShapeAwareNodeEvaluator {
             malusPerBlock += UP_JUMP_EXTRA_MALUS_PER_BLOCK;
         }
         jumpNode.costMalus = (float) (distance * malusPerBlock);
+        // v20: шкода від падіння - у вартість ребра: безпечне приземлення завжди вигідніше за шкідливе
+        this.lastJumpPenalty = fallPenalty(origin, dx, dz, dy);
+        jumpNode.costMalus += this.lastJumpPenalty;
         return jumpNode;
     }
 

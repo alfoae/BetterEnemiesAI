@@ -41,6 +41,13 @@ public class Config {
 
     public static final ModConfigSpec.IntValue UNREACHABLE_RECOMPUTE_INTERVAL_TICKS;
 
+    // v20: стрибки з урахуванням шкоди від падіння (GapJumpNodeEvaluator / FallDamage) і режим вежі "спершу стрибок".
+    public static final ModConfigSpec.BooleanValue FALL_DAMAGE_AWARE_JUMPS;
+    public static final ModConfigSpec.IntValue JUMP_DOWN_MAX_BLOCKS;
+    public static final ModConfigSpec.DoubleValue FALL_DAMAGE_RESERVE_HP;
+    public static final ModConfigSpec.DoubleValue FALL_DAMAGE_COST_PER_HP;
+    public static final ModConfigSpec.BooleanValue TOWER_JUMP_FIRST;
+
     // Дебаг (див. com.example.examplemod.debug.DebugLog): окремий файл logs/betterenemiesai-debug.log.
     public static final ModConfigSpec.BooleanValue DEBUG_ENABLED;
     public static final ModConfigSpec.BooleanValue DEBUG_WATCHDOG;
@@ -129,6 +136,14 @@ public class Config {
                         "впевненість, що звичайна навігація туди дійде).")
                 .defineInRange("towerZoneFlatPatchRadius", 1, 1, 3);
 
+        TOWER_JUMP_FIRST = builder
+                .comment("Вежа (TowerClimbGoal): спершу СТРИБОК. Моб будує вежу вгору й після КОЖНОГО шару (і кожного блока мосту)",
+                        "одразу перевіряє СВІЖИМ шляхом, чи вже можна допригнути до гравця через Run_N_Jump; щойно маршрут зі",
+                        "стрибком є - вежа зупиняється й моб стрибає. Міст до гравця зверху й поштовх 'падіння на гравця' лишаються",
+                        "ФОЛБЕКОМ - на випадок, коли стрибком дістатись не виходить. false - стара поведінка (шлях перевіряється",
+                        "лише за звичайним розкладом, до 40 тіків із тротлінгом).")
+                .define("towerJumpFirst", true);
+
         builder.pop();
 
         builder.push("Clutch");
@@ -186,6 +201,33 @@ public class Config {
                         "яку path-finder щойно визнав недосяжною.")
                 .defineInRange("unreachableRecomputeIntervalTicks", 40, 1, 1200);
 
+
+        builder.pop();
+
+        builder.push("Fall_Damage_Jumps");
+
+        FALL_DAMAGE_AWARE_JUMPS = builder
+                .comment("Стрибки вниз враховують ШКОДУ ВІД ПАДІННЯ: нижній предел динамічний (замість фіксованих -3 блоків),",
+                        "у вартість шляху додається штраф за шкоду (безпечне приземлення завжди вигідніше), а смертельні",
+                        "приземлення відсікаються. Беруться до уваги здоров'я, золоті серця, ефекти (Опір, Повільне падіння,",
+                        "Стрибучість), чари спорядження (Невагомість, Захист) і блок приземлення (вода, сіно, мед, слайм, ліжко,",
+                        "павутиння). Бронею падіння НЕ зменшується - так у ваніллі. false - стара логіка (-3 без штрафів).")
+                .define("fallDamageAwareJumps", true);
+
+        JUMP_DOWN_MAX_BLOCKS = builder
+                .comment("Стеля динамічного нижнього предела: на скільки блоків НИЖЧЕ відриву моб узагалі розглядає приземлення.",
+                        "Справжній предел - менший із цього числа й того, що моб переживе. Рівні глибше -3 скануються лише коли",
+                        "мілкі приземлення НЕ безкоштовні (є шкода) або їх нема зовсім - щоб не вантажити пошук шляху.")
+                .defineInRange("jumpDownMaxBlocks", 8, 3, 24);
+
+        FALL_DAMAGE_RESERVE_HP = builder
+                .comment("Скільки HP моб мусить мати ПІСЛЯ падіння, щоб стрибок схвалили. 1.0 = 'аби вижив'.")
+                .defineInRange("fallDamageReserveHp", 1.0D, 0.0D, 20.0D);
+
+        FALL_DAMAGE_COST_PER_HP = builder
+                .comment("Штраф у вартості шляху за кожен 1 HP шкоди від падіння (1 блок ходьби = 1.0). 6 - моб обійде до ~6 блоків",
+                        "заради півсерця; 0 - шкода не впливає на вибір маршруту (лишається лише відсікання смертельних).")
+                .defineInRange("fallDamageCostPerHp", 6.0D, 0.0D, 100.0D);
 
         builder.pop();
 

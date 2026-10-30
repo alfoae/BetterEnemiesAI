@@ -1,5 +1,6 @@
 package com.example.examplemod.Enemy.EnemyBehavior.EnemyShootAhead;
 
+import com.example.examplemod.BetterEnemiesAI;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.phys.Vec3;
@@ -11,8 +12,8 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.UUID;
 
-// ВАЖЛИВО: Заміни "betterenemysai" на свій справжній modid (якщо він інший)!
-@EventBusSubscriber(modid = "betterenemysai")
+// modid береться з BetterEnemiesAI.MODID (раніше тут було помилкове "betterenemysai" - без збігу з modid мода події не підписувались).
+@EventBusSubscriber(modid = BetterEnemiesAI.MODID)
 public class PlayerVelocityTracker {
 
     private static final Map<UUID, Vec3> lastPositions = new HashMap<>();
