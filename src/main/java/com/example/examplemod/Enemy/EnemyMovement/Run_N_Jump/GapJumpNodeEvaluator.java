@@ -783,7 +783,7 @@ public class GapJumpNodeEvaluator extends ShapeAwareNodeEvaluator {
             return 0.0F;
         }
         double fall = FallMath.fallBlocks(this.takeoffApex, dy);
-        if (fall <= profile.safeFall) {
+        if (fall <= profile.safeFall()) {
             return 0.0F; // швидкий вихід: без звернень до світу
         }
         BlockPos landing = origin.offset(dx, dy, dz);

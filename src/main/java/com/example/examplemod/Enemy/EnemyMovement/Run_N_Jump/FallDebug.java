@@ -153,8 +153,8 @@ public final class FallDebug {
      */
     static void logProfile(Mob mob, FallMath.Profile p, int cap, double apex, int survivable, int downLimit, float costPerHp) {
         try {
-            String sig = f1(p.health) + "|" + f1(p.absorption) + "|" + f1(p.reserve) + "|" + f2(p.safeFall) + "|" + f2(p.fallMultiplier)
-                    + "|" + p.resistanceLevel + "|" + f1(p.protection) + "|" + p.immune + "|" + downLimit + "|" + mob.getMaxFallDistance();
+            String sig = f1(p.health()) + "|" + f1(p.absorption()) + "|" + f1(p.reserve()) + "|" + f2(p.safeFall()) + "|" + f2(p.fallMultiplier())
+                    + "|" + p.resistanceLevel() + "|" + f1(p.protection()) + "|" + p.immune() + "|" + downLimit + "|" + mob.getMaxFallDistance();
             boolean changed = !sig.equals(LAST_PROFILE_SIG.get(mob));
             // той самий профіль - не частіше разу на 5 с; змінився (HP міняється від кожного удару) - не частіше разу на 1 с
             if (!DebugLog.throttle("fall-profile-" + mob.getId(), changed ? 1000L : 5000L)) {
@@ -164,14 +164,14 @@ public final class FallDebug {
 
             StringBuilder sb = new StringBuilder(1100);
             sb.append("ПРОФІЛЬ ПАДІННЯ (початок пошуку шляху)").append(changed ? " [ЗМІНИВСЯ]" : "");
-            sb.append("\n    HP=").append(f1(p.health)).append('/').append(f1(mob.getMaxHealth()))
-                    .append(" +поглинання=").append(f1(p.absorption))
-                    .append(" | резерв після падіння=").append(f1(p.reserve))
-                    .append(" | безпечна висота=").append(f2(p.safeFall))
-                    .append(" | множник шкоди=").append(f2(p.fallMultiplier))
-                    .append(" | Опір=").append(p.resistanceLevel == 0 ? "нема" : "рівень " + p.resistanceLevel)
-                    .append(" | захист чарами (Невагомість/Захист)=").append(f1(p.protection))
-                    .append(" | імунітет=").append(p.immune);
+            sb.append("\n    HP=").append(f1(p.health())).append('/').append(f1(mob.getMaxHealth()))
+                    .append(" +поглинання=").append(f1(p.absorption()))
+                    .append(" | резерв після падіння=").append(f1(p.reserve()))
+                    .append(" | безпечна висота=").append(f2(p.safeFall()))
+                    .append(" | множник шкоди=").append(f2(p.fallMultiplier()))
+                    .append(" | Опір=").append(p.resistanceLevel() == 0 ? "нема" : "рівень " + p.resistanceLevel())
+                    .append(" | захист чарами (Невагомість/Захист)=").append(f1(p.protection()))
+                    .append(" | імунітет=").append(p.immune());
             sb.append("\n    [імунітет: тип=").append(mob.getType().is(EntityTypeTags.FALL_DAMAGE_IMMUNE))
                     .append(" повільне_падіння=").append(mob.hasEffect(MobEffects.SLOW_FALLING))
                     .append(" невразливий=").append(mob.isInvulnerableTo(mob.damageSources().fall())).append(']');
@@ -286,8 +286,8 @@ public final class FallDebug {
             Node last = path.getNode(nodes - 1);
             String sb = "ШЛЯХ: спусків=" + descents + " (з них ПІШКИ-ЗРИВІВ=" + walkOffs + ')' +
                     " | перший спуск з Y=" + firstY + ", кінець шляху Y=" + last.y +
-                    " | сумарна очікувана втрата≈" + f1(totalLoss) + " HP при HP=" + f1(p.health) +
-                    "+" + f1(p.absorption) + " | ванільний mob.getMaxFallDistance()=" + mob.getMaxFallDistance() +
+                    " | сумарна очікувана втрата≈" + f1(totalLoss) + " HP при HP=" + f1(p.health()) +
+                    "+" + f1(p.absorption()) + " | ванільний mob.getMaxFallDistance()=" + mob.getMaxFallDistance() +
                     " | вузлів=" + nodes + " canReach=" + path.canReach() +
                     edges;
             DebugLog.log(DebugLog.Cat.FALL, mob, sb);
@@ -321,16 +321,16 @@ public final class FallDebug {
             double multiplier = FallDamage.landingMultiplier(below, feet, head);
             float damage = FallMath.damageAfterReductions(p, fall, multiplier);
             float loss = FallMath.healthLoss(p, damage);
-            float hp = p.health + p.absorption;
+            float hp = p.health() + p.absorption();
             String sb = (runOff ? "ЗБІГ З КРАЮ (без стрибка)" : "ВІДРИВ (стрибок)") + ": край=" + cell(edge) +
                     " -> приземлення=(" + f2(landing.x) + ',' + f2(landing.y) + ',' + f2(landing.z) +
                     ") клітинка=" + cell(land) + " | Δy=" + f2(segDeltaY) +
                     "\n    падіння≈" + f2(fall) + " бл (апекс=" + f2(apex) + " + глибина " + f2(-segDeltaY) +
-                    "; безпечно до " + f2(p.safeFall) + ')' +
+                    "; безпечно до " + f2(p.safeFall()) + ')' +
                     " | " + describeLanding(below, feet, head) +
                     "\n    шкода≈" + f1(damage) + " HP (втрата здоров'я=" + f1(loss) + ") | HP(+погл.) " +
                     f1(hp) + " -> " + f1(hp - damage) + " | виживе=" + FallMath.survives(p, damage) +
-                    " (резерв " + f1(p.reserve) + ')' +
+                    " (резерв " + f1(p.reserve()) + ')' +
                     "\n    для порівняння ТІЄЇ Ж глибини: на звичайний блок=" + dmg(p, fall, 1.0) +
                     " | сіно/мед=" + dmg(p, fall, 0.2) + " | вода/павутиння/слайм=" + dmg(p, fall, 0.0) +
                     " | ванільний mob.getMaxFallDistance()=" + mob.getMaxFallDistance();
@@ -502,9 +502,9 @@ public final class FallDebug {
             this.lethalByDy[slot]++;
             if (healthLoss < this.rejectedBestLoss) {
                 this.rejectedBestLoss = healthLoss;
-                float left = this.profile == null ? Float.NaN : this.profile.health - healthLoss;
+                float left = this.profile == null ? Float.NaN : this.profile.health() - healthLoss;
                 this.rejectedDesc = describeEdge(origin, dx, dz, dy) + " | шкода=" + f1(damage) + " HP (втрата здоров'я=" + f1(healthLoss)
-                        + ", лишилось би " + f1(left) + ", резерв " + (this.profile == null ? "?" : f1(this.profile.reserve)) + ") | "
+                        + ", лишилось би " + f1(left) + ", резерв " + (this.profile == null ? "?" : f1(this.profile.reserve())) + ") | "
                         + describeLanding(below, feet, head);
             }
         }
@@ -522,7 +522,7 @@ public final class FallDebug {
                 sb.append("ПОШУК ШЛЯХУ (один пошук): вузлів розкрито=").append(this.expanded).append(", зі скануванням стрибків=")
                         .append(this.scanned).append(" | старт Y=").append(this.startY).append(" | нижній предел=-").append(downLimit)
                         .append(" | вартість HP в A*=").append(f1(costPerHp))
-                        .append(" | профіль=").append(this.profile == null ? "НЕМАЄ (стара логіка)" : "HP=" + f1(this.profile.health));
+                        .append(" | профіль=").append(this.profile == null ? "НЕМАЄ (стара логіка)" : "HP=" + f1(this.profile.health()));
 
                 sb.append("\n    розкрито вузлів за рівнем (Y відносно старту):");
                 int lowestRel = Integer.MAX_VALUE;
