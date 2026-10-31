@@ -3,6 +3,7 @@ package com.example.examplemod.debug;
 import com.example.examplemod.Enemy.EnemyBehavior.EnemyBreak_N_Build.BuildPathGoal;
 import com.example.examplemod.Enemy.EnemyBehavior.EnemyBreak_N_Build.EnemyBreak_N_BuildUtils;
 import com.example.examplemod.Enemy.EnemyBehavior.EnemyPursuit_N_Search.PursuitBehavior.PursuitEnemyBehavior;
+import com.example.examplemod.Enemy.EnemyMovement.Run_N_Jump.FallDebug;
 import com.example.examplemod.Enemy.EnemyMovement.Run_N_Jump.GapJumpAssistGoal;
 import com.example.examplemod.Enemy.EnemyMovement.Run_N_Jump.GapJumpUtils;
 import com.example.examplemod.Enemy.EnemyMovement.Run_N_Jump.ShapeJump;
@@ -213,6 +214,8 @@ public final class MobDebug {
         }
         DebugLog.log(DebugLog.Cat.PATH, mob, "НОВИЙ ШЛЯХ до " + target.toShortString() + " недосяжна_підряд=" + unreachableStreak
                 + " | моб=" + v(mob.position()) + " onGround=" + mob.onGround() + "\n    " + pathFull(path, 40));
+        // v21: які ребра цього шляху - падіння (СТРИБОК чи ванільний ПІШКИ-ЗРИВ), на скільки блоків і яка шкода
+        FallDebug.logPathDescents(mob, path);
     }
 
     private static void section(StringBuilder sb, String title, Section s) {

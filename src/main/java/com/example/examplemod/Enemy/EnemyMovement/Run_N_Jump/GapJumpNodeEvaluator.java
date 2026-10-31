@@ -243,18 +243,17 @@ public class GapJumpNodeEvaluator extends ShapeAwareNodeEvaluator {
     private FallMath.Profile fallProfile;
     private int dynamicDownLimit = GapJumpPhysics.JUMP_DOWN_LIMIT_BLOCKS;
     private float fallCostPerHp;
-    /**
-     * Апекс стрибка з поточного вузла (блоків): стрибок додає його до висоти падіння - ванільний лічильник рахує лише рух униз.
-     */
+    /** Апекс стрибка з поточного вузла (блоків): стрибок додає його до висоти падіння - ванільний лічильник рахує лише рух униз. */
     private double takeoffApex;
-    /**
-     * Найменша шкода серед вузлів-стрибків, створених у ПОТОЧНОМУ getNeighbors (керує ліниво-глибшим скануванням).
-     */
+    /** Найменша шкода серед вузлів-стрибків, створених у ПОТОЧНОМУ getNeighbors (керує ліниво-глибшим скануванням). */
     private float minJumpDamage;
-    /**
-     * Штраф за шкоду останнього jumpNode (щоб не рахувати його вдруге в anchorCost перестрибувань).
-     */
+    /** Штраф за шкоду останнього jumpNode (щоб не рахувати його вдруге в anchorCost перестрибувань). */
     private float lastJumpPenalty;
+    /**
+     * v21 (дебаг [FALL]): статистика ОДНОГО пошуку для зведення в {@link #done}; null - не збираємо (категорія вимкнена або цей
+     * пошук не вибрано: збирається лише один пошук на моба раз на 2 с, щоб не гальмувати A*).
+     */
+    private FallDebug.SearchStats fallStats;
 
     @Override
     public void prepare(PathNavigationRegion level, Mob mob) {
@@ -264,19 +263,55 @@ public class GapJumpNodeEvaluator extends ShapeAwareNodeEvaluator {
         // нижній предел = те, що моб переживе на звичайний блок (не менше старого -3, не більше стелі з конфігу).
         this.fallProfile = null;
         this.dynamicDownLimit = GapJumpPhysics.JUMP_DOWN_LIMIT_BLOCKS;
+        // v21 (дебаг [FALL]): що саме порахував цей пошук - див. FallDebug.logProfile
+        int dbgCap = -1;
+        double dbgApex = 0.0;
+        int dbgSurvivable = -1;
+        RuntimeException dbgFailure = null;
         if (mob != null && Config.FALL_DAMAGE_AWARE_JUMPS.get()) {
             try {
                 FallMath.Profile profile = FallDamage.profileOf(mob);
                 int cap = Config.JUMP_DOWN_MAX_BLOCKS.get();
                 double apex = FallMath.apexHeight(GapJumpPhysics.JUMP_VERTICAL_VELOCITY, GapJumpPhysics.GRAVITY_PER_TICK,
                         GapJumpPhysics.VERTICAL_DRAG_PER_TICK);
+                int survivable = FallMath.maxSurvivableDrop(profile, apex, cap);
                 this.fallProfile = profile;
                 this.fallCostPerHp = Config.FALL_DAMAGE_COST_PER_HP.get().floatValue();
-                this.dynamicDownLimit = Math.max(GapJumpPhysics.JUMP_DOWN_LIMIT_BLOCKS,
-                        Math.min(cap, FallMath.maxSurvivableDrop(profile, apex, cap)));
+                this.dynamicDownLimit = Math.max(GapJumpPhysics.JUMP_DOWN_LIMIT_BLOCKS, Math.min(cap, survivable));
+                dbgCap = cap;
+                dbgApex = apex;
+                dbgSurvivable = survivable;
             } catch (RuntimeException ex) {
                 this.fallProfile = null; // будь-яка проблема з читанням моба - стара поведінка, а не зламаний пошук шляху
+                dbgFailure = ex;         // v21: раніше цей виняток ковтався мовчки - тепер його видно в [FALL]
             }
+        }
+        this.fallStats = null;
+        if (DebugLog.on(DebugLog.Cat.FALL) && FallDebug.relevant(mob)) {
+            if (this.fallProfile != null) {
+                FallDebug.logProfile(mob, this.fallProfile, dbgCap, dbgApex, dbgSurvivable, this.dynamicDownLimit, this.fallCostPerHp);
+            } else if (dbgFailure != null) {
+                FallDebug.logProfileFailed(mob, dbgFailure);
+            } else {
+                FallDebug.logProfileOff(mob);
+            }
+            if (DebugLog.throttle("fall-search-" + mob.getId(), 2000L)) {
+                this.fallStats = new FallDebug.SearchStats(mob, this.fallProfile);
+            }
+        }
+    }
+
+    /**
+     * v21 (дебаг [FALL]): пошук закінчено - друкуємо зведення (кандидати вниз, відсічені, глибоке сканування, рівні, які розкрив
+     * A*). {@code super.done()} обнуляє моба, тому статистика тримає власне посилання.
+     */
+    @Override
+    public void done() {
+        FallDebug.SearchStats stats = this.fallStats;
+        this.fallStats = null;
+        super.done();
+        if (stats != null) {
+            stats.flush(this.dynamicDownLimit, this.fallCostPerHp);
         }
     }
 
@@ -319,6 +354,9 @@ public class GapJumpNodeEvaluator extends ShapeAwareNodeEvaluator {
     @Override
     public int getNeighbors(Node[] nodes, Node node) {
         int count = super.getNeighbors(nodes, node);
+        if (this.fallStats != null) {
+            this.fallStats.onExpand(node); // v21: на яких рівнях Y A* розкриває вузли (чи дивиться він НИЖЧЕ за старт)
+        }
         boolean probe = isProbeStart(node);
         // v17: "повністю відкрита клітинка" - це 8 сусідів БЕЗ СПУСКІВ (суцільна поверхня на одному рівні): жоден напрямок не має
         // провалля на рівні старту, тож скан дав би порожньо. Але коли ПІД платформою є ще одна поверхня (підлога під паркуром),
@@ -347,6 +385,9 @@ public class GapJumpNodeEvaluator extends ShapeAwareNodeEvaluator {
 
         // Точна геометрія (ShapeJump) - лише де є нерегулярна форма; на повних блоках лишається старий код.
         JumpCtx ctx = new JumpCtx(node, origin, exactReady() && columnIsIrregular(node.x, node.y, node.z));
+        if (this.fallStats != null) {
+            this.fallStats.onScan();
+        }
 
         byte[] frontCache = new byte[9]; // стан 8 клітинок перед краєм НА РІВНІ СТАРТУ; ключ (dx+1)*3+(dz+1)
         // Дальність залежить від блока, З ЯКОГО моб відривається (тертя / speedFactor / jumpFactor): лід - далі,
@@ -378,17 +419,26 @@ public class GapJumpNodeEvaluator extends ShapeAwareNodeEvaluator {
         // Тоді шукаємо місце, з якого можна стрибнути з НАЙМЕНШОЮ шкодою (вода, сіно, нижча платформа), і зупиняємось, щойно
         // знайшли приземлення без шкоди. У звичайному паркурі (є безкоштовна платформа поруч) це нічого не додає до вартості пошуку.
         if (downLimit > legacyDown && (shallowCandidates == 0 || this.minJumpDamage > 0.0F)) {
+            if (this.fallStats != null) {
+                this.fallStats.deepTriggered++;
+            }
             for (int dy = -legacyDown - 1; dy >= -downLimit; dy--) {
                 scanLevel(nodes, ctx, takeoff, frontCache, dy, buckets, sizes, downLimit);
                 if (this.minJumpDamage <= 0.0F) {
                     break;
                 }
             }
+        } else if (this.fallStats != null && downLimit > legacyDown) {
+            // v21: глибші рівні НЕ скануються, бо хоч де-небудь (навіть у зайвий бік) уже є безкоштовне приземлення
+            this.fallStats.deepSkippedFree++;
         }
         int roomForJumps = nodes.length - count;
         int candidates = 0;
         for (int size : sizes) {
             candidates += size;
+        }
+        if (this.fallStats != null) {
+            this.fallStats.onLevels(sizes, downLimit);
         }
         count = NeighborBudget.merge(buckets, sizes, nodes, count);
         if (candidates > roomForJumps) {
@@ -466,6 +516,9 @@ public class GapJumpNodeEvaluator extends ShapeAwareNodeEvaluator {
             // v20: приземлення, яке моб не переживе (з урахуванням здоров'я, ефектів, чарів і блока внизу) - як відсутнє:
             // кандидат НЕ створюється, промінь триває (далі може бути безпечніша платформа чи вода).
             if (dy < 0 && !landingAllowed(origin, dx, dz, dy)) {
+                if (this.fallStats != null) {
+                    dbgLethal(origin, dx, dz, dy);
+                }
                 if (landed) {
                     voidBehind = true;
                     unreachableBehind = false;
@@ -723,16 +776,14 @@ public class GapJumpNodeEvaluator extends ShapeAwareNodeEvaluator {
         return found;
     }
 
-    /**
-     * v20: шкода (HP, після Опору й чарів, до поглинання) від приземлення на {@code origin + (dx,dy,dz)} стрибком із цього вузла.
-     */
+    /** v20: шкода (HP, після Опору й чарів, до поглинання) від приземлення на {@code origin + (dx,dy,dz)} стрибком із цього вузла. */
     private float fallDamageOf(BlockPos origin, int dx, int dz, int dy) {
         FallMath.Profile profile = this.fallProfile;
         if (profile == null) {
             return 0.0F;
         }
         double fall = FallMath.fallBlocks(this.takeoffApex, dy);
-        if (fall <= profile.safeFall()) {
+        if (fall <= profile.safeFall) {
             return 0.0F; // швидкий вихід: без звернень до світу
         }
         BlockPos landing = origin.offset(dx, dy, dz);
@@ -744,20 +795,56 @@ public class GapJumpNodeEvaluator extends ShapeAwareNodeEvaluator {
         return FallMath.damageAfterReductions(profile, fall, multiplier);
     }
 
-    /**
-     * v20: штраф у вартості ребра за шкоду від падіння; заодно запам'ятовує найменшу шкоду (див. getNeighbors).
-     */
+    /** v20: штраф у вартості ребра за шкоду від падіння; заодно запам'ятовує найменшу шкоду (див. getNeighbors). */
     private float fallPenalty(BlockPos origin, int dx, int dz, int dy) {
         float damage = fallDamageOf(origin, dx, dz, dy);
         if (damage < this.minJumpDamage) {
             this.minJumpDamage = damage;
         }
+        if (this.fallStats != null && dy < 0) {
+            dbgCandidate(origin, dx, dz, dy, damage);
+        }
         return damage > 0.0F ? damage * this.fallCostPerHp : 0.0F;
     }
 
     /**
-     * v20: чи переживе моб це приземлення (за вимогою конфігу лишивши {@code fallDamageReserveHp} HP).
+     * v21 (дебаг [FALL]): кандидат стрибка вниз потрапив у граф - для зведення пошуку. Ніколи не ламає пошук шляху.
      */
+    private void dbgCandidate(BlockPos origin, int dx, int dz, int dy, float damage) {
+        try {
+            BlockPos landing = origin.offset(dx, dy, dz);
+            BlockState below = getBlockStateAt(landing.below());
+            BlockState feet = getBlockStateAt(landing);
+            BlockState head = getBlockStateAt(landing.above());
+            if (below != null && feet != null && head != null) {
+                this.fallStats.onCandidate(origin, dx, dz, dy, damage, below, feet, head);
+            }
+        } catch (RuntimeException ignored) {
+            // тільки дебаг
+        }
+    }
+
+    /**
+     * v21 (дебаг [FALL]): приземлення відсічено як смертельне - для зведення пошуку. Ніколи не ламає пошук шляху.
+     */
+    private void dbgLethal(BlockPos origin, int dx, int dz, int dy) {
+        try {
+            float damage = fallDamageOf(origin, dx, dz, dy);
+            FallMath.Profile profile = this.fallProfile;
+            float loss = profile == null ? damage : FallMath.healthLoss(profile, damage);
+            BlockPos landing = origin.offset(dx, dy, dz);
+            BlockState below = getBlockStateAt(landing.below());
+            BlockState feet = getBlockStateAt(landing);
+            BlockState head = getBlockStateAt(landing.above());
+            if (below != null && feet != null && head != null) {
+                this.fallStats.onLethal(origin, dx, dz, dy, damage, loss, below, feet, head);
+            }
+        } catch (RuntimeException ignored) {
+            // тільки дебаг
+        }
+    }
+
+    /** v20: чи переживе моб це приземлення (за вимогою конфігу лишивши {@code fallDamageReserveHp} HP). */
     private boolean landingAllowed(BlockPos origin, int dx, int dz, int dy) {
         FallMath.Profile profile = this.fallProfile;
         if (profile == null || dy >= 0) {

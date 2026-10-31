@@ -198,6 +198,12 @@ public class GapJumpAssistGoal extends Goal {
     private boolean runBoost = true;
     /** Прогноз помилки приземлення в момент відриву (для порівняння з фактичною в лозі); NaN - прогнозу нема. */
     private double launchPredictedError = Double.NaN;
+    /**
+     * v21 (дебаг [FALL]): прогноз падіння/шкоди цього сегмента (null - не спуск) і знімки для порівняння прогнозу з фактом.
+     */
+    private FallDebug.Prediction fallPrediction;
+    private float hpAtLaunch = Float.NaN;
+    private double airFallMax;
 
     // =========================================
     private boolean debugRunupPrinted = false;
@@ -438,6 +444,11 @@ public class GapJumpAssistGoal extends Goal {
                         + " бл | без стрибка=" + this.segNoJump
                         + "\n================================"
         );
+        // v21 (дебаг [FALL]): якщо це СПУСК - звідки, куди, скільки блоків падіння, який блок унизу й яка шкода (прогноз)
+        this.airFallMax = 0.0;
+        this.hpAtLaunch = Float.NaN;
+        this.fallPrediction = FallDebug.logSegment(this.mob, this.jump.edge(), this.jump.landing(), this.segDeltaY,
+                this.takeoff.jumpFactor(), this.segNoJump);
     }
 
     /**
@@ -504,6 +515,7 @@ public class GapJumpAssistGoal extends Goal {
                 }
             }
             this.hasBeenAirborne = true;
+            this.airFallMax = Math.max(this.airFallMax, this.mob.fallDistance); // v21 [FALL]: фактичне падіння до приземлення
 
             // v15: політ ванільний (гравітація, опір 0.91); тут лише повітряне прискорення в межах сили гравця
             // (див. controlFlight). Швидкість мобу НЕ перезаписується, тож відкидання та інше діють самі.
@@ -560,6 +572,7 @@ public class GapJumpAssistGoal extends Goal {
                             + " | speed=" + String.format("%.3f",
                             this.mob.getDeltaMovement().horizontalDistance())
             );
+            FallDebug.logLanding(this.mob, this.airFallMax, this.hpAtLaunch, this.fallPrediction); // v21 [FALL]: факт проти прогнозу
 
             // ЛАНЦЮЖОК: якщо попереду знову стрибок - стартуємо його ЩЕ В ЦЬОМУ ТІКУ, не віддаючи керування
             // Pursuit. Інакше після кожного приземлення моб ~3 тіки лишався без керування (done -> ще
@@ -875,6 +888,7 @@ public class GapJumpAssistGoal extends Goal {
         this.mob.getLookControl().setLookAt(landing.x, landing.y, landing.z, 30.0F, 30.0F);
 
         if (!this.jumpFired) {
+            this.hpAtLaunch = this.mob.getHealth() + this.mob.getAbsorptionAmount(); // v21 [FALL]: знімок HP для порівняння з фактом
             // Прогноз моделі на момент відриву - щоб у лозі приземлення порівняти його з фактом.
             double nominal = GapJumpPhysics.MAX_AIR_ACCEL * GapJumpPhysics.NOMINAL_AIR_FRACTION;
             GapJumpPhysics.Geometry forecast = new GapJumpPhysics.Geometry(
