@@ -37,7 +37,10 @@ public class BuildPathGoal extends Goal {
     private static final int RETARGET_INTERVAL_TICKS = 40;
     private static final int STUCK_CHECK_INTERVAL_TICKS = 20;
     private static final double ARRIVED_DIST_SQ = 4.0;
-    private static final int BUILD_ACTION_COOLDOWN_TICKS = 10; // не ставити/ламати щотіку - виглядає природніше
+    // v21: ця ціль тепер тікає КОЖЕН ігровий тік (requiresUpdateEveryTick). Раніше ваніль викликала tick() раз на 2 тіки, тож "10"
+    // насправді означало 20 тіків. Темп підйому/ламання лишаю тим самим реальним (20 ігрових тіків); міст ставить блоки не за
+    // цим кулдауном, а за затримкою placeBlock (bridgePlaceDelayMin/MaxTicks, 4-5 тіків).
+    private static final int BUILD_ACTION_COOLDOWN_TICKS = 20; // не ставити/ламати щотіку - виглядає природніше
 
     private final Mob mob;
 
@@ -49,6 +52,13 @@ public class BuildPathGoal extends Goal {
     public BuildPathGoal(Mob mob) {
         this.mob = mob;
         this.setFlags(EnumSet.of(Goal.Flag.MOVE, Goal.Flag.LOOK, Goal.Flag.JUMP));
+    }
+
+    // v21: щотіку. Без цього ваніль викликає tick() цілі лише раз на 2 тіки (Mob#serverAiStep) - затримка між блоками мосту
+    // 4-5 тіків була б неможлива (виходять лише парні), а підлога під ногами у польоті пропускала б вікно.
+    @Override
+    public boolean requiresUpdateEveryTick() {
+        return true;
     }
 
     @Override
@@ -194,13 +204,14 @@ public class BuildPathGoal extends Goal {
             }
         }
 
-        if (--this.actionCooldown <= 0) {
-            this.actionCooldown = BUILD_ACTION_COOLDOWN_TICKS;
-            if (needsClimb(this.buildTarget)) {
+        if (needsClimb(this.buildTarget)) {
+            if (--this.actionCooldown <= 0) {
+                this.actionCooldown = BUILD_ACTION_COOLDOWN_TICKS;
                 handleClimb(level);
-            } else {
-                handleBridge(level);
             }
+        } else {
+            // v21: міст - темп задає placeBlock (випадкові 4-5 тіків між блоками), а не кулдаун цілі.
+            handleBridge(level);
         }
 
         boolean moveOk = this.mob.getNavigation().moveTo(
@@ -261,6 +272,10 @@ public class BuildPathGoal extends Goal {
     }
 
     private void handleBridge(ServerLevel level) {
+        // v21: між блоками моб не робить зайвої роботи (і не засмічує лог): наступний блок мосту - не раніше, ніж через 4-5 тіків.
+        if (!EnemyBreak_N_BuildUtils.canPlaceNow(this.mob, PlaceReason.BRIDGE_STEP, level.getGameTime())) {
+            return;
+        }
         BlockPos step = EnemyBreak_N_BuildUtils.nextHorizontalStep(this.mob, this.buildTarget);
         BlockPos stepBelow = step.below();
 
@@ -280,12 +295,12 @@ public class BuildPathGoal extends Goal {
         }
 
         boolean place = !level.getBlockState(stepBelow).isSolid();
-        if (DebugLog.on(DebugLog.Cat.BUILD)) {
-            DebugLog.log(DebugLog.Cat.BUILD, this.mob, "handleBridge: step=" + step.toShortString() + " stepBelow="
-                    + stepBelow.toShortString() + " -> " + (place ? "СТАВЛЮ БЛОК" : "НЕ ставлю (isSolid()=true під кроком)")
-                    + " | " + MobDebug.supportReport(level, step, this.mob.getBbWidth())
-                    + " | моб=" + this.mob.position() + " onGround=" + this.mob.onGround());
-        }
+        // v21: handleBridge тепер викликається щотіку (не раз на 10) - лог із тротлінгом, інакше 20 рядків/с на моба.
+        DebugLog.logThrottled(DebugLog.Cat.BUILD, this.mob, "handle-bridge|" + this.mob.getId(), 500L,
+                () -> "handleBridge: step=" + step.toShortString() + " stepBelow="
+                        + stepBelow.toShortString() + " -> " + (place ? "СТАВЛЮ БЛОК" : "НЕ ставлю (isSolid()=true під кроком)")
+                        + " | " + MobDebug.supportReport(level, step, this.mob.getBbWidth())
+                        + " | моб=" + this.mob.position() + " onGround=" + this.mob.onGround());
         if (place) {
             EnemyBreak_N_BuildUtils.debugMsg(this.mob, "[DEBUG BuildPathGoal] bridge: ставлю блок " + stepBelow
                     + " (крок " + step + ")"); // DEBUG

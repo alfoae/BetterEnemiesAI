@@ -34,6 +34,10 @@ public class Config {
     // "у ванілі у гравця є задержка перед установкою блока" - той самий принцип для мобів,
     // рахується на рівні самого API постановки блоку (EnemyBreak_N_BuildUtils.placeBlock).
     public static final ModConfigSpec.IntValue MOB_PLACE_DELAY_TICKS;
+    // v21: окремий темп для вежі/стіни (TOWER_STRUCTURE) і для мосту (BRIDGE_*): див. TerraformRules.placeGapTicks.
+    public static final ModConfigSpec.IntValue TOWER_PLACE_DELAY_TICKS;
+    public static final ModConfigSpec.IntValue BRIDGE_PLACE_DELAY_MIN_TICKS;
+    public static final ModConfigSpec.IntValue BRIDGE_PLACE_DELAY_MAX_TICKS;
 
     // Форм-орієнтована ходьба (TerrainShape): моби ходять по неповних блоках, не падають крізь відкриті люки.
     public static final ModConfigSpec.BooleanValue ENABLE_SHAPE_AWARE_WALKING;
@@ -178,8 +182,25 @@ public class Config {
 
         MOB_PLACE_DELAY_TICKS = builder
                 .comment("Мінімальна кількість тіків між постановками блоків ОДНИМ мобом - те ",
-                        "саме, що затримка гравця перед установкою блока у ванілі (~4 тіки).")
+                        "саме, що затримка гравця перед установкою блока у ванілі (~4 тіки).",
+                        "Діє для решти причин (клатч, аварійна підлога, перекриття хазардів); для вежі й мосту - значення нижче.")
                 .defineInRange("mobPlaceDelayTicks", 4, 0, 40);
+
+        TOWER_PLACE_DELAY_TICKS = builder
+                .comment("Вежа (піларинг): мінімум тіків між двома блоками стіни/хреста одного моба. Блоки ставляться ПО ОДНОМУ",
+                        "(не кілька за тік): стіна з боку гравця -> стрибок -> у польоті добудова стіни вгору й блок під ногами.",
+                        "2 тіки - швидкий гравець, що спамить ПКМ; більше значення - повільніша стіна. Блок під ногами у польоті",
+                        "(PILLAR_FLOOR) цим не стримується - йому досить 1 тіку розриву, щоб моб не пропустив вікно стрибка.")
+                .defineInRange("towerPlaceDelayTicks", 2, 1, 20);
+
+        BRIDGE_PLACE_DELAY_MIN_TICKS = builder
+                .comment("Міст (горизонтальне будівництво): мінімум тіків між двома блоками. Фактична затримка щоразу",
+                        "випадкова в діапазоні [min..max]: 4-5 тіків - схоже на 'ніндзя-брідж', але трохи повільніше й без присідання.")
+                .defineInRange("bridgePlaceDelayMinTicks", 4, 1, 40);
+
+        BRIDGE_PLACE_DELAY_MAX_TICKS = builder
+                .comment("Міст: максимум тіків між двома блоками (якщо менший за bridgePlaceDelayMinTicks - береться min).")
+                .defineInRange("bridgePlaceDelayMaxTicks", 5, 1, 40);
 
         builder.pop();
 

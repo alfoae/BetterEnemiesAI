@@ -130,6 +130,8 @@ public final class EnemyBreak_N_BuildUtils {
     // однаково для геть усіх викликів, включно з "аварійними" - ensureFloorUnderneathWhileAirborne
     // у TowerClimbGoal навмисно не чекає на власний кулдаун Goal-у, бо вікно падіння коротке).
     private static final Map<Mob, Long> LAST_PLACE_TICK = new WeakHashMap<>();
+    // v21: випадковий розрив (тіків) перед НАСТУПНИМ блоком мосту - перекидається після кожної постановки (4-5 за замовчуванням).
+    private static final Map<Mob, Integer> BRIDGE_GAP_TICKS = new WeakHashMap<>();
 
     public static boolean canOperate(Mob mob) {
         if (!Config.ENABLE_MOB_TERRAFORMING.get()) return false;
@@ -390,7 +392,6 @@ public final class EnemyBreak_N_BuildUtils {
      * щотіку заради цілі, яка вже довго недосяжна, а не ідеальну криву витрат.
      */
     private static final int UNREACHABLE_FAST_RETRY_TICKS = 5;
-
     /**
      * v20: скільки "свіжих шляхів" за тік дозволено на ВЕСЬ сервер (для проби стрибка вежі).
      */
@@ -628,6 +629,47 @@ public final class EnemyBreak_N_BuildUtils {
         return target.getY() - feetCell(mob).getY() >= CLIMB_HEIGHT_THRESHOLD;
     }
 
+    public static boolean isBreakable(Level level, BlockPos pos) {
+        BlockState state = level.getBlockState(pos);
+        if (state.isAir() || !state.isSolid()) return false;
+        if (state.getDestroySpeed(level, pos) < 0) return false;
+        return !state.hasBlockEntity();
+    }
+
+    public static void breakBlock(Level level, BlockPos pos, Mob mob) {
+        BlockState state = level.getBlockState(pos);
+
+        // v20: блок, який ПОСТАВИВ сам мод (тимчасовий), НЕ потрапляє в "інвентар" моба. Дроп інвентаря при смерті раніше не
+        // працював (обробник події був не підписаний - див. modid), а тепер працює: без цієї перевірки моб міг би ставити
+        // булижник "з повітря", ламати власний міст - і по смерті висипати його гравцеві (безкоштовний фарм).
+        TemporaryBlockData temporary = level instanceof ServerLevel serverLevel ? TemporaryBlockData.get(serverLevel) : null;
+        boolean ownTemporaryBlock = temporary != null && temporary.isTracked(pos);
+
+        ItemStack drop = new ItemStack(state.getBlock().asItem());
+        if (!ownTemporaryBlock && !drop.isEmpty() && mob instanceof IMobBlockStorage storage) {
+            storage.addDugBlock(drop);
+        }
+
+        level.playSound(null, pos, state.getSoundType().getBreakSound(), SoundSource.HOSTILE, 1.0F, 1.0F);
+        level.destroyBlock(pos, false);
+        if (ownTemporaryBlock) {
+            temporary.untrack(pos);
+        }
+    }
+
+    /**
+     * "не вміти ставити блоки в повітрі... тільки якщо біля нього є інший блок" — усі 6 граней-
+     * сусідів (не по діагоналі — так само суворо, як і в гравця: дотику лише кутом не досить).
+     */
+    public static boolean hasAdjacentSolid(Level level, BlockPos pos) {
+        return level.getBlockState(pos.below()).isSolid()
+                || level.getBlockState(pos.above()).isSolid()
+                || level.getBlockState(pos.north()).isSolid()
+                || level.getBlockState(pos.south()).isSolid()
+                || level.getBlockState(pos.east()).isSolid()
+                || level.getBlockState(pos.west()).isSolid();
+    }
+
     /**
      * Повертає закешований (на цей тік, для цієї цілі) {@link Path}, рахуючи {@code createPath()}
      * лише якщо ще не рахували. Викликається і з {@link #isNavigationBlocked}, і напряму з
@@ -720,45 +762,98 @@ public final class EnemyBreak_N_BuildUtils {
                 && level.getBlockState(pos.below()).isSolid();
     }
 
-    public static boolean isBreakable(Level level, BlockPos pos) {
-        BlockState state = level.getBlockState(pos);
-        if (state.isAir() || !state.isSolid()) return false;
-        if (state.getDestroySpeed(level, pos) < 0) return false;
-        return !state.hasBlockEntity();
-    }
-
-    public static void breakBlock(Level level, BlockPos pos, Mob mob) {
-        BlockState state = level.getBlockState(pos);
-
-        // v20: блок, який ПОСТАВИВ сам мод (тимчасовий), НЕ потрапляє в "інвентар" моба. Дроп інвентаря при смерті раніше не
-        // працював (обробник події був не підписаний - див. modid), а тепер працює: без цієї перевірки моб міг би ставити
-        // булижник "з повітря", ламати власний міст - і по смерті висипати його гравцеві (безкоштовний фарм).
-        TemporaryBlockData temporary = level instanceof ServerLevel serverLevel ? TemporaryBlockData.get(serverLevel) : null;
-        boolean ownTemporaryBlock = temporary != null && temporary.isTracked(pos);
-
-        ItemStack drop = new ItemStack(state.getBlock().asItem());
-        if (!ownTemporaryBlock && !drop.isEmpty() && mob instanceof IMobBlockStorage storage) {
-            storage.addDugBlock(drop);
+    /**
+     * Ставить блок від імені {@code mob}. Перевірки, усі "тихі" (просто нічого не робить,
+     * якщо не пройшли) — знайдені живим тестуванням:
+     * <ol>
+     *   <li>v18: гейт контексту ({@link #placementVeto}) - під час паркур-стрибка нічого, крім клатча, не ставимо;</li>
+     *   <li>НЕ переписує вже існуючий (не-replaceable) блок — {@code canBeReplaced()}, той самий
+     *       критерій, що й у ванільного розміщення, а не вужчий {@code !isSolid()} (який
+     *       пропускав, наприклад, квіти/факели/рейки — вони не "solid", але явно не порожні).</li>
+     *   <li>v21: темп - ПЕРШОЮ перевіркою, і залежить від ПРИЧИНИ ({@link #canPlaceNow}, {@link TerraformRules#placeGapTicks}):
+     *       міст - випадкові 4-5 тіків, вежа/стіна - {@link Config#TOWER_PLACE_DELAY_TICKS}, підлога піларингу - 1 тік,
+     *       решта - {@link Config#MOB_PLACE_DELAY_TICKS}. Блоки ставляться ПО ОДНОМУ: повертає true лише коли блок реально поставлено.</li>
+     *   <li>{@link #hasAdjacentSolid} — інакше не ставить.</li>
+     *   <li>v19: НЕ у власний хітбокс. Гравець не може поставити блок туди, де стоїть сам; моб теж. Якщо стрибок звільнить
+     *       клітинку (верх клітинки не вище ~1 блока над ногами) - моб підстрибує, і ціль повторює спробу в польоті
+     *       ({@link #retryPendingPlacement}); якщо ні (стіна по голову) - блок відкладається.</li>
+     *   <li>v19: лише те, що моб БАЧИТЬ напряму: промінь від очей до клітинки не мусить упиратись в чужий блок
+     *       ({@link #hasDirectSightOfCell}). Це відсікає, зокрема, блок ПІД опорою, на якій моб стоїть.</li>
+     * </ol>
+     *
+     * @param reason навіщо ставимо (див. {@link PlaceReason}); потрапляє в лог, і від нього залежить гейт
+     */
+    public static boolean placeBlock(ServerLevel level, BlockPos pos, Mob mob, PlaceReason reason) {
+        long now = level.getGameTime();
+        // v21: темп - найдешевша перевірка, тому ПЕРШОЮ: цілі кличуть placeBlock щотіку, а блок можна не частіше, ніж раз на
+        // кілька тіків (вежа/стіна - towerPlaceDelayTicks, міст - 4-5 тіків). Тиха відмова без запису в лог.
+        if (!canPlaceNow(mob, reason, now)) {
+            return false;
+        }
+        String veto = placementVeto(mob, reason);
+        if (veto != null) {
+            buildLog(mob, "placeBlock[" + reason + "](" + pos.toShortString() + ") ВІДМОВА (гейт): " + veto);
+            return false;
+        }
+        // ДЕБАГ: кожна "тиха" відмова тепер лишає слід у лозі - раніше placeBlock мовчки робив return.
+        BlockState existing = level.getBlockState(pos);
+        if (!existing.canBeReplaced()) {
+            buildLog(mob, "placeBlock[" + reason + "](" + pos.toShortString() + ") ВІДМОВА: клітинка не замінювана: " + existing);
+            return false;
+        }
+        if (!hasAdjacentSolid(level, pos)) {
+            buildLog(mob, "placeBlock[" + reason + "](" + pos.toShortString() + ") ВІДМОВА: нема суміжного isSolid()-блока для опори");
+            return false;
         }
 
-        level.playSound(null, pos, state.getSoundType().getBreakSound(), SoundSource.HOSTILE, 1.0F, 1.0F);
-        level.destroyBlock(pos, false);
-        if (ownTemporaryBlock) {
-            temporary.untrack(pos);
+        // v19 (1): власний хітбокс.
+        if (mobHitboxOverlaps(mob, pos)) {
+            deferForOwnHitbox(mob, pos, reason);
+            return false;
         }
+        // v19 (2): пряма видимість.
+        if (!hasDirectSightOfCell(level, mob, pos)) {
+            buildLog(mob, "placeBlock[" + reason + "](" + pos.toShortString()
+                    + ") ВІДМОВА: клітинка не на прямій видимості (між очима моба й нею є блок)");
+            return false;
+        }
+
+        Block block = DigBlockResolver.getDigBlock(level);
+        BlockState state = block.defaultBlockState();
+
+        level.setBlock(pos, state, 3);
+        level.playSound(null, pos, state.getSoundType().getPlaceSound(), SoundSource.HOSTILE, 1.0F, 1.0F);
+        LAST_PLACE_TICK.put(mob, now);
+        // v21: розрив перед наступним блоком мосту - новий випадковий з [min..max] (щоб ритм не був механічним)
+        BRIDGE_GAP_TICKS.put(mob, TerraformRules.rollBridgeGap(Config.BRIDGE_PLACE_DELAY_MIN_TICKS.get(),
+                Config.BRIDGE_PLACE_DELAY_MAX_TICKS.get(), mob.getRandom().nextDouble()));
+        PendingPlacement pending = PENDING_PLACEMENT.get(mob);
+        if (pending != null && pending.pos.equals(pos)) {
+            PENDING_PLACEMENT.remove(mob);
+        }
+        if (DebugLog.on(DebugLog.Cat.BUILD)) {
+            DebugLog.log(DebugLog.Cat.BUILD, mob, "placeBlock[" + reason + "] ПОСТАВЛЕНО " + state.getBlock().getDescriptionId()
+                    + " у " + pos.toShortString() + " | моб=" + mob.position() + " onGround=" + mob.onGround()
+                    + " паркур_активний=" + GapJumpAssistGoal.isActive(mob)
+                    + " | поруч: " + MobDebug.cellBrief(level, pos));
+        }
+
+        long expireAt = now + (long) Config.PLACED_BLOCK_LIFETIME_SECONDS.get() * 20L;
+        TemporaryBlockData.get(level).track(pos, expireAt, state.getBlock()); // v20: пам'ятаємо, ЩО поставили
+        return true;
     }
 
     /**
-     * "не вміти ставити блоки в повітрі... тільки якщо біля нього є інший блок" — усі 6 граней-
-     * сусідів (не по діагоналі — так само суворо, як і в гравця: дотику лише кутом не досить).
+     * v21: чи минув мінімальний розрив після ПОПЕРЕДНЬОЇ постановки блока цим мобом - для цієї ПРИЧИНИ
+     * ({@link TerraformRules#placeGapTicks}). Дешева перевірка без доступу до світу: цілі можуть питати щотіку й не
+     * робити зайвої роботи між блоками.
      */
-    public static boolean hasAdjacentSolid(Level level, BlockPos pos) {
-        return level.getBlockState(pos.below()).isSolid()
-                || level.getBlockState(pos.above()).isSolid()
-                || level.getBlockState(pos.north()).isSolid()
-                || level.getBlockState(pos.south()).isSolid()
-                || level.getBlockState(pos.east()).isSolid()
-                || level.getBlockState(pos.west()).isSolid();
+    public static boolean canPlaceNow(Mob mob, PlaceReason reason, long now) {
+        Long lastTick = LAST_PLACE_TICK.get(mob);
+        if (lastTick == null) {
+            return true;
+        }
+        return now - lastTick >= requiredGapTicks(mob, reason);
     }
 
     /**
@@ -839,90 +934,6 @@ public final class EnemyBreak_N_BuildUtils {
     }
 
     /**
-     * Ставить блок від імені {@code mob}. Перевірки, усі "тихі" (просто нічого не робить,
-     * якщо не пройшли) — знайдені живим тестуванням:
-     * <ol>
-     *   <li>v18: гейт контексту ({@link #placementVeto}) - під час паркур-стрибка нічого, крім клатча, не ставимо;</li>
-     *   <li>НЕ переписує вже існуючий (не-replaceable) блок — {@code canBeReplaced()}, той самий
-     *       критерій, що й у ванільного розміщення, а не вужчий {@code !isSolid()} (який
-     *       пропускав, наприклад, квіти/факели/рейки — вони не "solid", але явно не порожні).</li>
-     *   <li>Не частіше, ніж раз на {@link Config#MOB_PLACE_DELAY_TICKS} тіків для ЦЬОГО моба.</li>
-     *   <li>{@link #hasAdjacentSolid} — інакше не ставить.</li>
-     *   <li>v19: НЕ у власний хітбокс. Гравець не може поставити блок туди, де стоїть сам; моб теж. Якщо стрибок звільнить
-     *       клітинку (верх клітинки не вище ~1 блока над ногами) - моб підстрибує, і ціль повторює спробу в польоті
-     *       ({@link #retryPendingPlacement}); якщо ні (стіна по голову) - блок відкладається.</li>
-     *   <li>v19: лише те, що моб БАЧИТЬ напряму: промінь від очей до клітинки не мусить упиратись в чужий блок
-     *       ({@link #hasDirectSightOfCell}). Це відсікає, зокрема, блок ПІД опорою, на якій моб стоїть.</li>
-     * </ol>
-     *
-     * @param reason навіщо ставимо (див. {@link PlaceReason}); потрапляє в лог, і від нього залежить гейт
-     */
-    public static void placeBlock(ServerLevel level, BlockPos pos, Mob mob, PlaceReason reason) {
-        String veto = placementVeto(mob, reason);
-        if (veto != null) {
-            buildLog(mob, "placeBlock[" + reason + "](" + pos.toShortString() + ") ВІДМОВА (гейт): " + veto);
-            return;
-        }
-        // ДЕБАГ: кожна "тиха" відмова тепер лишає слід у лозі - раніше placeBlock мовчки робив return.
-        BlockState existing = level.getBlockState(pos);
-        if (!existing.canBeReplaced()) {
-            buildLog(mob, "placeBlock[" + reason + "](" + pos.toShortString() + ") ВІДМОВА: клітинка не замінювана: " + existing);
-            return;
-        }
-        if (!hasAdjacentSolid(level, pos)) {
-            buildLog(mob, "placeBlock[" + reason + "](" + pos.toShortString() + ") ВІДМОВА: нема суміжного isSolid()-блока для опори");
-            return;
-        }
-
-        long now = level.getGameTime();
-        Long lastTick = LAST_PLACE_TICK.get(mob);
-        if (lastTick != null && now - lastTick < Config.MOB_PLACE_DELAY_TICKS.get()) {
-            buildLog(mob, "placeBlock[" + reason + "](" + pos.toShortString() + ") ВІДМОВА: затримка між блоками, лишилось "
-                    + (Config.MOB_PLACE_DELAY_TICKS.get() - (now - lastTick)) + " тіків");
-            return;
-        }
-
-        // v19 (1): власний хітбокс.
-        if (mobHitboxOverlaps(mob, pos)) {
-            deferForOwnHitbox(mob, pos, reason);
-            return;
-        }
-        // v19 (2): пряма видимість.
-        if (!hasDirectSightOfCell(level, mob, pos)) {
-            buildLog(mob, "placeBlock[" + reason + "](" + pos.toShortString()
-                    + ") ВІДМОВА: клітинка не на прямій видимості (між очима моба й нею є блок)");
-            return;
-        }
-
-        Block block = DigBlockResolver.getDigBlock(level);
-        BlockState state = block.defaultBlockState();
-
-        level.setBlock(pos, state, 3);
-        level.playSound(null, pos, state.getSoundType().getPlaceSound(), SoundSource.HOSTILE, 1.0F, 1.0F);
-        LAST_PLACE_TICK.put(mob, now);
-        PendingPlacement pending = PENDING_PLACEMENT.get(mob);
-        if (pending != null && pending.pos.equals(pos)) {
-            PENDING_PLACEMENT.remove(mob);
-        }
-        if (DebugLog.on(DebugLog.Cat.BUILD)) {
-            DebugLog.log(DebugLog.Cat.BUILD, mob, "placeBlock[" + reason + "] ПОСТАВЛЕНО " + state.getBlock().getDescriptionId()
-                    + " у " + pos.toShortString() + " | моб=" + mob.position() + " onGround=" + mob.onGround()
-                    + " паркур_активний=" + GapJumpAssistGoal.isActive(mob)
-                    + " | поруч: " + MobDebug.cellBrief(level, pos));
-        }
-
-        long expireAt = now + (long) Config.PLACED_BLOCK_LIFETIME_SECONDS.get() * 20L;
-        TemporaryBlockData.get(level).track(pos, expireAt, state.getBlock()); // v20: пам'ятаємо, ЩО поставили
-    }
-
-    /** v19: чи перетинає хітбокс моба клітинку {@code pos} (як повний куб - це блок, який ставить мод). */
-    static boolean mobHitboxOverlaps(Mob mob, BlockPos pos) {
-        AABB box = mob.getBoundingBox();
-        return TerraformRules.boxesOverlap(box.minX, box.minY, box.minZ, box.maxX, box.maxY, box.maxZ,
-                pos.getX(), pos.getY(), pos.getZ(), pos.getX() + 1.0, pos.getY() + 1.0, pos.getZ() + 1.0);
-    }
-
-    /**
      * v20: просить, щоб НАСТУПНИЙ {@link #getOrComputePath} порахував шлях справжнім A* - мимо кешу цього тіку й тротлінгу
      * недосяжної цілі (рівно один раз); повертає false, якщо загальний бюджет запитів цього тіку вичерпано. Для вежі: шлях до гравця міг "з'явитись" (стрибком) щойно після нового шару, а
      * тротлінг (до 40 тіків) змусив би моба ще кілька шарів будувати даремно. Вердикт "заблоковано" від цього сам не
@@ -943,9 +954,39 @@ public final class EnemyBreak_N_BuildUtils {
         return true;
     }
 
+    private static int requiredGapTicks(Mob mob, PlaceReason reason) {
+        Integer rolled = BRIDGE_GAP_TICKS.get(mob);
+        int bridgeGap = rolled != null ? rolled : Config.BRIDGE_PLACE_DELAY_MIN_TICKS.get();
+        return TerraformRules.placeGapTicks(reason, Config.MOB_PLACE_DELAY_TICKS.get(),
+                Config.TOWER_PLACE_DELAY_TICKS.get(), bridgeGap);
+    }
+
     /**
-     * v20: лог проби "чи вже є маршрут стрибком" - у файл (BUILD), без чату, не частіше разу на секунду.
+     * v19: чи перетинає хітбокс моба клітинку {@code pos} (як повний куб - це блок, який ставить мод).
      */
+    static boolean mobHitboxOverlaps(Mob mob, BlockPos pos) {
+        AABB box = mob.getBoundingBox();
+        return TerraformRules.boxesOverlap(box.minX, box.minY, box.minZ, box.maxX, box.maxY, box.maxZ,
+                pos.getX(), pos.getY(), pos.getZ(), pos.getX() + 1.0, pos.getY() + 1.0, pos.getZ() + 1.0);
+    }
+
+    /**
+     * v21: номер останнього СПРАВЖНЬОГО обчислення шляху цього моба (0 - ще не було). Росте лише на новому createPath() -
+     * за ним вежа бачить, що проба стрибка ({@link #requestFreshPath}) уже виконана.
+     */
+    public static int getComputeSeq(Mob mob) {
+        NavCache cache = NAV_CACHE.get(mob);
+        return cache == null ? 0 : cache.computeSeq;
+    }
+
+    /**
+     * v21: клітинка, до якої рахується шлях (ноги гравця на землі) - та сама, що в {@link #isPathBlocked}.
+     */
+    public static BlockPos pathTargetCell(Mob mob, Vec3 chasePos) {
+        return resolvePathTarget(mob, chasePos);
+    }
+
+    /** v20: лог проби "чи вже є маршрут стрибком" - у файл (BUILD), без чату, не частіше разу на секунду. */
     public static void logJumpProbe(Mob mob, String text) {
         DebugLog.logThrottled(DebugLog.Cat.BUILD, mob, "jump-probe|" + mob.getId(), 1000L, () -> text);
     }

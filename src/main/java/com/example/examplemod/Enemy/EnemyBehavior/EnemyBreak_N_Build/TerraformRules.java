@@ -137,9 +137,60 @@ final class TerraformRules {
         return liftNeeded > 0.0 && liftNeeded <= MAX_JUMP_LIFT;
     }
 
+    /**
+     * v21: мінімальний розрив (тіків) між двома постановками блоків ОДНИМ мобом для підлоги піларингу. Не 0: блоки
+     * ставляться послідовно, у різні тіки, але підлога під ногами у польоті не повинна чекати за стіною - вікно, поки
+     * хітбокс звільнив клітинку, ~6 тіків.
+     */
+    static final int PILLAR_FLOOR_MIN_GAP_TICKS = 1;
+    /**
+     * v21: на скільки блоків вище за ноги моба може лежати ціль (клітинка ніг гравця на землі), щоб стрибок до неї ще міг
+     * бути можливим: стрибок угору ~1.25 блока + 1 блок, який моб дає собі сам - верхівка власної стіни (на неї можна
+     * зійти). Це лише ПОПЕРЕДНЯ перевірка, чи варто пробувати; вердикт дає свіжий A* ({@code isPathBlocked}).
+     */
+    static final int JUMP_CHECK_MAX_RISE = 2;
+
     /** Чи розумний звичайний прохід до вищої цілі (див. {@link #WALK_DETOUR_FACTOR}). */
     static boolean isReasonableWalk(int nodeCount, double horizontalDistance) {
         return nodeCount <= WALK_DETOUR_FACTOR * horizontalDistance + WALK_DETOUR_SLACK;
+    }
+
+    /**
+     * v21: скільки тіків від ПОПЕРЕДНЬОЇ постановки блока цим мобом треба зачекати перед наступною - залежно від ПРИЧИНИ.
+     * <ul>
+     *   <li>міст ({@code BRIDGE_STEP}/{@code BRIDGE_UNDER_MOB}) - {@code bridgeGap} (випадкове 4-5, див. {@link #rollBridgeGap});</li>
+     *   <li>вежа/стіна/хрест ({@code TOWER_STRUCTURE}) - {@code towerDelay};</li>
+     *   <li>підлога піларингу у польоті ({@code PILLAR_FLOOR}) - {@link #PILLAR_FLOOR_MIN_GAP_TICKS};</li>
+     *   <li>решта (клатч, аварійна підлога, перекриття хазардів) - {@code genericDelay}, як і раніше.</li>
+     * </ul>
+     */
+    static int placeGapTicks(PlaceReason reason, int genericDelay, int towerDelay, int bridgeGap) {
+        return switch (reason) {
+            case BRIDGE_STEP, BRIDGE_UNDER_MOB -> Math.max(1, bridgeGap);
+            case TOWER_STRUCTURE -> Math.max(1, towerDelay);
+            case PILLAR_FLOOR -> PILLAR_FLOOR_MIN_GAP_TICKS;
+            default -> Math.max(0, genericDelay);
+        };
+    }
+
+    /**
+     * v21: випадковий розрив для мосту в діапазоні {@code [min..max]} (обидва кінці включно). {@code roll01} - рівномірне
+     * випадкове в {@code [0,1)}. Якщо {@code max < min} - береться {@code min}; менше за 1 не буває.
+     */
+    static int rollBridgeGap(int min, int max, double roll01) {
+        int lo = Math.max(1, min);
+        int hi = Math.max(lo, max);
+        int span = hi - lo + 1;
+        int pick = (int) Math.floor(roll01 * span);
+        return lo + Math.max(0, Math.min(span - 1, pick));
+    }
+
+    /**
+     * v21: чи може стрибок до цілі бути можливим із висоти ніг {@code mobFeetY}: ціль не вище за
+     * {@code mobFeetY + JUMP_CHECK_MAX_RISE}. Нижча/рівна ціль - завжди "може" (стрибок униз/вбік).
+     */
+    static boolean jumpMayBePossible(int targetFeetY, int mobFeetY) {
+        return targetFeetY - mobFeetY <= JUMP_CHECK_MAX_RISE;
     }
 
     /**

@@ -11,9 +11,12 @@ import net.minecraft.world.entity.Mob;
 import net.minecraft.world.entity.ai.goal.Goal;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.phys.Vec3;
 
+import java.util.ArrayList;
 import java.util.EnumSet;
+import java.util.List;
 
 /**
  * ФАЗА 2+3. Замінює {@link BuildPathGoal}'s наївний "піларь-впритул" саме для підйому до ЖИВОЇ
@@ -46,6 +49,13 @@ import java.util.EnumSet;
  *       пріоритетами" (12-блоків-правило, "не над прірвою" тощо) — ще НЕ реалізовано, це
  *       наступний прохід (Фаза 4).</li>
  * </ol>
+ * <p>
+ * v21, ОДИН ШАР піларингу (стадія CLIMBING): стоїть → ставить стіну з боку гравця ПО ОДНОМУ блоку (темп — {@code towerPlaceDelayTicks},
+ * а не кілька за тік) → стрибає → у польоті добудовує стіну на блок угору й ставить блок під ногами (див.
+ * {@link #tickPillarGround}, {@link #tickPillarAir}). Якщо до гравця вже можна допригнути ({@link Config#TOWER_JUMP_FIRST}),
+ * верхні блоки стіни НЕ ставляться наперед: спершу свіжа проба шляху ({@link #tickJumpCheck}), бо власна стіна по голову
+ * закрила б стрибок. Горизонтальний міст ставить блоки із затримкою {@code bridgePlaceDelayMin/MaxTicks} (4-5 тіків).
+ * <p>
  * Коли шлях перестає бути заблокованим (мобу вже недалеко) — {@link #canContinueToUse} сам
  * поверне false, і керування чисто (stop/start, не через прапорці) переходить до
  * {@code PursuitEnemyMeleeBehavior}, як і в {@link BuildPathGoal}.
@@ -56,7 +66,11 @@ import java.util.EnumSet;
  */
 public class TowerClimbGoal extends Goal {
 
-    private static final int ACTION_COOLDOWN_TICKS = 10; // той самий темп дій, що й у BuildPathGoal
+    // v21: ця ціль тепер тікає КОЖЕН ігровий тік (requiresUpdateEveryTick). Раніше ваніль викликала tick() раз на 2 тіки (див.
+    // Mob#serverAiStep), тож колишні "10" насправді означали 20 тіків (1 с) між діями - звідси була дуже повільна стіна.
+    // Ламання стелі лишаю у ТОМУ Ж реальному темпі (20 ігрових тіків); темп ПОСТАНОВКИ блоків задає placeBlock
+    // (towerPlaceDelayTicks для вежі/стіни, bridgePlaceDelayMin/MaxTicks для мосту).
+    private static final int BREAK_ACTION_COOLDOWN_TICKS = 20;
     private static final double NAV_ARRIVE_DIST_SQ = 4.0;
     private static final int WALL_HEIGHT = 2; // "стінку, яка буде мобу по голову"
     // Наскільки менша складова (dx чи dz) має бути відносно більшої, щоб вважати напрямок
@@ -67,6 +81,15 @@ public class TowerClimbGoal extends Goal {
             {Direction.NORTH, Direction.SOUTH, Direction.EAST, Direction.WEST};
     private static final int TO_7X7_STUCK_TIMEOUT_TICKS = 100; // 5с без прогресу - здаємось, лізем звичайним шляхом
     private static final double FALL_ZONE_DIST_SQ = 1.0; // ~2 блоки - тут вже просто падає, не будує
+    // v21: не частіше за ванільний noJumpDelay (10 тіків) між командами стрибка піларингу - якщо стрибок не вдався
+    // (стеля тощо), моб не "качається" щотіку.
+    private static final int JUMP_REISSUE_TICKS = 10;
+    // v21: скільки тіків чекаємо вердикт проби стрибка (tickJumpCheck), перш ніж будувати далі (бюджет проб на сервері міг вичерпатись).
+    private static final int JUMP_CHECK_MAX_WAIT_TICKS = 8;
+    // v21: скільки тіків без жодного поставленого блока стіни (на землі) терпимо, перш ніж стрибнути без неї (заважає хітбокс/видимість).
+    private static final int WALL_GIVE_UP_BASE_TICKS = 30;
+    // v21: повітряна добудова стіни має сенс лише поки триває СВІЙ стрибок (повітряний час ~10 тіків; запас на нокбек).
+    private static final int AIR_EXTEND_WINDOW_TICKS = 30;
     private final Mob mob;
     private Stage stage = Stage.DECIDE;
     private BlockPos pillarColumn;   // закомітчена (x,z) колонка підйому (Y не використовується)
@@ -76,7 +99,15 @@ public class TowerClimbGoal extends Goal {
     private int layerY = Integer.MIN_VALUE; // Y, для якого вже заморожений напрямок стіни нижче
     private Direction wallDirA;
     private Direction wallDirB;      // != null лише для діагонального (кутового) випадку
-    private int actionCooldown;
+    private long nextBreakTick;          // v21: game time, раніше якого не ламаємо наступний блок стелі (замість лічильника)
+    // v21: стан ОДНОГО шару піларингу (див. tickPillarGround / tickPillarAir).
+    private BlockPos takeoffFeet;        // клітинка ніг у момент останньої команди стрибка (від неї росте стіна у польоті)
+    private boolean preExtendBlocked;    // true - стіну в польоті НЕ добудовуємо (на наступному шарі можна допригнути до гравця)
+    private long jumpIssuedTick = Long.MIN_VALUE / 2; // game time останньої команди стрибка
+    private long lastWallProgressTick;   // game time останнього поставленого блока стіни (для "здаюсь і стрибаю без неї")
+    private JumpCheck jumpCheck = JumpCheck.DONE;
+    private int jumpCheckSeq;            // computeSeq на момент запиту проби стрибка
+    private int jumpCheckWaitTicks;
 
     // v20 (Config.TOWER_JUMP_FIRST): проба "чи вже можна допригнути до гравця" - не частіше за цей інтервал (тіків).
     private static final int JUMP_PROBE_MIN_INTERVAL_TICKS = 8;
@@ -85,6 +116,14 @@ public class TowerClimbGoal extends Goal {
     public TowerClimbGoal(Mob mob) {
         this.mob = mob;
         this.setFlags(EnumSet.of(Goal.Flag.MOVE, Goal.Flag.LOOK, Goal.Flag.JUMP));
+    }
+
+    // v21: щотіку. Без цього ваніль викликає tick() цілі лише раз на 2 тіки (Mob#serverAiStep -> GoalSelector#tickRunningGoals) -
+    // і затримка між блоками 4-5 тіків була б неможлива (виходять лише парні), а блок під ногами у польоті міг пропустити
+    // вікно. (canContinueToUse/canUse і далі рахуються лише на "повних" тіках - це нормально.)
+    @Override
+    public boolean requiresUpdateEveryTick() {
+        return true;
     }
 
     @Override
@@ -126,7 +165,14 @@ public class TowerClimbGoal extends Goal {
         this.layerY = Integer.MIN_VALUE;
         this.wallDirA = null;
         this.wallDirB = null;
-        this.actionCooldown = 0;
+        this.nextBreakTick = 0;
+        this.takeoffFeet = null;
+        this.preExtendBlocked = false;
+        this.jumpIssuedTick = Long.MIN_VALUE / 2;
+        this.lastWallProgressTick = 0;
+        this.jumpCheck = JumpCheck.DONE;
+        this.jumpCheckSeq = 0;
+        this.jumpCheckWaitTicks = 0;
         EnemyBreak_N_BuildUtils.debugMsg(this.mob, "[DEBUG TowerClimbGoal] START моб=" + EnemyBreak_N_BuildUtils.feetCell(this.mob));
     }
 
@@ -290,11 +336,13 @@ public class TowerClimbGoal extends Goal {
      * повітря: з усіх 4 боків на висоті голови вже стоїть блок.
      */
     private void tickCrossAndDig(ServerLevel level) {
-        if (--this.actionCooldown > 0) return;
-        this.actionCooldown = ACTION_COOLDOWN_TICKS;
-
         BlockPos center = EnemyBreak_N_BuildUtils.feetCell(this.mob);
-        if (buildCrossSupportStep(level, center)) return; // один блок за раз - ще не все готово
+        // v21: хрест добудовується по одному блоку, а темп задає placeBlock (towerPlaceDelayTicks) - окремий кулдаун не потрібен.
+        if (buildCrossSupportStep(level, center)) return; // ще не все готово
+
+        long now = level.getGameTime();
+        if (now < this.nextBreakTick) return; // ламання/стрибок - у тому ж реальному темпі, що й було
+        this.nextBreakTick = now + BREAK_ACTION_COOLDOWN_TICKS;
 
         BlockPos overhead = center.above(2);
         if (EnemyBreak_N_BuildUtils.isBreakable(level, overhead)) {
@@ -427,33 +475,204 @@ public class TowerClimbGoal extends Goal {
 
         if (!stepToward(level, this.pillarColumn)) return;
 
-        if (--this.actionCooldown > 0) return;
-        this.actionCooldown = ACTION_COOLDOWN_TICKS;
+        // v21: ОДИН ШАР піларингу = НАЗЕМНА фаза (стеля -> проба стрибка -> стіна по одному блоку) -> стрибок -> ПОВІТРЯНА фаза
+        // (добудова стіни вгору + блок під ногами). Раніше все це було одним "пакетом дій" раз на 10 викликів tick() (= 20
+        // ігрових тіків, бо ваніль тікає ціль раз на 2 тіки), а кілька блоків стіни в одному тіку розбивались об затримку між
+        // блоками - тож за шар добудовувався рівно один блок стіни.
+        if (!this.mob.onGround()) {
+            tickPillarAir(level);
+            return;
+        }
+        tickPillarGround(level, player);
+    }
 
-        // v20: новий шар - перевіряємо СВІЖИМ шляхом, чи вже є маршрут стрибком до гравця (він міг з'явитись саме зараз)
-        probeJumpRoute("climb");
+    // ================= CLIMBING: ОДИН ШАР піларингу =================
 
-        if (EnemyBreak_N_BuildUtils.feetCell(this.mob).getY() != this.layerY) {
+    /**
+     * v21: ПОВІТРЯ під час стрибка піларингу. Блок ПІД ногами (PILLAR_FLOOR) ставить
+     * {@link #ensureFloorUnderneathWhileAirborne} - вона йде першою в {@link #tickClimbing} і має мінімальний розрив у 1 тік, тож
+     * стіна її не стримує. Тут моб, поки летить, добудовує стіну ШАРУ, на який приземлиться, - на один блок угору, по одному
+     * блоку з розривом {@code towerPlaceDelayTicks}. Що не встигло - добудується на землі наступного шару.
+     * <p>
+     * Не робиться, якщо вже на наступному шарі можна допригнути до гравця ({@link #preExtendBlocked}): верхній блок стіни
+     * закрив би цей стрибок, тож його ставимо лише ПІСЛЯ проби ({@link #tickJumpCheck}).
+     */
+    private void tickPillarAir(ServerLevel level) {
+        if (this.takeoffFeet == null || this.preExtendBlocked) return;
+        long now = level.getGameTime();
+        if (now - this.jumpIssuedTick > AIR_EXTEND_WINDOW_TICKS) return; // не наш стрибок (нокбек тощо)
+        if (!EnemyBreak_N_BuildUtils.canPlaceNow(this.mob, PlaceReason.TOWER_STRUCTURE, now)) return;
+        for (BlockPos cell : missingWallCells(level, this.takeoffFeet.above(), true)) {
+            if (EnemyBreak_N_BuildUtils.placeBlock(level, cell, this.mob, PlaceReason.TOWER_STRUCTURE)) {
+                this.lastWallProgressTick = now;
+                return;
+            }
+        }
+    }
+
+    /**
+     * v21: НАЗЕМНА фаза шару піларингу. Порядок (узгоджено з користувачем): стоїть -> стеля -> [проба "чи вже можна допригнути"]
+     * -> стіна з боку гравця ПО ОДНОМУ блоку (темп задає placeBlock, {@code towerPlaceDelayTicks}) -> стрибок. Блок під ногами
+     * й добудову стіни вгору робить {@link #tickPillarAir} уже у польоті.
+     */
+    private void tickPillarGround(ServerLevel level, Player player) {
+        BlockPos feet = EnemyBreak_N_BuildUtils.feetCell(this.mob);
+        long now = level.getGameTime();
+
+        if (feet.getY() != this.layerY) {
             lockWallDirectionForNewLayer(player);
+            beginLayer(feet, now);
         }
 
-        BlockPos overhead = EnemyBreak_N_BuildUtils.feetCell(this.mob).above(2);
+        // 1) стеля над головою (як і раніше): лава -> обхід; тонка стеля -> хрест-підпора; інакше ламаємо.
+        BlockPos overhead = feet.above(2);
         if (EnemyBreak_N_BuildUtils.isBreakable(level, overhead)) {
             if (isLavaAbove(level, overhead) && tryAvoidLavaBySidestep(level, overhead)) {
                 return; // пішли в обхід - до лому цього конкретного блоку тут не дійшло
             }
-            if (ceilingIsThinWithAirBeyond(level, overhead) && buildCrossSupportStep(level, EnemyBreak_N_BuildUtils.feetCell(this.mob))) {
-                return; // хрест ще не добудований - продовжимо наступного кулдауну
+            if (ceilingIsThinWithAirBeyond(level, overhead) && buildCrossSupportStep(level, feet)) {
+                return; // хрест ще не добудований - добудовуємо по одному блоку (темп - placeBlock)
             }
+            if (now < this.nextBreakTick) return;
+            this.nextBreakTick = now + BREAK_ACTION_COOLDOWN_TICKS;
             EnemyBreak_N_BuildUtils.debugMsg(this.mob, "[DEBUG TowerClimbGoal] climb: ламаю стелю " + overhead);
             breakCeilingWithLavaCover(level, overhead);
             return;
         }
 
-        buildWallForCurrentLayer(level);
+        // 2) чи вже можна допригнути до гравця - ДО верхніх блоків стіни (власна стіна по голову закрила б стрибок)
+        if (!tickJumpCheck(level, feet)) {
+            return;
+        }
 
-        if (this.mob.onGround()) {
-            this.mob.getJumpControl().jump();
+        // 3) стіна: ПО ОДНОМУ блоку (спершу підлога-розширення, потім ноги, потім голова - для кожного стовпчика).
+        List<BlockPos> missing = missingWallCells(level, feet, true);
+        if (!missing.isEmpty()) {
+            if (EnemyBreak_N_BuildUtils.canPlaceNow(this.mob, PlaceReason.TOWER_STRUCTURE, now)) {
+                for (BlockPos cell : missing) {
+                    if (EnemyBreak_N_BuildUtils.placeBlock(level, cell, this.mob, PlaceReason.TOWER_STRUCTURE)) {
+                        this.lastWallProgressTick = now;
+                        return;
+                    }
+                }
+            }
+            if (now - this.lastWallProgressTick <= wallGiveUpTicks()) {
+                return; // чекаємо темпу / умов постановки (хітбокс, видимість) - не стрибаємо з недобудованою стіною
+            }
+            EnemyBreak_N_BuildUtils.buildLog(this.mob, "TowerClimbGoal: стіну шару Y=" + feet.getY() + " не вдається добудувати "
+                    + wallGiveUpTicks() + " тіків (лишилось " + missing.size() + ") - стрибаю без неї");
+        }
+
+        // 4) стіна готова (або добудувати нема як) - стрибок піларингу
+        if (now - this.jumpIssuedTick < JUMP_REISSUE_TICKS) {
+            return;
+        }
+        this.takeoffFeet = feet;
+        // Стіну наступного шару наперед (у польоті) НЕ добудовуємо, якщо вже з нього можна допригнути до гравця - див. tickJumpCheck.
+        this.preExtendBlocked = Config.TOWER_JUMP_FIRST.get() && jumpPlausibleFrom(feet.getY() + 1);
+        this.jumpIssuedTick = now;
+        this.mob.getJumpControl().jump();
+    }
+
+    /**
+     * v21: початок нового шару піларингу (моб на землі на новій висоті).
+     */
+    private void beginLayer(BlockPos feet, long now) {
+        this.lastWallProgressTick = now;
+        this.jumpCheckWaitTicks = 0;
+        this.takeoffFeet = null;
+        boolean check = Config.TOWER_JUMP_FIRST.get() && jumpPlausibleFrom(feet.getY());
+        this.jumpCheck = check ? JumpCheck.PENDING : JumpCheck.DONE;
+        EnemyBreak_N_BuildUtils.buildLog(this.mob, "TowerClimbGoal: новий шар Y=" + feet.getY() + " | проба стрибка: " + this.jumpCheck);
+    }
+
+    private int wallGiveUpTicks() {
+        return WALL_GIVE_UP_BASE_TICKS + Config.TOWER_PLACE_DELAY_TICKS.get();
+    }
+
+    /**
+     * v21: чи може стрибок до гравця бути можливим із висоти ніг {@code feetY} (лише ПОПЕРЕДНЯ перевірка, чи варто пробувати;
+     * вердикт дає свіжий A*). Ціль - та сама клітинка, до якої рахується шлях ({@link EnemyBreak_N_BuildUtils#pathTargetCell}).
+     */
+    private boolean jumpPlausibleFrom(int feetY) {
+        Vec3 chasePos = PursuitEnemyBehavior.getChasePosition(this.mob);
+        if (chasePos == null) return false;
+        BlockPos target = EnemyBreak_N_BuildUtils.pathTargetCell(this.mob, chasePos);
+        return TerraformRules.jumpMayBePossible(target.getY(), feetY);
+    }
+
+    /**
+     * v21: ПЕРЕВІРКА "чи вже можна допригнути до гравця" на поточному шарі ({@link Config#TOWER_JUMP_FIRST}) - ДО того, як стіна
+     * дійде до висоти голови. Власна стіна по голову закриває стрибок (A* бачить її як звичайну перешкоду, а вище за 1 блок
+     * через неї не перестрибнути), тому раніше моб добудовував вежу далі, хоча без стіни допригнути вже було можна. Тепер:
+     * <ol>
+     *   <li>власні ВЕРХНІ блоки стіни, які моб міг поставити наперед (гравець опинився нижче/ближче, поки моб летів),
+     *       прибираються ({@link #openOwnHeadWall});</li>
+     *   <li>просимо свіжий шлях ({@link EnemyBreak_N_BuildUtils#requestFreshPath}) і чекаємо вердикт, не довше за
+     *       {@link #JUMP_CHECK_MAX_WAIT_TICKS}. Нижня частина стіни (на рівні ніг) лишається - для A* це звичайна сходинка
+     *       заввишки 1 блок, на яку можна зійти;</li>
+     *   <li>маршрут є ({@code isPathBlocked == false}) - нічого більше не ставимо: {@link #canContinueToUse} зупинить вежу, а
+     *       Pursuit + GapJumpAssistGoal стрибнуть. Маршруту нема - верхні блоки стіни ставляться як звичайно.</li>
+     * </ol>
+     *
+     * @return true - можна ставити верхні блоки стіни й стрибати далі; false - чекаємо вердикт (або маршрут уже знайдено)
+     */
+    private boolean tickJumpCheck(ServerLevel level, BlockPos feet) {
+        if (this.jumpCheck == JumpCheck.DONE) return true;
+
+        Vec3 chasePos = PursuitEnemyBehavior.getChasePosition(this.mob);
+        if (chasePos == null) {
+            this.jumpCheck = JumpCheck.DONE;
+            return true;
+        }
+
+        if (this.jumpCheck == JumpCheck.PENDING) {
+            openOwnHeadWall(level, feet);
+            int seqBefore = EnemyBreak_N_BuildUtils.getComputeSeq(this.mob);
+            if (EnemyBreak_N_BuildUtils.requestFreshPath(this.mob)) {
+                this.jumpCheckSeq = seqBefore;
+                this.jumpCheckWaitTicks = 0;
+                this.jumpCheck = JumpCheck.WAITING;
+                this.lastJumpProbeTick = this.mob.tickCount;
+                EnemyBreak_N_BuildUtils.logJumpProbe(this.mob, "TowerClimbGoal[climb]: проба стрибка ПЕРЕД верхніми блоками стіни (Y="
+                        + feet.getY() + ")");
+            } else if (++this.jumpCheckWaitTicks > JUMP_CHECK_MAX_WAIT_TICKS) {
+                this.jumpCheck = JumpCheck.DONE; // бюджет проб вичерпано надовго - не стоїмо, будуємо як звичайно
+                return true;
+            }
+            return false;
+        }
+
+        // WAITING: чекаємо СПРАВЖНЄ обчислення шляху (computeSeq росте лише на новому createPath)
+        if (EnemyBreak_N_BuildUtils.getComputeSeq(this.mob) == this.jumpCheckSeq) {
+            if (++this.jumpCheckWaitTicks > JUMP_CHECK_MAX_WAIT_TICKS) {
+                this.jumpCheck = JumpCheck.DONE;
+                return true;
+            }
+            return false;
+        }
+        if (!EnemyBreak_N_BuildUtils.isPathBlocked(this.mob, chasePos)) {
+            return false; // є маршрут (стрибком) - вежа зупиниться в canContinueToUse(); верхніх блоків не ставимо
+        }
+        this.jumpCheck = JumpCheck.DONE;
+        EnemyBreak_N_BuildUtils.logJumpProbe(this.mob, "TowerClimbGoal[climb]: з цієї висоти допригнути ще не можна - будую стіну далі (Y="
+                + feet.getY() + ")");
+        return true;
+    }
+
+    /**
+     * v21: прибирає власні ВЕРХНІ блоки стіни (на висоті голови) - див. {@link #tickJumpCheck}. Чіпає ЛИШЕ блоки, які поставив
+     * сам моб (TemporaryBlockData): ні природний рельєф, ні блоки гравця не ламаються.
+     */
+    private void openOwnHeadWall(ServerLevel level, BlockPos feet) {
+        TemporaryBlockData temporary = TemporaryBlockData.get(level);
+        for (BlockPos base : wallBases(feet)) {
+            BlockPos head = base.above(WALL_HEIGHT - 1);
+            if (level.getBlockState(head).isSolid() && temporary.isTracked(head)) {
+                EnemyBreak_N_BuildUtils.buildLog(this.mob, "TowerClimbGoal: прибираю власний верхній блок стіни " + head.toShortString()
+                        + " - він закрив би стрибок до гравця");
+                EnemyBreak_N_BuildUtils.breakBlock(level, head, this.mob);
+            }
         }
     }
 
@@ -547,40 +766,51 @@ public class TowerClimbGoal extends Goal {
     }
 
     /**
-     * 1 блок з боку гравця (кардинальний випадок) або 3 блоки (обидва кардинальні + сам кутовий)
-     * для діагоналі — без кутового блока два кардинальні блоки дотикаються лише по діагоналі й
+     * Опорні клітинки стовпчиків стіни для шару з ногами в {@code feet}: 1 клітинка з боку гравця (кардинальний випадок) або 3
+     * (обидва кардинальні + сам кутовий) для діагоналі - без кутового блока два кардинальні торкаються лише по діагоналі й
      * лишають щілину, крізь яку може "виглядати" ребро хітбокса моба.
      */
-    private void buildWallForCurrentLayer(ServerLevel level) {
-        BlockPos feet = EnemyBreak_N_BuildUtils.feetCell(this.mob);
-        placeWallColumn(level, feet.relative(this.wallDirA));
+    private List<BlockPos> wallBases(BlockPos feet) {
+        List<BlockPos> bases = new ArrayList<>(3);
+        if (this.wallDirA == null) return bases;
+        bases.add(feet.relative(this.wallDirA));
         if (this.wallDirB != null) {
-            placeWallColumn(level, feet.relative(this.wallDirB));
-            placeWallColumn(level, feet.relative(this.wallDirA).relative(this.wallDirB));
+            bases.add(feet.relative(this.wallDirB));
+            bases.add(feet.relative(this.wallDirA).relative(this.wallDirB));
         }
+        return bases;
+    }
+
+    /**
+     * v21: клітинки стіни шару з ногами в {@code feet}, яких ще БРАКУЄ й які можна поставити вже зараз, у порядку будівництва:
+     * по кожному стовпчику знизу вгору - підлога-розширення, ноги, голова. Викликач ставить з них по ОДНОМУ (темп - placeBlock).
+     * <p>
+     * ВИПРАВЛЕНО (живий тест, "блоки в повітрі"; перенесено зі старого placeWallColumn): стіна стирчить убік від вузького
+     * 1-блочного стовпа - сама по собі, без розширення підлоги під собою, вона НЕ дотикається гранню жодного вже існуючого
+     * блока (сусід "до моба" - власний повітряний простір моба, не solid). Так само, як довелось би гравцю: спершу
+     * продовжуємо підлогу вбік ({@code base.below()}), і лише ПОТІМ будуємо стіну на ній.
+     * <p>
+     * Пропускаються клітинки: де вже є solid-блок; зайняті чимось не-замінюваним (факел тощо); без суміжної опори (вони
+     * з'являться в наступних викликах, щойно нижня клітинка стовпчика буде поставлена). {@code allowHead == false} ховає верхні
+     * клітинки (на висоті голови) - їх не можна ставити, поки не відома відповідь проби стрибка ({@link #tickJumpCheck}).
+     */
+    private List<BlockPos> missingWallCells(ServerLevel level, BlockPos feet, boolean allowHead) {
+        List<BlockPos> out = new ArrayList<>(4);
+        for (BlockPos base : wallBases(feet)) {
+            for (int k = 0; k <= WALL_HEIGHT; k++) { // k=0 - підлога-розширення, 1..WALL_HEIGHT - ноги ... голова
+                if (k == WALL_HEIGHT && !allowHead) continue;
+                BlockPos cell = k == 0 ? base.below() : base.above(k - 1);
+                BlockState state = level.getBlockState(cell);
+                if (state.isSolid()) continue;
+                if (!state.canBeReplaced()) continue;
+                if (!EnemyBreak_N_BuildUtils.hasAdjacentSolid(level, cell)) continue;
+                out.add(cell);
+            }
+        }
+        return out;
     }
 
     // ================= BRIDGE_TO_PLAYER =================
-
-    /**
-     * ВИПРАВЛЕНО (живий тест, "блоки в повітрі"): стіна стирчить убік від вузького 1-блочного
-     * стовпа — сама по собі, без жодного розширення підлоги під собою, вона НЕ дотикається
-     * гранню жодного вже існуючого блока (сусід "до моба" — власний повітряний простір моба, не
-     * solid). Так само, як довелось би гравцю: спершу продовжуємо підлогу вбік
-     * ({@code base.below()}, впритул до підлоги моба), і лише ПОТІМ будуємо стіну на ній.
-     */
-    private void placeWallColumn(ServerLevel level, BlockPos base) {
-        BlockPos floorExtension = base.below();
-        if (!level.getBlockState(floorExtension).isSolid()) {
-            EnemyBreak_N_BuildUtils.placeBlock(level, floorExtension, this.mob, PlaceReason.TOWER_STRUCTURE);
-        }
-        for (int dy = 0; dy < WALL_HEIGHT; dy++) {
-            BlockPos pos = base.above(dy);
-            if (!level.getBlockState(pos).isSolid()) {
-                EnemyBreak_N_BuildUtils.placeBlock(level, pos, this.mob, PlaceReason.TOWER_STRUCTURE);
-            }
-        }
-    }
 
     /**
      * "0 - до гравця, 1 - до безопасної площі, 2 - просто до площі" — обирає куди летіти/падати.
@@ -662,8 +892,9 @@ public class TowerClimbGoal extends Goal {
         this.mob.getNavigation().moveTo(travelTarget.getX() + 0.5, travelTarget.getY(), travelTarget.getZ() + 0.5,
                 Run_N_JumpUtils.getRunSpeedModifier(this.mob));
 
-        if (--this.actionCooldown > 0) return;
-        this.actionCooldown = ACTION_COOLDOWN_TICKS;
+        // v21: темп мосту задає placeBlock (випадкові 4-5 тіків між блоками), а не 10-тіковий кулдаун цілі: між блоками моб
+        // просто йде далі навігацією й не робить зайвої роботи.
+        if (!EnemyBreak_N_BuildUtils.canPlaceNow(this.mob, PlaceReason.BRIDGE_STEP, level.getGameTime())) return;
 
         BlockPos step = EnemyBreak_N_BuildUtils.nextHorizontalStep(this.mob, travelTarget);
         neutralizeHazardIfPlayerPlaced(level, step);
@@ -743,4 +974,9 @@ public class TowerClimbGoal extends Goal {
     }
 
     private enum Stage {DECIDE, TO_7X7, CROSS_AND_DIG, CLIMBING, SIDESTEP, BRIDGE_TO_PLAYER}
+
+    /**
+     * v21: перевірка "чи вже можна допригнути до гравця" на поточному шарі піларингу, див. {@link #tickJumpCheck}.
+     */
+    private enum JumpCheck {PENDING, WAITING, DONE}
 }
