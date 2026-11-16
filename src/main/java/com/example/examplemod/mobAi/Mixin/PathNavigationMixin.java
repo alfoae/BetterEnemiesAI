@@ -1,5 +1,6 @@
 package com.example.examplemod.mobAi.Mixin;
 
+import com.example.examplemod.Enemy.EnemyMovement.Run_N_Jump.DropAssist;
 import com.example.examplemod.Enemy.EnemyMovement.TerrainShape.ShapePathAccess;
 import com.example.examplemod.Enemy.EnemyMovement.TerrainShape.ShapeProbe;
 import com.example.examplemod.debug.DebugLog;
@@ -41,6 +42,24 @@ public abstract class PathNavigationMixin {
 
     @Shadow
     protected abstract void doStuckDetection(Vec3 positionVec3);
+
+    /**
+     * v22: ресинхронізація вузлів - моб, що пройшов кілька вузлів повз (збіг по сходах), не тупцює під сходинкою, а йде до
+     * найближчого вузла попереду. Для шляхів із точними точками (spots) не діє: там {@code betterEnemies$followExactSpots}
+     * має власний механізм проходу вузлів, тож порядок виконання двох HEAD-інжекторів не має значення.
+     */
+    @Inject(method = "followThePath", at = @At("HEAD"))
+    private void betterEnemies$resyncOvershoot(CallbackInfo ci) {
+        DropAssist.resync(this.mob, this.path, this.getTempMobPos());
+    }
+
+    /**
+     * v22: повільний підхід до краю й корекція падіння над м'яким приземленням (вода/сіно/драбина) - див. {@link DropAssist}.
+     */
+    @Inject(method = "tick", at = @At("TAIL"))
+    private void betterEnemies$assistDrop(CallbackInfo ci) {
+        DropAssist.onNavigationTick(this.mob, this.path);
+    }
 
     @Inject(method = "followThePath", at = @At("HEAD"), cancellable = true)
     private void betterEnemies$followExactSpots(CallbackInfo ci) {

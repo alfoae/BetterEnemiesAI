@@ -50,6 +50,10 @@ public class Config {
     public static final ModConfigSpec.IntValue JUMP_DOWN_MAX_BLOCKS;
     public static final ModConfigSpec.DoubleValue FALL_DAMAGE_RESERVE_HP;
     public static final ModConfigSpec.DoubleValue FALL_DAMAGE_COST_PER_HP;
+    // v22: спуски "пішки" (ванільні ребра зриву з краю), керування падінням, ресинхронізація вузлів шляху.
+    public static final ModConfigSpec.BooleanValue DROP_DAMAGE_AWARE;
+    public static final ModConfigSpec.BooleanValue DROP_AIR_STEERING;
+    public static final ModConfigSpec.BooleanValue PATH_RESYNC;
     public static final ModConfigSpec.BooleanValue TOWER_JUMP_FIRST;
 
     // Дебаг (див. com.example.examplemod.debug.DebugLog): окремий файл logs/betterenemiesai-debug.log.
@@ -249,6 +253,25 @@ public class Config {
                 .comment("Штраф у вартості шляху за кожен 1 HP шкоди від падіння (1 блок ходьби = 1.0). 6 - моб обійде до ~6 блоків",
                         "заради півсерця; 0 - шкода не впливає на вибір маршруту (лишається лише відсікання смертельних).")
                 .defineInRange("fallDamageCostPerHp", 6.0D, 0.0D, 100.0D);
+
+        DROP_DAMAGE_AWARE = builder
+                .comment("Ванільні ребра спуску (моб просто сходить з краю й падає) теж враховують шкоду, як і стрибки: смертельне падіння",
+                        "(з HP, чарами, зіллями) відкидається, шкідливе дорожчає на fallDamageCostPerHp за 1 HP, а вода/сіно/драбина лишаються",
+                        "безкоштовними. Тому моб спускається сходами/уступами нижче або цілить у воду, а не кидається з усієї висоти.",
+                        "false - стара поведінка (спуск коштував як звичайний крок).")
+                .define("dropDamageAware", true);
+
+        DROP_AIR_STEERING = builder
+                .comment("Моб, який планово зістрибує на МЯКЕ приземлення (вода, сіно, мед, ліжко, драбина, ліани), підходить до краю ПОВІЛЬНО",
+                        "(без спринту) і в польоті підтягується до центру клітинки приземлення - інакше з інерцією промахується повз 1 блок води.",
+                        "Діє лише на мобів, що переслідують гравця. false - ванільний рух.")
+                .define("dropAirSteering", true);
+
+        PATH_RESYNC = builder
+                .comment("Якщо моб пройшов кілька вузлів шляху повз (збіг по сходах, проскочив уступ) і лишився далі ніж за 2 блоки від поточного",
+                        "вузла, шлях переключається на найближчий вузол попереду - інакше моб тупцює під сходинкою до перерахунку шляху",
+                        "(зависання на ~10 с). Діє лише на мобів, що переслідують гравця. false - ванільна логіка.")
+                .define("pathResync", true);
 
         builder.pop();
 

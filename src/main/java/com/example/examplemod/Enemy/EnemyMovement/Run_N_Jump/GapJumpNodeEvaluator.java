@@ -254,6 +254,10 @@ public class GapJumpNodeEvaluator extends ShapeAwareNodeEvaluator {
      * пошук не вибрано: збирається лише один пошук на моба раз на 2 с, щоб не гальмувати A*).
      */
     private FallDebug.SearchStats fallStats;
+    /**
+     * v22: ванільні ребра спуску в цьому пошуку рахуються з урахуванням шкоди (див. {@link #applyDropCosts}).
+     */
+    private boolean dropAware;
 
     @Override
     public void prepare(PathNavigationRegion level, Mob mob) {
@@ -286,6 +290,7 @@ public class GapJumpNodeEvaluator extends ShapeAwareNodeEvaluator {
                 dbgFailure = ex;         // v21: раніше цей виняток ковтався мовчки - тепер його видно в [FALL]
             }
         }
+        this.dropAware = this.fallProfile != null && Config.DROP_DAMAGE_AWARE.get();
         this.fallStats = null;
         if (DebugLog.on(DebugLog.Cat.FALL) && FallDebug.relevant(mob)) {
             if (this.fallProfile != null) {
@@ -311,7 +316,7 @@ public class GapJumpNodeEvaluator extends ShapeAwareNodeEvaluator {
         this.fallStats = null;
         super.done();
         if (stats != null) {
-            stats.flush(this.dynamicDownLimit, this.fallCostPerHp);
+            stats.flush(this.dynamicDownLimit, this.fallCostPerHp, this.dropAware);
         }
     }
 
@@ -356,6 +361,9 @@ public class GapJumpNodeEvaluator extends ShapeAwareNodeEvaluator {
         int count = super.getNeighbors(nodes, node);
         if (this.fallStats != null) {
             this.fallStats.onExpand(node); // v21: на яких рівнях Y A* розкриває вузли (чи дивиться він НИЖЧЕ за старт)
+        }
+        if (this.dropAware) {
+            count = applyDropCosts(nodes, count, node); // v22: ванільні ребра зриву з краю теж мають ціну за шкоду
         }
         boolean probe = isProbeStart(node);
         // v17: "повністю відкрита клітинка" - це 8 сусідів БЕЗ СПУСКІВ (суцільна поверхня на одному рівні): жоден напрямок не має
@@ -791,7 +799,7 @@ public class GapJumpNodeEvaluator extends ShapeAwareNodeEvaluator {
         BlockState feet = getBlockStateAt(landing);
         BlockState head = getBlockStateAt(landing.above());
         double multiplier = below == null || feet == null || head == null
-                ? 1.0 : FallDamage.landingMultiplier(below, feet, head);
+                ? 1.0 : FallLanding.multiplier(below, feet, head); // v22: + драбини/ліани
         return FallMath.damageAfterReductions(profile, fall, multiplier);
     }
 
@@ -808,8 +816,74 @@ public class GapJumpNodeEvaluator extends ShapeAwareNodeEvaluator {
     }
 
     /**
-     * v21 (дебаг [FALL]): кандидат стрибка вниз потрапив у граф - для зведення пошуку. Ніколи не ламає пошук шляху.
+     * v22: ванільні (і shape-aware) ребра СПУСКУ - "зійти з краю й упасти" - раніше коштували як звичайний крок: A* не знав ні
+     * HP моба, ні чарів, ні блока внизу, тож кидався вниз одразу (в логу - ПІШКИ-ЗРИВ на 10-12 блоків), замість того щоб
+     * спуститись сходами нижче чи влучити у воду/сіно. Тепер для кожного такого ребра (падіння від 2 блоків):
+     * <ul>
+     *   <li>шкода рахується тією ж моделлю, що й для стрибків ({@link FallMath}, множник блока - {@link FallLanding});</li>
+     *   <li>смертельне (не лишає {@code fallDamageReserveHp}) - ребро ВІДКИДАЄТЬСЯ;</li>
+     *   <li>шкідливе - вузол приземлення замінюється КОПІЄЮ з доданим штрафом {@code шкода * fallDamageCostPerHp}
+     *       (спільний вузол міняти не можна: інші шляхи на ту саму клітинку теж заплатили б за падіння);</li>
+     *   <li>безкоштовне (вода, сіно, драбина, невелика висота) - лишається як є.</li>
+     * </ul>
+     * Падіння рахується як висота спуску: з краю моб падає рівно на різницю рівнів (без апекса стрибка).
+     *
+     * @return нова кількість сусідів (смертельні прибрано)
      */
+    private int applyDropCosts(Node[] nodes, int count, Node origin) {
+        FallMath.Profile profile = this.fallProfile;
+        int kept = 0;
+        for (int i = 0; i < count; i++) {
+            Node n = nodes[i];
+            int drop = origin.y - n.y;
+            if (drop < 2 || n instanceof HopNode) {
+                nodes[kept++] = n;
+                continue;
+            }
+            BlockPos landing = new BlockPos(n.x, n.y, n.z);
+            BlockState below = getBlockStateAt(landing.below());
+            BlockState feet = getBlockStateAt(landing);
+            BlockState head = getBlockStateAt(landing.above());
+            if (below == null || feet == null || head == null) {
+                nodes[kept++] = n;
+                continue;
+            }
+            double multiplier = FallLanding.multiplier(below, feet, head);
+            float damage = FallMath.damageAfterReductions(profile, drop, multiplier);
+            boolean lethal = damage > 0.0F && !FallMath.survives(profile, damage);
+            if (this.fallStats != null) {
+                dbgDrop(origin, n, drop, damage, lethal, below, feet, head);
+            }
+            if (lethal) {
+                continue; // з такої висоти на таке приземлення моб не виживе - ребра нема
+            }
+            if (damage <= 0.0F) {
+                nodes[kept++] = n;
+                continue;
+            }
+            Node penalized = new Node(n.x, n.y, n.z);
+            penalized.type = n.type;
+            penalized.costMalus = n.costMalus + damage * this.fallCostPerHp;
+            nodes[kept++] = penalized;
+        }
+        return kept;
+    }
+
+    /**
+     * v22 (дебаг [FALL]): ребро спуску розглянуто - для зведення пошуку. Ніколи не ламає пошук шляху.
+     */
+    private void dbgDrop(Node origin, Node to, int drop, float damage, boolean lethal,
+                         BlockState below, BlockState feet, BlockState head) {
+        try {
+            FallMath.Profile profile = this.fallProfile;
+            float loss = profile == null ? damage : FallMath.healthLoss(profile, damage);
+            this.fallStats.onDrop(origin, to, drop, damage, loss, lethal, below, feet, head);
+        } catch (RuntimeException ignored) {
+            // тільки дебаг
+        }
+    }
+
+    /** v21 (дебаг [FALL]): кандидат стрибка вниз потрапив у граф - для зведення пошуку. Ніколи не ламає пошук шляху. */
     private void dbgCandidate(BlockPos origin, int dx, int dz, int dy, float damage) {
         try {
             BlockPos landing = origin.offset(dx, dy, dz);
@@ -824,9 +898,7 @@ public class GapJumpNodeEvaluator extends ShapeAwareNodeEvaluator {
         }
     }
 
-    /**
-     * v21 (дебаг [FALL]): приземлення відсічено як смертельне - для зведення пошуку. Ніколи не ламає пошук шляху.
-     */
+    /** v21 (дебаг [FALL]): приземлення відсічено як смертельне - для зведення пошуку. Ніколи не ламає пошук шляху. */
     private void dbgLethal(BlockPos origin, int dx, int dz, int dy) {
         try {
             float damage = fallDamageOf(origin, dx, dz, dy);
