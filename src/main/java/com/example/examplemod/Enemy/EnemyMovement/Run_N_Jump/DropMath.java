@@ -13,14 +13,12 @@ final class DropMath {
      * Найбільша горизонтальна швидкість (блоків/тік), з якою моб тягнеться до центру приземлення.
      */
     static final double MAX_AIR_SPEED = 0.25;
-    /**
-     * Бажана швидкість = відстань до центру * AIR_PULL (чим ближче - тим повільніше).
-     */
+    /** Бажана швидкість = відстань до центру * AIR_PULL (чим ближче - тим повільніше). */
     static final double AIR_PULL = 0.15;
     /**
-     * Найбільша зміна горизонтальної швидкості за тік (гравець у повітрі: ~0.02-0.03; мобу дозволено трохи більше).
+     * Найбільша зміна горизонтальної швидкості за тік - ТА САМА, що в RNJ ({@code GapJumpPhysics.MAX_AIR_ACCEL}, "як у гравця").
      */
-    static final double MAX_AIR_ACCEL = 0.05;
+    static final double MAX_AIR_ACCEL = GapJumpPhysics.MAX_AIR_ACCEL;
 
     private DropMath() {
     }

@@ -134,6 +134,13 @@ public final class GapJumpUtils {
     }
 
     /**
+     * v24: те саме, але з розбігом лише {@code runUp} блоків (з місця до відриву): коротка платформа - коротший стрибок.
+     */
+    static int maxJumpGap(Mob mob, GapJumpPhysics.Takeoff takeoff, double deltaY, double runUp) {
+        return GapJumpPhysics.maxGapBlocksWithRunUp(runSpeedSetpoint(mob), takeoff, deltaY, runUp);
+    }
+
+    /**
      * Ванільний {@code SlimeBlock.stepOn}: щотіку, поки моб іде по слайму, горизонтальна швидкість множиться на
      * {@code 0.4 + 0.2 * |vy|} (при ходьбі |vy| майже 0). Це НЕ властивість блока (як speedFactor), тож із
      * самого блока його не прочитати - тому слайм (і нащадки {@code SlimeBlock} з модів) розпізнається окремо.
@@ -456,7 +463,7 @@ public final class GapJumpUtils {
             Node b = path.getNode(i + 1);
             double dx = b.x - a.x;
             double dz = b.z - a.z;
-            if (b instanceof HopNode || dx * dx + dz * dz > JUMP_SEGMENT_THRESHOLD * JUMP_SEGMENT_THRESHOLD) {
+            if (b instanceof HopNode || b instanceof DropNode || dx * dx + dz * dz > JUMP_SEGMENT_THRESHOLD * JUMP_SEGMENT_THRESHOLD) {
                 return i;
             }
         }
@@ -626,7 +633,8 @@ public final class GapJumpUtils {
             double dx = b.x - a.x;
             double dz = b.z - a.z;
             boolean hop = b instanceof HopNode; // "гоп" на сусідню клітинку: відстань 1, але це все одно стрибок
-            if (hop || dx * dx + dz * dz > JUMP_SEGMENT_THRESHOLD * JUMP_SEGMENT_THRESHOLD) {
+            boolean drop = b instanceof DropNode; // v23: спуск на сусідню клітинку під керуванням RNJ (плану точного відриву не потребує)
+            if (hop || drop || dx * dx + dz * dz > JUMP_SEGMENT_THRESHOLD * JUMP_SEGMENT_THRESHOLD) {
                 BlockPos edge = new BlockPos(a.x, a.y, a.z);
                 BlockPos landingCell = new BlockPos(b.x, b.y, b.z);
                 int gapBlocks = (int) Math.round(Math.sqrt(dx * dx + dz * dz)) - 1;

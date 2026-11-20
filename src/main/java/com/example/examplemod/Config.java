@@ -54,6 +54,15 @@ public class Config {
     public static final ModConfigSpec.BooleanValue DROP_DAMAGE_AWARE;
     public static final ModConfigSpec.BooleanValue DROP_AIR_STEERING;
     public static final ModConfigSpec.BooleanValue PATH_RESYNC;
+    // v23: м'які приземлення (вода/сіно/драбини/ліжко...) як ЦІЛІ стрибка RNJ і спуски через RNJ.
+    public static final ModConfigSpec.BooleanValue SOFT_LANDING_SEARCH;
+    public static final ModConfigSpec.IntValue SOFT_LANDING_MAX_DEPTH;
+    public static final ModConfigSpec.DoubleValue SOFT_LANDING_PRIORITY;
+    public static final ModConfigSpec.BooleanValue DROP_VIA_RNJ;
+    // v24: сходи (гальмо, щоб моб не летів над сходинками) і перевірка розбігу для стрибків у м'яке приземлення.
+    public static final ModConfigSpec.BooleanValue STAIR_DESCENT_BRAKE;
+    public static final ModConfigSpec.DoubleValue STAIR_DESCENT_MAX_SPEED;
+    public static final ModConfigSpec.BooleanValue SOFT_LANDING_RUNUP_CHECK;
     public static final ModConfigSpec.BooleanValue TOWER_JUMP_FIRST;
 
     // Дебаг (див. com.example.examplemod.debug.DebugLog): окремий файл logs/betterenemiesai-debug.log.
@@ -264,7 +273,8 @@ public class Config {
         DROP_AIR_STEERING = builder
                 .comment("Моб, який планово зістрибує на МЯКЕ приземлення (вода, сіно, мед, ліжко, драбина, ліани), підходить до краю ПОВІЛЬНО",
                         "(без спринту) і в польоті підтягується до центру клітинки приземлення - інакше з інерцією промахується повз 1 блок води.",
-                        "Діє лише на мобів, що переслідують гравця. false - ванільний рух.")
+                        "Діє лише на мобів, що переслідують гравця. false - ванільний рух.",
+                        "v24: працює ЛИШЕ коли dropViaRnj=false (це запасна милиця; з dropViaRnj=true такі спуски веде RNJ без повільного підходу).")
                 .define("dropAirSteering", true);
 
         PATH_RESYNC = builder
@@ -272,6 +282,44 @@ public class Config {
                         "вузла, шлях переключається на найближчий вузол попереду - інакше моб тупцює під сходинкою до перерахунку шляху",
                         "(зависання на ~10 с). Діє лише на мобів, що переслідують гравця. false - ванільна логіка.")
                 .define("pathResync", true);
+
+        SOFT_LANDING_SEARCH = builder
+                .comment("Моб, що переслідує гравця, який стоїть НИЖЧЕ, шукає навколо м'які приземлення (вода, сіно, драбини/ліани/риштування,",
+                        "ліжко; запасні - мед, слайм, павутиння; виключено все біля лави, вогню, кактуса) і стрибає туди через RNJ.",
+                        "Радіус досяжності не вгадується: його рахує фізика RNJ для кожної глибини. false - лише старі стрибкові ребра.")
+                .define("softLandingSearch", true);
+
+        SOFT_LANDING_MAX_DEPTH = builder
+                .comment("Найбільша глибина (блоків під вузлом відриву), на якій шукаємо м'які приземлення. Глибші ігноруються.")
+                .defineInRange("softLandingMaxDepth", 32, 8, 64);
+
+        SOFT_LANDING_PRIORITY = builder
+                .comment("Перевага м'якого приземлення над спуском пішки (в \"блоках шляху\"): конкуруючі спуски з вузла, звідки м'яке",
+                        "приземлення досяжне, дорожчають на це число - моб стрибає з поточної платформи, якщо об'їзд не більший за нього.",
+                        "0 - без переваги.")
+                .defineInRange("softLandingPriority", 8.0D, 0.0D, 50.0D);
+
+        DROP_VIA_RNJ = builder
+                .comment("Нетривіальні спуски на сусідню клітинку (падіння більше за безпечну висоту) виконує RNJ: розбіг/збіг з краю на",
+                        "потрібній швидкості й повітряне керування, а не звичайна ходьба. false - старий шлях: ванільний рух + dropAirSteering.")
+                .define("dropViaRnj", true);
+
+        STAIR_DESCENT_BRAKE = builder
+                .comment("На СХОДАХ (два і більше спуски по 1 блоку підряд на шляху) заагрений моб обмежує швидкість, щоб іти сходинка за сходинкою:",
+                        "на повному бігу (зомбі ~0.78 бл/тік) він летить над сходинками, і будь-який бічний поштовх виносить його зі сходів завширшки 1.",
+                        "Гальмо вмикається за ~2.5 блока до першого спуску й знімається після останньої сходинки. false - ванільна швидкість.")
+                .define("stairDescentBrake", true);
+
+        STAIR_DESCENT_MAX_SPEED = builder
+                .comment("Найбільший зсув моба за тік на сходах (блоків/тік; 0.20 = 4 бл/с, 20 тіків = 1 с). За моделлю сходинка 1x1 надійно",
+                        "береться до ~0.22; вище - моб починає перелітати сходинки. Менше значення - повільніше, але надійніше.")
+                .defineInRange("stairDescentMaxSpeed", 0.20D, 0.05D, 0.6D);
+
+        SOFT_LANDING_RUNUP_CHECK = builder
+                .comment("Стрибок у м'яке приземлення НЕ впритик (через RNJ) враховує розбіг: скільки блоків рівної опори позаду краю є, щоб розігнатись.",
+                        "Моб розганяється з нуля до ~90% повної швидкості за ~2.3 блока; на коротшому розбігу дальність стрибка менша, і вузол-кандидат",
+                        "відкидається, якщо не долітає. false - дальність рахується від повної швидкості (як було в v23).")
+                .define("softLandingRunUpCheck", true);
 
         builder.pop();
 

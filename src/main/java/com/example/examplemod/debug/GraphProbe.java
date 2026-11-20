@@ -1,5 +1,6 @@
 package com.example.examplemod.debug;
 
+import com.example.examplemod.Enemy.EnemyMovement.Run_N_Jump.DropNode;
 import com.example.examplemod.Enemy.EnemyMovement.TerrainShape.HopNode;
 import net.minecraft.world.entity.Mob;
 import net.minecraft.world.level.pathfinder.Node;
@@ -55,7 +56,8 @@ public final class GraphProbe {
             sb.append("\n    (").append(n.x).append(',').append(n.y).append(',').append(n.z).append(") d=(")
                     .append(dx).append(',').append(dy).append(',').append(dz).append(") type=").append(n.type)
                     .append(" malus=").append(String.format(java.util.Locale.ROOT, "%.2f", n.costMalus))
-                    .append(n instanceof HopNode ? "  <-- ГОП (стрибок на сусідню клітинку)" : dist > 1.5 ? "  <-- СТРИБОК" : "");
+                    .append(n instanceof DropNode ? "  <-- СПУСК-RNJ (DropNode: збіг з краю на сусідню клітинку)"
+                            : n instanceof HopNode ? "  <-- ГОП (стрибок на сусідню клітинку)" : dist > 1.5 ? "  <-- СТРИБОК" : "");
         }
         DebugLog.log(DebugLog.Cat.GRAPH, mob, sb.toString());
     }

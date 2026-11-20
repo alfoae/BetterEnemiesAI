@@ -121,6 +121,12 @@ public class GapJumpAssistGoal extends Goal {
      * Якщо моб уже практично на landing - вважаємо розрив пройденим (ногами, без стрибка).
      */
     private static final double ARRIVED_RADIUS = 0.5;
+    /**
+     * v24: "перейшов ногами" рахується, лише якщо моб не вище за landing більш ніж на стільки блоків. Без цього спуск на СУСІДНЮ
+     * клітинку (DropNode: від краю до центру приземлення 0.5 бл по горизонталі) вважався пройденим ще на краю - ціль
+     * завершувалась за 1-2 тіки ДО відриву, і весь політ (повітряне керування) лишався без керування.
+     */
+    private static final double ARRIVED_MAX_ABOVE = 1.0;
 
     /**
      * Запобіжник: скільки тіків моб може добігати до краю. Якщо не дійшов (упирається, зіштовхнули) -
@@ -501,7 +507,10 @@ public class GapJumpAssistGoal extends Goal {
         // =========================================================
         // AIRBORNE — моб уже летить
         // =========================================================
-        if (!this.mob.onGround()) {
+        // v23: приземлення у ВОДУ або на драбину/ліани теж посадка: на глибокій воді моб не стає onGround, і ціль інакше
+        // тримала б його в "польоті", поки він пливе.
+        boolean softContact = this.hasBeenAirborne && (this.mob.isInWater() || this.mob.onClimbable());
+        if (!this.mob.onGround() && !softContact) {
             if (!this.hasBeenAirborne && !this.jumpFired) {
                 // Моб втратив опору, так і не отримавши команди на стрибок - майже завжди через ЗАПІЗНІЛЕ
                 // керування (див. canUse). Поки він просів зовсім небагато, стрибаємо просто з повітря.
@@ -602,7 +611,7 @@ public class GapJumpAssistGoal extends Goal {
         // Без цього перевірки Goal у такому разі зависав би в розбігу назавжди (distToEdge більше
         // ніколи не спрацює, а steerTo(landing) щотіку смикає моба туди-сюди).
         double distToLanding = horizontalDistance(this.mob.position(), landing);
-        if (distToLanding <= ARRIVED_RADIUS) {
+        if (distToLanding <= ARRIVED_RADIUS && this.mob.getY() - landing.y <= ARRIVED_MAX_ABOVE) {
             this.done = true;
 
             jumpLog(

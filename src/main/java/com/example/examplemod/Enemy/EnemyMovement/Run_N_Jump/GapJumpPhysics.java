@@ -838,6 +838,52 @@ final class GapJumpPhysics {
     }
 
     /**
+     * v24: deltaMovement (вздовж осі) на початку тіку відриву, якщо моб розганяється З МІСЦЯ на відрізку {@code runUp} блоків повною
+     * уставкою {@code setpointMax}. Зсув за тік: {@code v + a}, далі {@code v = зсув * тертя}; поки зсув не перевищить залишок
+     * відрізка, моб ще розганяється. Консервативно: береться швидкість на початку останнього тіку до краю. Для {@code runUp}, що
+     * не менший за ~5 блоків, це вже усталена швидкість ({@link #steadyVelocity}).
+     */
+    static double velocityAfterRunUp(double setpointMax, Takeoff t, double runUp) {
+        if (!(runUp > 0.0)) {
+            return 0.0;
+        }
+        double a = groundAccel(setpointMax, t.friction());
+        double v = 0.0;
+        double x = 0.0;
+        for (int tick = 0; tick < 80; tick++) {
+            double step = v + a;
+            if (x + step >= runUp) {
+                return v;
+            }
+            x += step;
+            v = step * t.retention();
+        }
+        return steadyVelocity(setpointMax, t);
+    }
+
+    /**
+     * v24: {@link #maxReach}, але з обмеженим розбігом ({@code runUp} блоків з місця), а не з усталеною швидкістю.
+     */
+    static double maxReachWithRunUp(double setpointMax, Takeoff t, double deltaY, boolean sprint, double runUp) {
+        double a = groundAccel(setpointMax, t.friction());
+        Forecast f = forecastFlight(velocityAfterRunUp(setpointMax, t, runUp), a, t, sprint, MAX_AIR_ACCEL, deltaY, false);
+        return f == null ? 0.0 : f.reach();
+    }
+
+    /**
+     * v24: {@link #maxGapBlocks} з обмеженим розбігом. Та сама формула округлення; для великого {@code runUp} збігається з
+     * {@code maxGapBlocks} (перевіряється окремо). Стрибок із короткої платформи не може бути таким же далеким, як з довгої.
+     */
+    static int maxGapBlocksWithRunUp(double setpointMax, Takeoff t, double deltaY, double runUp) {
+        double reach = maxReachWithRunUp(setpointMax, t, deltaY, true, runUp);
+        if (reach <= 0.0) {
+            return 0;
+        }
+        double allowed = reach + PLAN_LANDING_ALLOWANCE - PLAN_TAKEOFF_SLACK;
+        return Math.max(0, (int) Math.floor(allowed - EDGE_FRONT - GapJumpRays.FLIGHT_TOLERANCE + 1.0E-9));
+    }
+
+    /**
      * Зсув за тік відриву ("крок 1"), після якого природний політ із постійним прискоренням {@code airAccel} у повітрі
      * долітає рівно на {@code dist}. Із виразу {@code reach = step * (1 + F * S1(m)) + airAccel * S2(m)}, де {@code m} - тіків
      * у повітрі після тіку відриву, {@code F} - наземне тертя тіку відриву.

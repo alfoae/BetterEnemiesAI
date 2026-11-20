@@ -1,5 +1,6 @@
 package com.example.examplemod.Enemy.EnemyMovement.TerrainShape;
 
+import com.example.examplemod.Enemy.EnemyMovement.Run_N_Jump.DropNode;
 import com.example.examplemod.Enemy.EnemyMovement.TerrainShape.ShapeGeometry.Box;
 import com.example.examplemod.Enemy.EnemyMovement.TerrainShape.ShapeGeometry.Footprint;
 import com.example.examplemod.Enemy.EnemyMovement.TerrainShape.ShapeWalk.BodyDims;
@@ -526,7 +527,7 @@ public class ShapeAwareNodeEvaluator extends WalkNodeEvaluator {
             if (i + 1 < n) {
                 Node next = path.getNode(i + 1);
                 // ГОП (HopNode) - сусідня клітинка, але ребро НЕ ходьба: це стрибок через ділянку без опори.
-                walk[i] = Math.abs(next.x - nd.x) <= 1 && Math.abs(next.z - nd.z) <= 1 && !(next instanceof HopNode);
+                walk[i] = Math.abs(next.x - nd.x) <= 1 && Math.abs(next.z - nd.z) <= 1 && !(next instanceof HopNode) && !(next instanceof DropNode);
             }
         }
         List<WaypointPlanner.Waypoint> plan = WaypointPlanner.plan(cands, walk, this::movable);
