@@ -15,9 +15,7 @@ final class DropMath {
     static final double MAX_AIR_SPEED = 0.25;
     /** Бажана швидкість = відстань до центру * AIR_PULL (чим ближче - тим повільніше). */
     static final double AIR_PULL = 0.15;
-    /**
-     * Найбільша зміна горизонтальної швидкості за тік - ТА САМА, що в RNJ ({@code GapJumpPhysics.MAX_AIR_ACCEL}, "як у гравця").
-     */
+    /** Найбільша зміна горизонтальної швидкості за тік - ТА САМА, що в RNJ ({@code GapJumpPhysics.MAX_AIR_ACCEL}, "як у гравця"). */
     static final double MAX_AIR_ACCEL = GapJumpPhysics.MAX_AIR_ACCEL;
 
     private DropMath() {

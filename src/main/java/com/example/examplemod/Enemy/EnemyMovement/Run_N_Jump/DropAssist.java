@@ -61,49 +61,26 @@ public final class DropAssist {
     // ------------------------------------------------------------------------------------------
     // Підхід до краю й корекція в польоті
     // ------------------------------------------------------------------------------------------
+
+    /**
+     * v25: скільки тіків поспіль моб чекає на старт RNJ (далі їде звичайно - на випадок, якщо RNJ чомусь не стартує).
+     */
+    private static final int HANDOFF_HOLD_MAX_TICKS = 3;
+    /**
+     * v25: на якій відстані (по горизонталі) від точки відриву чекаємо на старт RNJ, а не біжимо до краю з розбігом.
+     */
+    private static final double HANDOFF_NEAR_EDGE = 1.5;
+    /**
+     * Для кожного моба: {позиція краю (BlockPos.asLong), скільки тіків уже чекав саме на цьому краї}.
+     */
+    private static final Map<Mob, long[]> HANDOFF_HELD = new WeakHashMap<>();
     /**
      * Скільки вузлів шляху попереду дивимось у пошуку сходів (разом із висотою ніг моба - до 6 значень).
      */
     private static final int STAIR_LOOKAHEAD_NODES = 5;
     private static final Map<Mob, Integer> LAST_REFRESH = new WeakHashMap<>();
-    /**
-     * Не частіше за стільки тіків просимо свіжий шлях, коли моб поза шляхом.
-     */
+    /** Не частіше за стільки тіків просимо свіжий шлях, коли моб поза шляхом. */
     private static final int REFRESH_INTERVAL_TICKS = 20;
-
-    /** Кликається з {@code PathNavigation#tick} (TAIL) кожен тік; для не-переслідувачів і твердих приземлень нічого не робить. */
-    public static void onNavigationTick(Mob mob, Path path) {
-        if (mob == null || path == null || path.isDone() || mob.level().isClientSide()) {
-            return;
-        }
-        // v24: при dropViaRnj (за замовчуванням) усі нетривіальні спуски й м'які приземлення веде RNJ (DropNode), а повільний
-        // "підхід до краю" з v22 - це милиця, що давала вигляд сповільненого часу: тепер він лише запасний (коли RNJ-спуски вимкнено).
-        boolean steering = Config.DROP_AIR_STEERING.get() && !Config.DROP_VIA_RNJ.get();
-        boolean stairBrake = Config.STAIR_DESCENT_BRAKE.get();
-        if (!steering && !stairBrake) {
-            return;
-        }
-        if (mob.isInWater() || mob.isInLava() || mob.onClimbable() || mob.isPassenger()) {
-            return;
-        }
-        if (GapJumpAssistGoal.isActive(mob) || PursuitEnemyBehavior.getChasePosition(mob) == null) {
-            return; // стрибками керує свій гоал; не переслідувачів не чіпаємо
-        }
-        try {
-            if (mob.onGround()) {
-                if (stairBrake) {
-                    brakeOnStairs(mob, path); // v24: на сходах швидкість обмежується (див. StairBrake)
-                }
-                if (steering) {
-                    approachEdge(mob, path); // запасний механізм для м'яких приземлень не через RNJ (повільніший підхід, якщо діє)
-                }
-            } else if (steering) {
-                steerInAir(mob, path);
-            }
-        } catch (RuntimeException ignored) {
-            // допоміжна механіка ніколи не повинна ламати навігацію
-        }
-    }
 
     /**
      * v24: на СХОДАХ (щонайменше два спуски по 1 блоку підряд у найближчих вузлах шляху) швидкість моба обмежується, щоб він ішов
@@ -202,10 +179,6 @@ public final class DropAssist {
         }
     }
 
-    // ------------------------------------------------------------------------------------------
-    // Ресинхронізація вузлів шляху
-    // ------------------------------------------------------------------------------------------
-
     private static void steerInAir(Mob mob, Path path) {
         Vec3 v = mob.getDeltaMovement();
         if (v.y > -0.1 || mob.fallDistance < 1.0F) {
@@ -245,6 +218,88 @@ public final class DropAssist {
         BlockState feet = level.getBlockState(pos);
         BlockState head = level.getBlockState(pos.above());
         return FallLanding.multiplier(below, feet, head) < 1.0;
+    }
+
+    // ------------------------------------------------------------------------------------------
+    // Ресинхронізація вузлів шляху
+    // ------------------------------------------------------------------------------------------
+
+    /** Кликається з {@code PathNavigation#tick} (TAIL) кожен тік; для не-переслідувачів і твердих приземлень нічого не робить. */
+    public static void onNavigationTick(Mob mob, Path path) {
+        if (mob == null || path == null || path.isDone() || mob.level().isClientSide()) {
+            return;
+        }
+        // v24: при dropViaRnj (за замовчуванням) усі нетривіальні спуски й м'які приземлення веде RNJ (DropNode), а повільний
+        // "підхід до краю" з v22 - це милиця, що давала вигляд сповільненого часу: тепер він лише запасний (коли RNJ-спуски вимкнено).
+        boolean steering = Config.DROP_AIR_STEERING.get() && !Config.DROP_VIA_RNJ.get();
+        boolean stairBrake = Config.STAIR_DESCENT_BRAKE.get();
+        if (!steering && !stairBrake) {
+            return;
+        }
+        if (mob.isInWater() || mob.isInLava() || mob.onClimbable() || mob.isPassenger()) {
+            return;
+        }
+        if (GapJumpAssistGoal.isActive(mob) || PursuitEnemyBehavior.getChasePosition(mob) == null) {
+            return; // стрибками керує свій гоал; не переслідувачів не чіпаємо
+        }
+        try {
+            if (mob.onGround() && holdForHandoff(mob)) {
+                return; // v25: RNJ ось-ось стартує - не біжимо до краю самі
+            }
+            if (mob.onGround()) {
+                if (stairBrake) {
+                    brakeOnStairs(mob, path); // v24: на сходах швидкість обмежується (див. StairBrake)
+                }
+                if (steering) {
+                    approachEdge(mob, path); // запасний механізм для м'яких приземлень не через RNJ (повільніший підхід, якщо діє)
+                }
+            } else if (steering) {
+                steerInAir(mob, path);
+            }
+        } catch (RuntimeException ignored) {
+            // допоміжна механіка ніколи не повинна ламати навігацію
+        }
+    }
+
+    /**
+     * v25: у шляху вже є ГОТОВИЙ стрибок/збіг з краю, на якому моб стоїть, але гоал RNJ ще не стартував: GoalSelector вибирає нові
+     * цілі раз на 2 тіки, і Pursuit за цей час розганяв моба до краю на повній швидкості (в логу: «ЗАПІЗНІЛЕ КЕРУВАННЯ» - моб за
+     * краєм на +0.9 бл зі швидкістю 0.3 бл/тік ще до першого тіку цілі; зі стовпа/сходинки 1x1 це різниця між влученням і промахом).
+     * Тому до старту RNJ моб СТОЇТЬ - не довше {@link #HANDOFF_HOLD_MAX_TICKS} тіків поспіль.
+     *
+     * @return true, якщо рух цього тіку скасовано
+     */
+    private static boolean holdForHandoff(Mob mob) {
+        if (!Config.RNJ_HANDOFF_HOLD.get()) {
+            return false;
+        }
+        GapJumpUtils.GapJump jump = GapJumpUtils.findUpcomingJumpSegment(mob);
+        if (jump == null) {
+            HANDOFF_HELD.remove(mob);
+            return false;
+        }
+        Vec3 takeoff = jump.takeoffPoint();
+        double dx = takeoff.x - mob.getX();
+        double dz = takeoff.z - mob.getZ();
+        if (dx * dx + dz * dz > HANDOFF_NEAR_EDGE * HANDOFF_NEAR_EDGE) {
+            return false; // далеко від краю: RNJ сам поведе на розбіг
+        }
+        long edgeKey = jump.edge().asLong();
+        long[] state = HANDOFF_HELD.get(mob);
+        if (state == null || state[0] != edgeKey) {
+            state = new long[]{edgeKey, 0L}; // інший край (інший сегмент) - рахуємо спочатку
+            HANDOFF_HELD.put(mob, state);
+        }
+        final int held = (int) state[1];
+        if (held >= HANDOFF_HOLD_MAX_TICKS) {
+            return false;
+        }
+        state[1] = held + 1L;
+        // ціль руху = поточна позиція: MoveControl обнуляє вхід (zza), моб не розганяється, лишається лише тертя
+        mob.getMoveControl().setWantedPosition(mob.getX(), mob.getY(), mob.getZ(), 0.0);
+        DebugLog.logThrottled(DebugLog.Cat.FALL, mob, "handoff-hold|" + mob.getId(), 700L,
+                () -> "ПЕРЕДАЧА КЕРУВАННЯ RNJ: моб стоїть до старту гоала (тік " + (held + 1) + " з " + HANDOFF_HOLD_MAX_TICKS + ")");
+        return true;
     }
 
     /**

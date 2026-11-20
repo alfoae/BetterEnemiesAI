@@ -421,7 +421,8 @@ public class GapJumpAssistGoal extends Goal {
         }
 
         Vec3 edgeCenter = this.jump.takeoffPoint();
-        double axisLength = horizontalDistance(edgeCenter, this.jump.landing());
+        Vec3 segAxis = this.jump.axisFrom(edgeCenter); // v25: кутовий спуск - вісь уздовж відкритої ортогональної сторони
+        double axisLength = Math.sqrt(segAxis.x * segAxis.x + segAxis.z * segAxis.z);
         computeSegmentPhysics(axisLength);
         FLIGHT_FLOOR_Y.put(this.mob, Math.min(edgeCenter.y, this.jump.landing().y) - FLIGHT_FLOOR_MARGIN);
 
@@ -478,8 +479,9 @@ public class GapJumpAssistGoal extends Goal {
             this.takeoff = GapJumpUtils.takeoffOf(floor, level, floorPos, this.mob);
         }
         // Політ рахується від переднього краю опори: звідти й міряємо, чи вистачить збігу без стрибка.
-        double dx = landing.x - this.jump.takeoffPoint().x;
-        double dz = landing.z - this.jump.takeoffPoint().z;
+        Vec3 segAxis = this.jump.axisFrom(this.jump.takeoffPoint());
+        double dx = segAxis.x;
+        double dz = segAxis.z;
         double dirX = axisLength > 1.0E-6 ? dx / axisLength : 0.0;
         double dirZ = axisLength > 1.0E-6 ? dz / axisLength : 0.0;
         double flight = Math.max(0.0, axisLength - this.jump.front(dirX, dirZ));
@@ -626,8 +628,9 @@ public class GapJumpAssistGoal extends Goal {
         // === Геометрія вздовж осі стрибка (від ЦЕНТРУ блока-краю у бік landing) ===
         // РАНІШЕ тут міряли евклідову відстань до ЦЕНТРУ блока-краю і ловили моба в колі R>=0.7 -
         // тобто відрив ставався ще за ~0.7 блока ДО центру (більш ніж за 1.2 до реального краю).
-        double axisX = landing.x - edgeCenter.x;
-        double axisZ = landing.z - edgeCenter.z;
+        Vec3 groundAxis = this.jump.axisFrom(edgeCenter); // v25: для кутового спуску - відкрита ортогональна сторона
+        double axisX = groundAxis.x;
+        double axisZ = groundAxis.z;
         double axisLength = Math.sqrt(axisX * axisX + axisZ * axisZ);
         if (axisLength < 1.0E-6) {
             this.done = true; // вироджений сегмент: край і landing збігаються - нічого стрибати

@@ -15,26 +15,18 @@ final class StairBrake {
      * Найбільший зсув за тік на сходах за замовчуванням (бл/тік; 0.20 = 4 бл/с, повільніше за гравця в спринті 5.6).
      */
     static final double DEFAULT_MAX_STEP = 0.20;
-    /**
-     * З якої відстані (по горизонталі) до першого спуску сходів починаємо гальмувати: моб скидає 0.78 -> 0.22 бл/тік за ~0.7 блока.
-     */
+    /** З якої відстані (по горизонталі) до першого спуску сходів починаємо гальмувати: моб скидає 0.78 -> 0.22 бл/тік за ~0.7 блока. */
     static final double LOOKAHEAD_DIST = 2.5;
-    /**
-     * Спуск "сходинкою": від 0.5 до 1.5 блока вниз (глибше - це падіння, його веде RNJ/DropAssist).
-     */
+    /** Спуск "сходинкою": від 0.5 до 1.5 блока вниз (глибше - це падіння, його веде RNJ/DropAssist). */
     static final double MIN_STEP_DROP = 0.5;
     static final double MAX_STEP_DROP = 1.5;
-    /**
-     * Вхід моба в {@code travel()}: zza множиться на 0.98 (ванільний aiStep).
-     */
+    /** Вхід моба в {@code travel()}: zza множиться на 0.98 (ванільний aiStep). */
     private static final double INPUT_SCALE = 0.98;
 
     private StairBrake() {
     }
 
-    /**
-     * {@code true}, якщо різниця висот {@code from - to} - сходинка вниз (не підйом, не падіння).
-     */
+    /** {@code true}, якщо різниця висот {@code from - to} - сходинка вниз (не підйом, не падіння). */
     static boolean isStepDown(double from, double to) {
         double drop = from - to;
         return drop >= MIN_STEP_DROP && drop <= MAX_STEP_DROP;

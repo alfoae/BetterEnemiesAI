@@ -63,6 +63,12 @@ public class Config {
     public static final ModConfigSpec.BooleanValue STAIR_DESCENT_BRAKE;
     public static final ModConfigSpec.DoubleValue STAIR_DESCENT_MAX_SPEED;
     public static final ModConfigSpec.BooleanValue SOFT_LANDING_RUNUP_CHECK;
+    // v25: спуски по сходинках (твердих блоках) - логи зі стовпом і бетонними сходинками.
+    public static final ModConfigSpec.BooleanValue WALK_OFF_ANY_DEPTH;
+    public static final ModConfigSpec.IntValue WALK_OFF_MAX_DEPTH;
+    public static final ModConfigSpec.BooleanValue HOP_WALK_OFF_DAMAGE;
+    public static final ModConfigSpec.BooleanValue CORRIDOR_GLANCE;
+    public static final ModConfigSpec.BooleanValue RNJ_HANDOFF_HOLD;
     public static final ModConfigSpec.BooleanValue TOWER_JUMP_FIRST;
 
     // Дебаг (див. com.example.examplemod.debug.DebugLog): окремий файл logs/betterenemiesai-debug.log.
@@ -320,6 +326,33 @@ public class Config {
                         "Моб розганяється з нуля до ~90% повної швидкості за ~2.3 блока; на коротшому розбігу дальність стрибка менша, і вузол-кандидат",
                         "відкидається, якщо не долітає. false - дальність рахується від повної швидкості (як було в v23).")
                 .define("softLandingRunUpCheck", true);
+
+        WALK_OFF_ANY_DEPTH = builder
+                .comment("Спуск зі збігом на СУСІДНЮ клітинку (в т.ч. діагональну за кутом блока) на ТВЕРДИЙ блок будь-якої глибини, яку моб переживе,",
+                        "- ребром RNJ, а не лише там, де дотягується ванільний getMaxFallDistance() (він залежить від HP: 12 при повному, 3-8 після падіння,",
+                        "тож після першого стрибка частина ребер зникала й моб ЗАСТРЯГАВ на сходинці). Потрібно dropViaRnj=true.")
+                .define("walkOffAnyDepth", true);
+
+        WALK_OFF_MAX_DEPTH = builder
+                .comment("Найбільша глибина (блоків) для спуску з walkOffAnyDepth. Смертельні падіння відкидаються окремо за профілем моба.")
+                .defineInRange("walkOffMaxDepth", 16, 4, 40);
+
+        HOP_WALK_OFF_DAMAGE = builder
+                .comment("Шкоду від стрибка вниз на БЛИЗЬКУ платформу (до ~3 блоків) A* рахує як від ЗБІГУ З КРАЮ (без апекса стрибка 1.25 бл), якщо RNJ",
+                        "виконає його збігом без стрибка і розбігу з блока вистачає. Раніше A* завжди додавав апекс (+2 HP на кожну сходинку), хоч моб",
+                        "сходив з краю й падав лише на різницю рівнів, тому сходинки здавались невигідними. false - як у v24.")
+                .define("hopWalkOffDamage", true);
+
+        CORRIDOR_GLANCE = builder
+                .comment("Стрибок вниз (від 2 блоків) терпить ДОТИЧНЕ зачеплення кута блока до 0.1 бл (хітбокс 0.6 бл ковзне, а не застрягне).",
+                        "Без цього коридор стрибка зі сходинки на сходинку, що стоїть упритул до стовпа, завжди «заблокований» стовпом. false - як у v24.")
+                .define("corridorGlance", true);
+
+        RNJ_HANDOFF_HOLD = builder
+                .comment("Поки RNJ ще не стартував, а в шляху вже готовий збіг/стрибок з поточного краю, моб СТОЇТЬ (до 3 тіків) замість того, щоб бігти",
+                        "до краю на повній швидкості: GoalSelector вибирає нові цілі раз на 2 тіки, і з маленької опори (стовп, сходинка 1x1) моб",
+                        "встигав вилетіти за край ДО старту керування (в логу: «ЗАПІЗНІЛЕ КЕРУВАННЯ», +0.9 бл і швидкість 0.3 бл/тік).")
+                .define("rnjHandoffHold", true);
 
         builder.pop();
 

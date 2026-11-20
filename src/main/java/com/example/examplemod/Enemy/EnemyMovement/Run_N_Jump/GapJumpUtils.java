@@ -651,7 +651,13 @@ public final class GapJumpUtils {
                 if (hop && plan == null) {
                     continue; // без точного плану гоп не виконати (старий код стрибка розрахований на блоки, не на люки)
                 }
-                return new GapJump(edge, landing, Math.max(1, gapBlocks), plan, approach);
+                int exitX = 0;
+                int exitZ = 0;
+                if (b instanceof DropNode dropNode) { // v25: кутовий спуск несе сторону виходу з краю
+                    exitX = dropNode.exitX;
+                    exitZ = dropNode.exitZ;
+                }
+                return new GapJump(edge, landing, Math.max(1, gapBlocks), plan, approach, exitX, exitZ);
             }
         }
         return null;
@@ -737,10 +743,37 @@ public final class GapJumpUtils {
      * Для звичайних блоків {@code plan == null} і нічого не змінюється. {@code approach} - вузли шляху від
      * поточного місця до вузла відриву (для навігатора), або {@code null} (прямий розбіг, як і раніше).
      */
-    public record GapJump(BlockPos edge, Vec3 landing, int gapBlocks, ShapeJump.Plan plan, Path approach) {
+    public record GapJump(BlockPos edge, Vec3 landing, int gapBlocks, ShapeJump.Plan plan, Path approach, int exitX,
+                          int exitZ) {
+
+        public GapJump(BlockPos edge, Vec3 landing, int gapBlocks, ShapeJump.Plan plan, Path approach) {
+            this(edge, landing, gapBlocks, plan, approach, 0, 0);
+        }
 
         public GapJump(BlockPos edge, Vec3 landing, int gapBlocks) {
-            this(edge, landing, gapBlocks, null, null);
+            this(edge, landing, gapBlocks, null, null, 0, 0);
+        }
+
+        /**
+         * v25: кутовий спуск (див. {@link DropNode#exitX}): сходимо з краю відкритою ортогональною стороною, а не по діагоналі.
+         */
+        public boolean corner() {
+            return this.exitX != 0 || this.exitZ != 0;
+        }
+
+        /**
+         * v25: вісь відриву від {@code takeoff} (горизонталь): зазвичай {@code landing - takeoff}; для кутового спуску - уздовж
+         * відкритої ортогональної сторони на довжину проєкції {@code landing - takeoff} на неї. Моб тоді спершу виходить за край
+         * без перепони, а діагональний зсув добирає повітряне керування (воно цілиться в справжній {@link #landing}).
+         */
+        public Vec3 axisFrom(Vec3 takeoff) {
+            double ax = this.landing.x - takeoff.x;
+            double az = this.landing.z - takeoff.z;
+            if (this.exitX != 0 || this.exitZ != 0) {
+                double projection = Math.max(0.5, ax * this.exitX + az * this.exitZ);
+                return new Vec3(this.exitX * projection, 0.0, this.exitZ * projection);
+            }
+            return new Vec3(ax, 0.0, az);
         }
 
         /**

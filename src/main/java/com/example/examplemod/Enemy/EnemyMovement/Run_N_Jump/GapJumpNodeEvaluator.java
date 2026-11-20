@@ -256,6 +256,10 @@ public class GapJumpNodeEvaluator extends ShapeAwareNodeEvaluator {
      * пошук не вибрано: збирається лише один пошук на моба раз на 2 с, щоб не гальмувати A*).
      */
     private FallDebug.SearchStats fallStats;
+    /** v22: ванільні ребра спуску в цьому пошуку рахуються з урахуванням шкоди (див. {@link #applyDropCosts}). */
+    private boolean dropAware;
+    // v23: м'які приземлення (вода/сіно/драбини/ліжко...) як цілі RNJ; спуски на сусідню клітинку через RNJ (DropNode)
+    private boolean dropViaRnj;
     private static final int[] NO_SOFT = new int[0];
     private static final int[][] SOFT_NEIGHBORS = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
     /**
@@ -278,6 +282,19 @@ public class GapJumpNodeEvaluator extends ShapeAwareNodeEvaluator {
      */
     private static final int SOFT_INDEX_MARGIN = 6;
     /**
+     * v25: твердий спуск впритик розглядаємо, лише коли ціль нижче вузла хоча б на стільки блоків.
+     */
+    private static final int HARD_MIN_TARGET_DROP = 2;
+    /**
+     * v25: невеликий штраф кутовому спуску (виходить за перепону й добирає діагональ у повітрі) - за рівної шкоди прямий спуск кращий.
+     */
+    private static final float CORNER_DROP_MALUS = 1.5F;
+    // ---- v25: спуски по сходинках (тверді блоки) ----
+    /**
+     * v25: скільки блоків від центру блока-краю до повного сходу хітбокса з опори (розбіг збігу з нуля).
+     */
+    private static final double WALK_OFF_LEAVE_RUN = 0.8;
+    /**
      * v24: скільки клітинок рівної опори позаду краю рахуємо як розбіг (більше вже не дає швидкості).
      */
     private static final int SOFT_RUNUP_MAX_CELLS = 5;
@@ -293,10 +310,23 @@ public class GapJumpNodeEvaluator extends ShapeAwareNodeEvaluator {
      * v24: колонки впритик, прочитані в цьому пошуку: ключ (x, верхній рівень, z) -> {вид, Y клітинки ніг} або {@link #NO_SOFT}.
      */
     private final java.util.HashMap<Long, int[]> softColumnCache = new java.util.HashMap<>();
-    /** v22: ванільні ребра спуску в цьому пошуку рахуються з урахуванням шкоди (див. {@link #applyDropCosts}). */
-    private boolean dropAware;
-    // v23: м'які приземлення (вода/сіно/драбини/ліжко...) як цілі RNJ; спуски на сусідню клітинку через RNJ (DropNode)
-    private boolean dropViaRnj;
+    private boolean softEnabled;
+    private double softTargetY;
+    private int softMaxDepth;
+    private float softPriority;
+    private SoftLandings.Index softIndex;
+    /**
+     * v24: перевіряти розбіг для стрибків у м'яке НЕ впритик ({@code softLandingRunUpCheck}).
+     */
+    private boolean runUpCheck;
+    /**
+     * Скільки смертельних спусків відкинуто в цьому пошуку (для повідомлення "моб застряг").
+     */
+    private int lethalRemoved;
+    /**
+     * Скільки м'яких приземлень додано в граф у цьому пошуку.
+     */
+    private int softAdded;
 
     /**
      * Геометрія готова й точні стрибки дозволені.
@@ -333,127 +363,14 @@ public class GapJumpNodeEvaluator extends ShapeAwareNodeEvaluator {
         }
         return sb.toString();
     }
-    private boolean softEnabled;
-
     /**
-     * @param dy          landing.y - origin.y: {@code 0} - рівний стрибок, {@code >0} - вгору, {@code <0} - вниз
-     *                    (у межах {@code -JUMP_DOWN_LIMIT_BLOCKS..+JUMP_UP_LIMIT_BLOCKS} - {@link #getNeighbors})
+     * v24: скільки стрибків у м'яке відкинуто через замалий розбіг (для зведення [FALL]).
      */
-    private int tryRay(Node[] nodes, int count, JumpCtx ctx, GapJumpRays.Ray ray, byte[] frontCache, int dy) {
-        BlockPos origin = ctx.origin;
-        // 1. Край у цьому напрямку? Перша клітинка має бути справжнім проваллям, ЗАВЖДИ на рівні СТАРТУ
-        //    (dy тут НЕ підставляємо - "лесенка", де порожньо на обох поверхах, інакше не розпізнається як
-        //    провалля). Якщо вона прохідна - звичайний крок з цього вже впорається (а стрибок згенерується
-        //    з наступної клітинки); якщо там стіна - крізь неї не стрибаємо.
-        int frontIndex = (ray.frontX() + 1) * 3 + (ray.frontZ() + 1);
-        if (frontCache[frontIndex] == UNKNOWN) {
-            frontCache[frontIndex] = classifyStartFront(ctx, ray.frontX(), ray.frontZ());
-        }
-        if (frontCache[frontIndex] != VOID) {
-            return count;
-        }
-
-        // 2. Приземлення вздовж променя, на рівні origin.y + dy. ПЕРШЕ придатне - звичайний стрибок. Далі
-        //    сканування ТРИВАЄ: якщо за цією платформою знову провалля (на ЇЇ рівні, тобто теж +dy), а ще
-        //    далі (у межах дальності) - нова платформа, то це ПЕРЕСТРИБУВАННЯ: один довгий стрибок НАД
-        //    проміжною платформою замість двох коротких (▣▢▣▢▣ - з 1-го блока одразу на 3-й).
-        boolean landed = false;      // на цьому промені вже додано хоча б одне приземлення
-        boolean voidBehind = false;  // після останньої придатної клітинки на промені була порожнеча
-        // ...і з неї: за клітинкою є опора, але пішки не дійти (ряд відкритих люків) - випадок, якого раніше не було
-        boolean unreachableBehind = false;
-        // Відстань і повна вартість (відстань + malus) ребра ПЕРШОГО приземлення на промені: від них відлічується
-        // вартість подальших перестрибувань у нерегулярній зоні (див. skipJumpNode)
-        double anchorDistance = 0.0;
-        double anchorCost = 0.0;
-        for (int k = ray.kMin(); k <= ray.kMax(); k++) {
-            int dx = ray.stepX() * k;
-            int dz = ray.stepZ() * k;
-            if (!isStandable(origin, dx, dz, dy)) {
-                if (landed) {
-                    voidBehind = true; // (це може бути й стіна - коридор наступного кандидата її відсіче)
-                    unreachableBehind = false;
-                }
-                continue;
-            }
-            // v20: приземлення, яке моб не переживе (з урахуванням здоров'я, ефектів, чарів і блока внизу) - як відсутнє:
-            // кандидат НЕ створюється, промінь триває (далі може бути безпечніша платформа чи вода).
-            if (dy < 0 && !landingAllowed(origin, dx, dz, dy)) {
-                if (this.fallStats != null) {
-                    dbgLethal(origin, dx, dz, dy);
-                }
-                if (landed) {
-                    voidBehind = true;
-                    unreachableBehind = false;
-                }
-                continue;
-            }
-            // Придатна клітинка. Кандидат - якщо це перше приземлення, або перед нею була порожнеча
-            // (інакше це просто продовження тієї ж платформи, ногами й так дійдемо).
-            if (!landed || voidBehind) {
-                // "Додатковий" кандидат існує ЛИШЕ завдяки новому правилу (опора є, але пішки не дійти). Його ребро
-                // йде в кінець списку сусідів (див. addExtraJumps) і не може витіснити звичайне: усе, що було до цієї
-                // правки, лишається в списку на своїх місцях і в тому ж порядку (змінилась лише вартість
-                // перестрибувань у нерегулярній зоні - див. skipJumpNode).
-                boolean extra = landed && unreachableBehind;
-                if (involvesIrregular(ctx, ray, k, dx, dz, dy)) {
-                    // Нестандартна форма (опора чи коридор): рішення приймає геометрія й симуляція польоту,
-                    // а не грубі "центр клітинки" / "виступ вище кроку". Відхилений кандидат НЕ закриває
-                    // промінь: далі по ньому може бути інша платформа.
-                    if (!extra && count >= nodes.length) {
-                        return count;
-                    }
-                    Spot[] from = fromSpotsOf(ctx);
-                    boolean ok = from.length == 0
-                            ? isCorridorClear(origin, ray.corridor()[k], dy) // немає точок відриву - як раніше
-                            : exactJumpOk(ctx, from, dx, dz, dy);
-                    if (ok) {
-                        // Перше приземлення - як завжди; подальші (перестрибування) в нерегулярній зоні - за єдиним
-                        // правилом skipJumpNode, і старі, і нові.
-                        Node jump = landed
-                                ? skipJumpNode(origin, dx, dz, dy, anchorDistance, anchorCost)
-                                : jumpNode(origin, dx, dz, dy, false);
-                        if (!landed) {
-                            anchorDistance = Math.sqrt((double) dx * dx + (double) dz * dz);
-                            anchorCost = anchorDistance + jump.costMalus - this.lastJumpPenalty; // v20: штраф за шкоду кожне приземлення рахує саме
-                        }
-                        if (extra) {
-                            ctx.addExtra(jump);
-                        } else {
-                            nodes[count++] = jump;
-                        }
-                        landed = true;
-                    }
-                } else if (!extra) {
-                    // Звичайні блоки - старий код. (Сюди не потрапляємо з нестандартної опори відриву: там
-                    // involvesIrregular завжди true, а промені для звичайної опори якраз у межах дальності.)
-                    // Коридор польоту (разом із проміжною платформою й проваллями між) має бути вільний.
-                    // Якщо ні - то й далі по променю заблоковано.
-                    if (!isCorridorClear(origin, ray.corridor()[k], dy)) {
-                        return count;
-                    }
-                    if (count >= nodes.length) {
-                        return count;
-                    }
-                    Node jump = jumpNode(origin, dx, dz, dy, landed);
-                    nodes[count++] = jump;
-                    if (!landed) {
-                        anchorDistance = Math.sqrt((double) dx * dx + (double) dz * dz);
-                        anchorCost = anchorDistance + jump.costMalus - this.lastJumpPenalty; // v20: штраф за шкоду кожне приземлення рахує саме
-                    }
-                    landed = true;
-                }
-            }
-            // Чи закінчується тут платформа? Тільки тоді наступну придатну клітинку на промені можна перестрибнути.
-            // Для повних блоків - одразу за нею провалля (на ЇЇ Ж рівні +dy); для нерегулярних форм (ряд відкритих
-            // люків) - ще й коли з неї на наступну клітинку НЕ можна ступити пішки, хоч підлога там і є (див.
-            // platformEnd). Для променів із кроком >1 клітинки "клітинка за" береться тією самою відносною
-            // позицією, що й перша клітинка від краю (лінія періодична).
-            byte behind = platformEnd(ctx, ray, dx, dz, dy);
-            voidBehind = behind != BEHIND_NO_GAP;
-            unreachableBehind = behind == BEHIND_UNREACHABLE;
-        }
-        return count;
-    }
+    private int softRunUpRejected;
+    /**
+     * Спуски зі збігом на сусідню клітинку на ТВЕРДИЙ блок будь-якої переживаної глибини ({@code walkOffAnyDepth}).
+     */
+    private boolean hardDropsEnabled;
 
     // -------------------------------------------------------------------------------------
     // Точна геометрія (нестандартні блоки)
@@ -637,25 +554,7 @@ public class GapJumpNodeEvaluator extends ShapeAwareNodeEvaluator {
         sizes[dy + downLimit] = found;
         return found;
     }
-
-    /** v20: шкода (HP, після Опору й чарів, до поглинання) від приземлення на {@code origin + (dx,dy,dz)} стрибком із цього вузла. */
-    private float fallDamageOf(BlockPos origin, int dx, int dz, int dy) {
-        FallMath.Profile profile = this.fallProfile;
-        if (profile == null) {
-            return 0.0F;
-        }
-        double fall = FallMath.fallBlocks(this.takeoffApex, dy);
-        if (fall <= profile.safeFall()) {
-            return 0.0F; // швидкий вихід: без звернень до світу
-        }
-        BlockPos landing = origin.offset(dx, dy, dz);
-        BlockState below = getBlockStateAt(landing.below());
-        BlockState feet = getBlockStateAt(landing);
-        BlockState head = getBlockStateAt(landing.above());
-        double multiplier = below == null || feet == null || head == null
-                ? 1.0 : FallLanding.multiplier(below, feet, head); // v22: + драбини/ліани
-        return FallMath.damageAfterReductions(profile, fall, multiplier);
-    }
+    private int hardMaxDepth;
 
     /** v20: штраф у вартості ребра за шкоду від падіння; заодно запам'ятовує найменшу шкоду (див. getNeighbors). */
     private float fallPenalty(BlockPos origin, int dx, int dz, int dy) {
@@ -667,261 +566,6 @@ public class GapJumpNodeEvaluator extends ShapeAwareNodeEvaluator {
             dbgCandidate(origin, dx, dz, dy, damage);
         }
         return damage > 0.0F ? damage * this.fallCostPerHp : 0.0F;
-    }
-    private double softTargetY;
-
-    // ------------------------------------------------------------------------------------------
-    // v23: м'які приземлення (вода/сіно/драбини/ліжко...) як цілі стрибка RNJ
-    // ------------------------------------------------------------------------------------------
-    private int softMaxDepth;
-    private float softPriority;
-    private SoftLandings.Index softIndex;
-    /**
-     * v24: перевіряти розбіг для стрибків у м'яке НЕ впритик ({@code softLandingRunUpCheck}).
-     */
-    private boolean runUpCheck;
-    /**
-     * Скільки смертельних спусків відкинуто в цьому пошуку (для повідомлення "моб застряг").
-     */
-    private int lethalRemoved;
-    /**
-     * Скільки м'яких приземлень додано в граф у цьому пошуку.
-     */
-    private int softAdded;
-    /**
-     * v24: скільки стрибків у м'яке відкинуто через замалий розбіг (для зведення [FALL]).
-     */
-    private int softRunUpRejected;
-
-    private static int indexOfCell(Node[] nodes, int count, int x, int y, int z) {
-        for (int i = 0; i < count; i++) {
-            Node c = nodes[i];
-            if (c.x == x && c.y == y && c.z == z) {
-                return i;
-            }
-        }
-        return -1;
-    }
-
-    /**
-     * Копія вузла з іншою ціною (спільний вузол пошуку міняти не можна: інші шляхи на ту саму клітинку теж заплатили б).
-     */
-    private static Node copyWithMalus(Node source, float malus) {
-        Node copy = source instanceof DropNode ? new DropNode(source.x, source.y, source.z) : new Node(source.x, source.y, source.z);
-        copy.type = source.type;
-        copy.costMalus = malus;
-        return copy;
-    }
-
-    @Override
-    public void prepare(PathNavigationRegion level, Mob mob) {
-        super.prepare(level, mob);
-        this.exactJumps = ShapeSettings.enabledFor(mob);
-        // v20: профіль падіння моба на час ЦЬОГО пошуку (здоров'я, золоті серця, Опір, чари, безпечна висота). Динамічний
-        // нижній предел = те, що моб переживе на звичайний блок (не менше старого -3, не більше стелі з конфігу).
-        this.fallProfile = null;
-        this.dynamicDownLimit = GapJumpPhysics.JUMP_DOWN_LIMIT_BLOCKS;
-        // v21 (дебаг [FALL]): що саме порахував цей пошук - див. FallDebug.logProfile
-        int dbgCap = -1;
-        double dbgApex = 0.0;
-        int dbgSurvivable = -1;
-        RuntimeException dbgFailure = null;
-        if (mob != null && Config.FALL_DAMAGE_AWARE_JUMPS.get()) {
-            try {
-                FallMath.Profile profile = FallDamage.profileOf(mob);
-                int cap = Config.JUMP_DOWN_MAX_BLOCKS.get();
-                double apex = FallMath.apexHeight(GapJumpPhysics.JUMP_VERTICAL_VELOCITY, GapJumpPhysics.GRAVITY_PER_TICK,
-                        GapJumpPhysics.VERTICAL_DRAG_PER_TICK);
-                int survivable = FallMath.maxSurvivableDrop(profile, apex, cap);
-                this.fallProfile = profile;
-                this.fallCostPerHp = Config.FALL_DAMAGE_COST_PER_HP.get().floatValue();
-                this.dynamicDownLimit = Math.max(GapJumpPhysics.JUMP_DOWN_LIMIT_BLOCKS, Math.min(cap, survivable));
-                dbgCap = cap;
-                dbgApex = apex;
-                dbgSurvivable = survivable;
-            } catch (RuntimeException ex) {
-                this.fallProfile = null; // будь-яка проблема з читанням моба - стара поведінка, а не зламаний пошук шляху
-                dbgFailure = ex;         // v21: раніше цей виняток ковтався мовчки - тепер його видно в [FALL]
-            }
-        }
-        this.dropAware = this.fallProfile != null && Config.DROP_DAMAGE_AWARE.get();
-        // v23: налаштування м'яких приземлень цього пошуку
-        this.dropViaRnj = Config.DROP_VIA_RNJ.get();
-        this.softEnabled = false;
-        this.softIndex = null;
-        this.softColumnCache.clear();
-        this.runUpCheck = Config.SOFT_LANDING_RUNUP_CHECK.get();
-        this.softRunUpRejected = 0;
-        this.lethalRemoved = 0;
-        this.softAdded = 0;
-        if (mob != null && Config.SOFT_LANDING_SEARCH.get()) {
-            Vec3 chase = PursuitEnemyBehavior.getChasePosition(mob);
-            if (chase != null) { // лише переслідувачі: решта мобів м'яких приземлень не шукає
-                this.softEnabled = true;
-                this.softTargetY = chase.y;
-                this.softMaxDepth = Config.SOFT_LANDING_MAX_DEPTH.get();
-                this.softPriority = Config.SOFT_LANDING_PRIORITY.get().floatValue();
-            }
-        }
-        this.fallStats = null;
-        if (DebugLog.on(DebugLog.Cat.FALL) && FallDebug.relevant(mob)) {
-            if (this.fallProfile != null) {
-                FallDebug.logProfile(mob, this.fallProfile, dbgCap, dbgApex, dbgSurvivable, this.dynamicDownLimit, this.fallCostPerHp);
-            } else if (dbgFailure != null) {
-                FallDebug.logProfileFailed(mob, dbgFailure);
-            } else {
-                FallDebug.logProfileOff(mob);
-            }
-            if (DebugLog.throttle("fall-search-" + mob.getId(), 2000L)) {
-                this.fallStats = new FallDebug.SearchStats(mob, this.fallProfile);
-            }
-        }
-    }
-
-    /**
-     * v21 (дебаг [FALL]): пошук закінчено - друкуємо зведення (кандидати вниз, відсічені, глибоке сканування, рівні, які розкрив
-     * A*). {@code super.done()} обнуляє моба, тому статистика тримає власне посилання.
-     */
-    @Override
-    public void done() {
-        FallDebug.SearchStats stats = this.fallStats;
-        this.fallStats = null;
-        Mob searched = this.mob; // super.done() обнуляє моба
-        super.done();
-        if (stats != null) {
-            stats.onRunUp(this.softRunUpRejected);
-            stats.flush(this.dynamicDownLimit, this.fallCostPerHp, this.dropAware);
-        }
-        if (searched != null) {
-            FallDebug.noteSearch(searched, this.lethalRemoved, this.softAdded); // для повідомлення "моб застряг"
-        }
-    }
-
-    @Override
-    public int getNeighbors(Node[] nodes, Node node) {
-        int count = super.getNeighbors(nodes, node);
-        if (this.fallStats != null) {
-            this.fallStats.onExpand(node); // v21: на яких рівнях Y A* розкриває вузли (чи дивиться він НИЖЧЕ за старт)
-        }
-        if (this.dropAware) {
-            count = applyDropCosts(nodes, count, node); // v22: ванільні ребра зриву з краю теж мають ціну за шкоду
-        }
-        final int vanillaCount = count;
-        boolean probe = isProbeStart(node);
-        // v17: "повністю відкрита клітинка" - це 8 сусідів БЕЗ СПУСКІВ (суцільна поверхня на одному рівні): жоден напрямок не має
-        // провалля на рівні старту, тож скан дав би порожньо. Але коли ПІД платформою є ще одна поверхня (підлога під паркуром),
-        // кожен із 8 напрямків теж "прохідний" - як спуск на 1+ блок, - і рівно 8 сусідів має САМ край платформи, звідки стрибок
-        // якраз потрібен. Раніше скан для такого вузла пропускався: ребра на наступну сходинку не було (A* вів моба в обхід),
-        // а гоал "підстрибував на місці". Ванільні сусіди не містять уже закритих вузлів, тому рівно 8 зазвичай буває у стартового
-        // вузла пошуку (поруч іще нічого не закрито): саме від нього починається кожен свіжий шлях, зокрема ланцюжок стрибків.
-        if (count >= ALL_NORMAL_NEIGHBORS && !hasStepDownNeighbor(nodes, count, node)) {
-            if (probe) {
-                GraphProbe.logText(this.mob, "стрибкові ребра НЕ скануються: клітинка повністю відкрита (" + count + " сусідів, без спусків)");
-                GraphProbe.disarm();
-            }
-            return count; // суцільна поверхня на одному рівні - тут стрибок ніколи не потрібен, не скануємо
-        }
-        if (probe && count >= ALL_NORMAL_NEIGHBORS) {
-            GraphProbe.logText(this.mob, "8 сусідів, але серед них є спуски (під платформою інша поверхня): стрибкові ребра СКАНУЮТЬСЯ");
-        }
-        BlockPos origin = new BlockPos(node.x, node.y, node.z);
-        BlockPos floorPos = origin.below();
-        BlockState floor = getBlockStateAt(floorPos);
-        if (floor == null || this.mob == null) {
-            return count;
-        }
-        var level = this.mob.level();
-        GapJumpPhysics.Takeoff takeoff = GapJumpUtils.takeoffOf(floor, level, floorPos, this.mob);
-
-        // Точна геометрія (ShapeJump) - лише де є нерегулярна форма; на повних блоках лишається старий код.
-        JumpCtx ctx = new JumpCtx(node, origin, exactReady() && columnIsIrregular(node.x, node.y, node.z));
-        if (this.fallStats != null) {
-            this.fallStats.onScan();
-        }
-
-        byte[] frontCache = new byte[9]; // стан 8 клітинок перед краєм НА РІВНІ СТАРТУ; ключ (dx+1)*3+(dz+1)
-        // Дальність залежить від блока, З ЯКОГО моб відривається (тертя / speedFactor / jumpFactor): лід - далі,
-        // слайм, пісок душ, мед - ближче; і від Δy (вгору - вікно коротше, тож і дальність менша, навіть на
-        // звичайному блоці; вниз - трохи більша). Тому рахуємо тут, для КОЖНОГО вузла й для КОЖНОГО рівня Δy
-        // окремо під час побудови шляху, а не одним числом на всього моба й не перед самим стрибком.
-        // ПОВНИЙ діапазон -JUMP_DOWN_LIMIT_BLOCKS..+JUMP_UP_LIMIT_BLOCKS (не лише крайні значення): щоб моб
-        // міг приземлитись саме на НАЙБЛИЖЧУ доступну сходинку, а не тільки на найглибшу з можливих (наприклад,
-        // сходи в 3 рівні - Δy=-1 на першу, Δy=-2 на другу, Δy=-3 на третю, кожна свій кандидат).
-        // v16: кандидати збираємо ОКРЕМО для кожного Δy й лише потім ділимо буфер (NeighborBudget). Раніше всі Δy писали в
-        // один буфер за зростанням Δy (-3..+1): велика платформа внизу (десятки посадок з Δy=-1) займала всі 32 слоти, а Δy=0
-        // і Δy=+1 лишались без жодного - ребра вгору на наступну сходинку в графі не було (див. NeighborBudget).
-        final int legacyDown = GapJumpPhysics.JUMP_DOWN_LIMIT_BLOCKS;
-        // v20: нижній предел ДИНАМІЧНИЙ (див. prepare): що моб переживе, але не менше старого -3. Глибші за -3 рівні скануються
-        // нижче лише за потреби (scanLevel).
-        final int downLimit = Math.max(legacyDown, this.dynamicDownLimit);
-        final int levels = downLimit + GapJumpPhysics.JUMP_UP_LIMIT_BLOCKS + 1;
-        Node[][] buckets = new Node[levels][];
-        int[] sizes = new int[levels];
-        this.takeoffApex = this.fallProfile == null ? 0.0
-                : FallMath.apexHeight(GapJumpPhysics.JUMP_VERTICAL_VELOCITY * takeoff.jumpFactor(),
-                GapJumpPhysics.GRAVITY_PER_TICK, GapJumpPhysics.VERTICAL_DRAG_PER_TICK);
-        this.minJumpDamage = Float.MAX_VALUE;
-        int shallowCandidates = 0;
-        for (int dy = -legacyDown; dy <= GapJumpPhysics.JUMP_UP_LIMIT_BLOCKS; dy++) {
-            shallowCandidates += scanLevel(nodes, ctx, takeoff, frontCache, dy, buckets, sizes, downLimit);
-        }
-        // v20: ЛІНИВО глибші рівні (-4..-downLimit): лише коли мілких приземлень нема зовсім або жодне не БЕЗКОШТОВНЕ (є шкода).
-        // Тоді шукаємо місце, з якого можна стрибнути з НАЙМЕНШОЮ шкодою (вода, сіно, нижча платформа), і зупиняємось, щойно
-        // знайшли приземлення без шкоди. У звичайному паркурі (є безкоштовна платформа поруч) це нічого не додає до вартості пошуку.
-        if (downLimit > legacyDown && (shallowCandidates == 0 || this.minJumpDamage > 0.0F)) {
-            if (this.fallStats != null) {
-                this.fallStats.deepTriggered++;
-            }
-            for (int dy = -legacyDown - 1; dy >= -downLimit; dy--) {
-                scanLevel(nodes, ctx, takeoff, frontCache, dy, buckets, sizes, downLimit);
-                if (this.minJumpDamage <= 0.0F) {
-                    break;
-                }
-            }
-        } else if (this.fallStats != null && downLimit > legacyDown) {
-            // v21: глибші рівні НЕ скануються, бо хоч де-небудь (навіть у зайвий бік) уже є безкоштовне приземлення
-            this.fallStats.deepSkippedFree++;
-        }
-        int roomForJumps = nodes.length - count;
-        int candidates = 0;
-        for (int size : sizes) {
-            candidates += size;
-        }
-        if (this.fallStats != null) {
-            this.fallStats.onLevels(sizes, downLimit);
-        }
-        count = NeighborBudget.merge(buckets, sizes, nodes, count);
-        if (candidates > roomForJumps) {
-            // Буфер не вмістив усіх кандидатів - далі решту відсікає NeighborBudget (порівну між Δy). Показуємо це в лозі: раніше
-            // така втрата була мовчазною й виглядала як "моб не бачить наступного стрибка".
-            final String overflow = "буфер сусідів (" + nodes.length + ") переповнено у вузлі (" + node.x + "," + node.y + "," + node.z
-                    + "): кандидатів на стрибок=" + candidates + " за Δy [" + describeLevels(sizes, downLimit)
-                    + "], місця було " + roomForJumps + " -> взято ["
-                    + describeLevels(NeighborBudget.share(sizes, roomForJumps), downLimit) + "]";
-            if (probe) {
-                GraphProbe.logText(this.mob, overflow);
-            } else {
-                DebugLog.logThrottled(DebugLog.Cat.GRAPH, this.mob, "graph-overflow-" + this.mob.getId(), 3000L, () -> overflow);
-            }
-        }
-        count = addHops(nodes, count, ctx, frontCache);
-        count = addExtraJumps(nodes, count, ctx);
-        count = addSoftLandings(nodes, count, vanillaCount, node, origin, ctx, takeoff, frontCache); // v23
-        if (probe) {
-            GraphProbe.logNodes(this.mob, "ПІСЛЯ стрибкових ребер і гопів (фінальний список для A*)", node, nodes, count);
-            StringBuilder fronts = new StringBuilder("стан 'першої клітинки перед краєм' на рівні старту (VOID = вважається проваллям -> породжує стрибок; originIrregular=")
-                    .append(ctx.originIrregular).append("):");
-            for (int k = 0; k < frontCache.length; k++) {
-                if (frontCache[k] == UNKNOWN) {
-                    continue;
-                }
-                String st = frontCache[k] == WALKABLE ? "WALKABLE" : frontCache[k] == VOID ? "VOID" : "BLOCKED";
-                fronts.append(" (").append(k / 3 - 1).append(',').append(k % 3 - 1).append(")=").append(st);
-            }
-            GraphProbe.logText(this.mob, fronts.toString());
-            GraphProbe.disarm();
-        }
-        return count;
     }
 
     /**
@@ -996,21 +640,292 @@ public class GapJumpNodeEvaluator extends ShapeAwareNodeEvaluator {
         return kept;
     }
 
+    // ------------------------------------------------------------------------------------------
+    // v23: м'які приземлення (вода/сіно/драбини/ліжко...) як цілі стрибка RNJ
+    // ------------------------------------------------------------------------------------------
     /**
-     * Скільки з 4 сусідніх клітинок (того ж рівня) теж м'які: допуск на промах, 0 - одиночний блок, 4 - центр басейну 3x3.
+     * Шкода стрибка на близьку платформу - як від збігу з краю (без апекса), якщо RNJ так і виконає ({@code hopWalkOffDamage}).
      */
-    private int softMargin(BlockPos landing) {
-        int margin = 0;
-        for (int[] d : SOFT_NEIGHBORS) {
-            BlockPos c = landing.offset(d[0], 0, d[1]);
-            BlockState b = getBlockStateAt(c.below());
-            BlockState f = getBlockStateAt(c);
-            BlockState h = getBlockStateAt(c.above());
-            if (b != null && f != null && h != null && SoftLandings.kindOf(b, f, h) != null) {
-                margin++;
+    private boolean walkOffModel;
+    /**
+     * Коридор стрибка вниз з допуском на дотичне зачеплення кута ({@code corridorGlance}).
+     */
+    private boolean glanceCorridor;
+    /**
+     * Фізика опори відриву поточного вузла (та сама, що в getNeighbors).
+     */
+    private GapJumpPhysics.Takeoff takeoffModel;
+    /**
+     * З поточного вузла досяжне м'яке приземлення (результат addSoftLandings) - тоді тверді спуски теж штрафуються пріоритетом.
+     */
+    private boolean softReachableHere;
+    /**
+     * Кеш "збіг без стрибка" для кандидата (dx, dz, dy) поточного вузла: ключ і значення.
+     */
+    private BlockPos walkOffCacheOrigin;
+    private long walkOffCacheKey;
+    private boolean walkOffCacheValue;
+    private int hardAdded;
+    private int hardLethal;
+
+    private static int indexOfCell(Node[] nodes, int count, int x, int y, int z) {
+        for (int i = 0; i < count; i++) {
+            Node c = nodes[i];
+            if (c.x == x && c.y == y && c.z == z) {
+                return i;
             }
         }
-        return margin;
+        return -1;
+    }
+
+    /**
+     * Копія вузла з іншою ціною (спільний вузол пошуку міняти не можна: інші шляхи на ту саму клітинку теж заплатили б).
+     */
+    private static Node copyWithMalus(Node source, float malus) {
+        Node copy = source instanceof DropNode ? new DropNode(source.x, source.y, source.z) : new Node(source.x, source.y, source.z);
+        copy.type = source.type;
+        copy.costMalus = malus;
+        return copy;
+    }
+
+    private static int gcd(int a, int b) {
+        while (b != 0) {
+            int t = a % b;
+            a = b;
+            b = t;
+        }
+        return a;
+    }
+
+    @Override
+    public void prepare(PathNavigationRegion level, Mob mob) {
+        super.prepare(level, mob);
+        this.exactJumps = ShapeSettings.enabledFor(mob);
+        // v20: профіль падіння моба на час ЦЬОГО пошуку (здоров'я, золоті серця, Опір, чари, безпечна висота). Динамічний
+        // нижній предел = те, що моб переживе на звичайний блок (не менше старого -3, не більше стелі з конфігу).
+        this.fallProfile = null;
+        this.dynamicDownLimit = GapJumpPhysics.JUMP_DOWN_LIMIT_BLOCKS;
+        // v21 (дебаг [FALL]): що саме порахував цей пошук - див. FallDebug.logProfile
+        int dbgCap = -1;
+        double dbgApex = 0.0;
+        int dbgSurvivable = -1;
+        RuntimeException dbgFailure = null;
+        if (mob != null && Config.FALL_DAMAGE_AWARE_JUMPS.get()) {
+            try {
+                FallMath.Profile profile = FallDamage.profileOf(mob);
+                int cap = Config.JUMP_DOWN_MAX_BLOCKS.get();
+                double apex = FallMath.apexHeight(GapJumpPhysics.JUMP_VERTICAL_VELOCITY, GapJumpPhysics.GRAVITY_PER_TICK,
+                        GapJumpPhysics.VERTICAL_DRAG_PER_TICK);
+                int survivable = FallMath.maxSurvivableDrop(profile, apex, cap);
+                this.fallProfile = profile;
+                this.fallCostPerHp = Config.FALL_DAMAGE_COST_PER_HP.get().floatValue();
+                this.dynamicDownLimit = Math.max(GapJumpPhysics.JUMP_DOWN_LIMIT_BLOCKS, Math.min(cap, survivable));
+                dbgCap = cap;
+                dbgApex = apex;
+                dbgSurvivable = survivable;
+            } catch (RuntimeException ex) {
+                this.fallProfile = null; // будь-яка проблема з читанням моба - стара поведінка, а не зламаний пошук шляху
+                dbgFailure = ex;         // v21: раніше цей виняток ковтався мовчки - тепер його видно в [FALL]
+            }
+        }
+        this.dropAware = this.fallProfile != null && Config.DROP_DAMAGE_AWARE.get();
+        // v23: налаштування м'яких приземлень цього пошуку
+        this.dropViaRnj = Config.DROP_VIA_RNJ.get();
+        this.softEnabled = false;
+        this.softIndex = null;
+        this.softColumnCache.clear();
+        this.runUpCheck = Config.SOFT_LANDING_RUNUP_CHECK.get();
+        this.softRunUpRejected = 0;
+        this.lethalRemoved = 0;
+        this.softAdded = 0;
+        // v25: спуски по сходинках
+        this.walkOffModel = Config.HOP_WALK_OFF_DAMAGE.get();
+        this.glanceCorridor = Config.CORRIDOR_GLANCE.get();
+        this.hardDropsEnabled = false;
+        this.takeoffModel = null;
+        this.softReachableHere = false;
+        this.walkOffCacheOrigin = null;
+        this.hardAdded = 0;
+        this.hardLethal = 0;
+        if (mob != null) {
+            Vec3 chase = PursuitEnemyBehavior.getChasePosition(mob);
+            if (chase != null) { // лише переслідувачі: решта мобів м'яких приземлень і спусків по сходинках не шукає
+                this.softTargetY = chase.y;
+                if (Config.SOFT_LANDING_SEARCH.get()) {
+                    this.softEnabled = true;
+                    this.softMaxDepth = Config.SOFT_LANDING_MAX_DEPTH.get();
+                    this.softPriority = Config.SOFT_LANDING_PRIORITY.get().floatValue();
+                }
+                if (this.dropAware && this.dropViaRnj && Config.WALK_OFF_ANY_DEPTH.get()) {
+                    this.hardDropsEnabled = true;
+                    this.hardMaxDepth = Config.WALK_OFF_MAX_DEPTH.get();
+                }
+            }
+        }
+        this.fallStats = null;
+        if (DebugLog.on(DebugLog.Cat.FALL) && FallDebug.relevant(mob)) {
+            if (this.fallProfile != null) {
+                FallDebug.logProfile(mob, this.fallProfile, dbgCap, dbgApex, dbgSurvivable, this.dynamicDownLimit, this.fallCostPerHp);
+            } else if (dbgFailure != null) {
+                FallDebug.logProfileFailed(mob, dbgFailure);
+            } else {
+                FallDebug.logProfileOff(mob);
+            }
+            if (DebugLog.throttle("fall-search-" + mob.getId(), 2000L)) {
+                this.fallStats = new FallDebug.SearchStats(mob, this.fallProfile);
+            }
+        }
+    }
+
+    /**
+     * v21 (дебаг [FALL]): пошук закінчено - друкуємо зведення (кандидати вниз, відсічені, глибоке сканування, рівні, які розкрив
+     * A*). {@code super.done()} обнуляє моба, тому статистика тримає власне посилання.
+     */
+    @Override
+    public void done() {
+        FallDebug.SearchStats stats = this.fallStats;
+        this.fallStats = null;
+        Mob searched = this.mob; // super.done() обнуляє моба
+        super.done();
+        if (stats != null) {
+            stats.onRunUp(this.softRunUpRejected);
+            stats.onHard(this.hardDropsEnabled, this.hardAdded, this.hardLethal);
+            stats.flush(this.dynamicDownLimit, this.fallCostPerHp, this.dropAware);
+        }
+        if (searched != null) {
+            FallDebug.noteSearch(searched, this.lethalRemoved, this.softAdded); // для повідомлення "моб застряг"
+        }
+    }
+
+    @Override
+    public int getNeighbors(Node[] nodes, Node node) {
+        int count = super.getNeighbors(nodes, node);
+        if (this.fallStats != null) {
+            this.fallStats.onExpand(node); // v21: на яких рівнях Y A* розкриває вузли (чи дивиться він НИЖЧЕ за старт)
+        }
+        if (this.dropAware) {
+            count = applyDropCosts(nodes, count, node); // v22: ванільні ребра зриву з краю теж мають ціну за шкоду
+        }
+        final int vanillaCount = count;
+        boolean probe = isProbeStart(node);
+        // v17: "повністю відкрита клітинка" - це 8 сусідів БЕЗ СПУСКІВ (суцільна поверхня на одному рівні): жоден напрямок не має
+        // провалля на рівні старту, тож скан дав би порожньо. Але коли ПІД платформою є ще одна поверхня (підлога під паркуром),
+        // кожен із 8 напрямків теж "прохідний" - як спуск на 1+ блок, - і рівно 8 сусідів має САМ край платформи, звідки стрибок
+        // якраз потрібен. Раніше скан для такого вузла пропускався: ребра на наступну сходинку не було (A* вів моба в обхід),
+        // а гоал "підстрибував на місці". Ванільні сусіди не містять уже закритих вузлів, тому рівно 8 зазвичай буває у стартового
+        // вузла пошуку (поруч іще нічого не закрито): саме від нього починається кожен свіжий шлях, зокрема ланцюжок стрибків.
+        if (count >= ALL_NORMAL_NEIGHBORS && !hasStepDownNeighbor(nodes, count, node)) {
+            if (probe) {
+                GraphProbe.logText(this.mob, "стрибкові ребра НЕ скануються: клітинка повністю відкрита (" + count + " сусідів, без спусків)");
+                GraphProbe.disarm();
+            }
+            return count; // суцільна поверхня на одному рівні - тут стрибок ніколи не потрібен, не скануємо
+        }
+        if (probe && count >= ALL_NORMAL_NEIGHBORS) {
+            GraphProbe.logText(this.mob, "8 сусідів, але серед них є спуски (під платформою інша поверхня): стрибкові ребра СКАНУЮТЬСЯ");
+        }
+        BlockPos origin = new BlockPos(node.x, node.y, node.z);
+        BlockPos floorPos = origin.below();
+        BlockState floor = getBlockStateAt(floorPos);
+        if (floor == null || this.mob == null) {
+            return count;
+        }
+        var level = this.mob.level();
+        GapJumpPhysics.Takeoff takeoff = GapJumpUtils.takeoffOf(floor, level, floorPos, this.mob);
+
+        // Точна геометрія (ShapeJump) - лише де є нерегулярна форма; на повних блоках лишається старий код.
+        JumpCtx ctx = new JumpCtx(node, origin, exactReady() && columnIsIrregular(node.x, node.y, node.z));
+        if (this.fallStats != null) {
+            this.fallStats.onScan();
+        }
+
+        byte[] frontCache = new byte[9]; // стан 8 клітинок перед краєм НА РІВНІ СТАРТУ; ключ (dx+1)*3+(dz+1)
+        // Дальність залежить від блока, З ЯКОГО моб відривається (тертя / speedFactor / jumpFactor): лід - далі,
+        // слайм, пісок душ, мед - ближче; і від Δy (вгору - вікно коротше, тож і дальність менша, навіть на
+        // звичайному блоці; вниз - трохи більша). Тому рахуємо тут, для КОЖНОГО вузла й для КОЖНОГО рівня Δy
+        // окремо під час побудови шляху, а не одним числом на всього моба й не перед самим стрибком.
+        // ПОВНИЙ діапазон -JUMP_DOWN_LIMIT_BLOCKS..+JUMP_UP_LIMIT_BLOCKS (не лише крайні значення): щоб моб
+        // міг приземлитись саме на НАЙБЛИЖЧУ доступну сходинку, а не тільки на найглибшу з можливих (наприклад,
+        // сходи в 3 рівні - Δy=-1 на першу, Δy=-2 на другу, Δy=-3 на третю, кожна свій кандидат).
+        // v16: кандидати збираємо ОКРЕМО для кожного Δy й лише потім ділимо буфер (NeighborBudget). Раніше всі Δy писали в
+        // один буфер за зростанням Δy (-3..+1): велика платформа внизу (десятки посадок з Δy=-1) займала всі 32 слоти, а Δy=0
+        // і Δy=+1 лишались без жодного - ребра вгору на наступну сходинку в графі не було (див. NeighborBudget).
+        final int legacyDown = GapJumpPhysics.JUMP_DOWN_LIMIT_BLOCKS;
+        // v20: нижній предел ДИНАМІЧНИЙ (див. prepare): що моб переживе, але не менше старого -3. Глибші за -3 рівні скануються
+        // нижче лише за потреби (scanLevel).
+        final int downLimit = Math.max(legacyDown, this.dynamicDownLimit);
+        final int levels = downLimit + GapJumpPhysics.JUMP_UP_LIMIT_BLOCKS + 1;
+        Node[][] buckets = new Node[levels][];
+        int[] sizes = new int[levels];
+        this.takeoffModel = takeoff;
+        this.walkOffCacheOrigin = null;
+        this.takeoffApex = this.fallProfile == null ? 0.0
+                : FallMath.apexHeight(GapJumpPhysics.JUMP_VERTICAL_VELOCITY * takeoff.jumpFactor(),
+                GapJumpPhysics.GRAVITY_PER_TICK, GapJumpPhysics.VERTICAL_DRAG_PER_TICK);
+        this.minJumpDamage = Float.MAX_VALUE;
+        int shallowCandidates = 0;
+        for (int dy = -legacyDown; dy <= GapJumpPhysics.JUMP_UP_LIMIT_BLOCKS; dy++) {
+            shallowCandidates += scanLevel(nodes, ctx, takeoff, frontCache, dy, buckets, sizes, downLimit);
+        }
+        // v20: ЛІНИВО глибші рівні (-4..-downLimit): лише коли мілких приземлень нема зовсім або жодне не БЕЗКОШТОВНЕ (є шкода).
+        // Тоді шукаємо місце, з якого можна стрибнути з НАЙМЕНШОЮ шкодою (вода, сіно, нижча платформа), і зупиняємось, щойно
+        // знайшли приземлення без шкоди. У звичайному паркурі (є безкоштовна платформа поруч) це нічого не додає до вартості пошуку.
+        if (downLimit > legacyDown && (shallowCandidates == 0 || this.minJumpDamage > 0.0F)) {
+            if (this.fallStats != null) {
+                this.fallStats.deepTriggered++;
+            }
+            for (int dy = -legacyDown - 1; dy >= -downLimit; dy--) {
+                scanLevel(nodes, ctx, takeoff, frontCache, dy, buckets, sizes, downLimit);
+                if (this.minJumpDamage <= 0.0F) {
+                    break;
+                }
+            }
+        } else if (this.fallStats != null && downLimit > legacyDown) {
+            // v21: глибші рівні НЕ скануються, бо хоч де-небудь (навіть у зайвий бік) уже є безкоштовне приземлення
+            this.fallStats.deepSkippedFree++;
+        }
+        int roomForJumps = nodes.length - count;
+        int candidates = 0;
+        for (int size : sizes) {
+            candidates += size;
+        }
+        if (this.fallStats != null) {
+            this.fallStats.onLevels(sizes, downLimit);
+        }
+        count = NeighborBudget.merge(buckets, sizes, nodes, count);
+        if (candidates > roomForJumps) {
+            // Буфер не вмістив усіх кандидатів - далі решту відсікає NeighborBudget (порівну між Δy). Показуємо це в лозі: раніше
+            // така втрата була мовчазною й виглядала як "моб не бачить наступного стрибка".
+            final String overflow = "буфер сусідів (" + nodes.length + ") переповнено у вузлі (" + node.x + "," + node.y + "," + node.z
+                    + "): кандидатів на стрибок=" + candidates + " за Δy [" + describeLevels(sizes, downLimit)
+                    + "], місця було " + roomForJumps + " -> взято ["
+                    + describeLevels(NeighborBudget.share(sizes, roomForJumps), downLimit) + "]";
+            if (probe) {
+                GraphProbe.logText(this.mob, overflow);
+            } else {
+                DebugLog.logThrottled(DebugLog.Cat.GRAPH, this.mob, "graph-overflow-" + this.mob.getId(), 3000L, () -> overflow);
+            }
+        }
+        count = addHops(nodes, count, ctx, frontCache);
+        count = addExtraJumps(nodes, count, ctx);
+        this.softReachableHere = false;
+        count = addSoftLandings(nodes, count, vanillaCount, node, origin, ctx, takeoff, frontCache); // v23
+        count = addAdjacentDrops(nodes, count, origin);                                              // v25
+        if (probe) {
+            GraphProbe.logNodes(this.mob, "ПІСЛЯ стрибкових ребер і гопів (фінальний список для A*)", node, nodes, count);
+            StringBuilder fronts = new StringBuilder("стан 'першої клітинки перед краєм' на рівні старту (VOID = вважається проваллям -> породжує стрибок; originIrregular=")
+                    .append(ctx.originIrregular).append("):");
+            for (int k = 0; k < frontCache.length; k++) {
+                if (frontCache[k] == UNKNOWN) {
+                    continue;
+                }
+                String st = frontCache[k] == WALKABLE ? "WALKABLE" : frontCache[k] == VOID ? "VOID" : "BLOCKED";
+                fronts.append(" (").append(k / 3 - 1).append(',').append(k % 3 - 1).append(")=").append(st);
+            }
+            GraphProbe.logText(this.mob, fronts.toString());
+            GraphProbe.disarm();
+        }
+        return count;
     }
 
     /**
@@ -1070,8 +985,164 @@ public class GapJumpNodeEvaluator extends ShapeAwareNodeEvaluator {
     }
 
     /**
-     * Шкода від збігу з краю (без стрибка: падіння рівно на різницю рівнів) на клітинку {@code (x, y, z)}.
+     * @param dy          landing.y - origin.y: {@code 0} - рівний стрибок, {@code >0} - вгору, {@code <0} - вниз
+     *                    (у межах {@code -JUMP_DOWN_LIMIT_BLOCKS..+JUMP_UP_LIMIT_BLOCKS} - {@link #getNeighbors})
      */
+    private int tryRay(Node[] nodes, int count, JumpCtx ctx, GapJumpRays.Ray ray, byte[] frontCache, int dy) {
+        BlockPos origin = ctx.origin;
+        // 1. Край у цьому напрямку? Перша клітинка має бути справжнім проваллям, ЗАВЖДИ на рівні СТАРТУ
+        //    (dy тут НЕ підставляємо - "лесенка", де порожньо на обох поверхах, інакше не розпізнається як
+        //    провалля). Якщо вона прохідна - звичайний крок з цього вже впорається (а стрибок згенерується
+        //    з наступної клітинки); якщо там стіна - крізь неї не стрибаємо.
+        int frontIndex = (ray.frontX() + 1) * 3 + (ray.frontZ() + 1);
+        if (frontCache[frontIndex] == UNKNOWN) {
+            frontCache[frontIndex] = classifyStartFront(ctx, ray.frontX(), ray.frontZ());
+        }
+        if (frontCache[frontIndex] != VOID) {
+            return count;
+        }
+
+        // 2. Приземлення вздовж променя, на рівні origin.y + dy. ПЕРШЕ придатне - звичайний стрибок. Далі
+        //    сканування ТРИВАЄ: якщо за цією платформою знову провалля (на ЇЇ рівні, тобто теж +dy), а ще
+        //    далі (у межах дальності) - нова платформа, то це ПЕРЕСТРИБУВАННЯ: один довгий стрибок НАД
+        //    проміжною платформою замість двох коротких (▣▢▣▢▣ - з 1-го блока одразу на 3-й).
+        boolean landed = false;      // на цьому промені вже додано хоча б одне приземлення
+        boolean voidBehind = false;  // після останньої придатної клітинки на промені була порожнеча
+        // ...і з неї: за клітинкою є опора, але пішки не дійти (ряд відкритих люків) - випадок, якого раніше не було
+        boolean unreachableBehind = false;
+        // Відстань і повна вартість (відстань + malus) ребра ПЕРШОГО приземлення на промені: від них відлічується
+        // вартість подальших перестрибувань у нерегулярній зоні (див. skipJumpNode)
+        double anchorDistance = 0.0;
+        double anchorCost = 0.0;
+        for (int k = ray.kMin(); k <= ray.kMax(); k++) {
+            int dx = ray.stepX() * k;
+            int dz = ray.stepZ() * k;
+            if (!isStandable(origin, dx, dz, dy)) {
+                if (landed) {
+                    voidBehind = true; // (це може бути й стіна - коридор наступного кандидата її відсіче)
+                    unreachableBehind = false;
+                }
+                continue;
+            }
+            // v20: приземлення, яке моб не переживе (з урахуванням здоров'я, ефектів, чарів і блока внизу) - як відсутнє:
+            // кандидат НЕ створюється, промінь триває (далі може бути безпечніша платформа чи вода).
+            if (dy < 0 && !landingAllowed(origin, dx, dz, dy)) {
+                if (this.fallStats != null) {
+                    dbgLethal(origin, dx, dz, dy);
+                }
+                if (landed) {
+                    voidBehind = true;
+                    unreachableBehind = false;
+                }
+                continue;
+            }
+            // Придатна клітинка. Кандидат - якщо це перше приземлення, або перед нею була порожнеча
+            // (інакше це просто продовження тієї ж платформи, ногами й так дійдемо).
+            if (!landed || voidBehind) {
+                // "Додатковий" кандидат існує ЛИШЕ завдяки новому правилу (опора є, але пішки не дійти). Його ребро
+                // йде в кінець списку сусідів (див. addExtraJumps) і не може витіснити звичайне: усе, що було до цієї
+                // правки, лишається в списку на своїх місцях і в тому ж порядку (змінилась лише вартість
+                // перестрибувань у нерегулярній зоні - див. skipJumpNode).
+                boolean extra = landed && unreachableBehind;
+                if (involvesIrregular(ctx, ray, k, dx, dz, dy)) {
+                    // Нестандартна форма (опора чи коридор): рішення приймає геометрія й симуляція польоту,
+                    // а не грубі "центр клітинки" / "виступ вище кроку". Відхилений кандидат НЕ закриває
+                    // промінь: далі по ньому може бути інша платформа.
+                    if (!extra && count >= nodes.length) {
+                        return count;
+                    }
+                    Spot[] from = fromSpotsOf(ctx);
+                    boolean ok = from.length == 0
+                            ? isCorridorClear(origin, corridorOf(ray, k, dy), dy) // немає точок відриву - як раніше
+                            : exactJumpOk(ctx, from, dx, dz, dy);
+                    if (ok) {
+                        // Перше приземлення - як завжди; подальші (перестрибування) в нерегулярній зоні - за єдиним
+                        // правилом skipJumpNode, і старі, і нові.
+                        Node jump = landed
+                                ? skipJumpNode(origin, dx, dz, dy, anchorDistance, anchorCost)
+                                : jumpNode(origin, dx, dz, dy, false);
+                        if (!landed) {
+                            anchorDistance = Math.sqrt((double) dx * dx + (double) dz * dz);
+                            anchorCost = anchorDistance + jump.costMalus - this.lastJumpPenalty; // v20: штраф за шкоду кожне приземлення рахує саме
+                        }
+                        if (extra) {
+                            ctx.addExtra(jump);
+                        } else {
+                            nodes[count++] = jump;
+                        }
+                        landed = true;
+                    }
+                } else if (!extra) {
+                    // Звичайні блоки - старий код. (Сюди не потрапляємо з нестандартної опори відриву: там
+                    // involvesIrregular завжди true, а промені для звичайної опори якраз у межах дальності.)
+                    // Коридор польоту (разом із проміжною платформою й проваллями між) має бути вільний.
+                    // Якщо ні - то й далі по променю заблоковано.
+                    if (!isCorridorClear(origin, corridorOf(ray, k, dy), dy)) {
+                        return count;
+                    }
+                    if (count >= nodes.length) {
+                        return count;
+                    }
+                    Node jump = jumpNode(origin, dx, dz, dy, landed);
+                    nodes[count++] = jump;
+                    if (!landed) {
+                        anchorDistance = Math.sqrt((double) dx * dx + (double) dz * dz);
+                        anchorCost = anchorDistance + jump.costMalus - this.lastJumpPenalty; // v20: штраф за шкоду кожне приземлення рахує саме
+                    }
+                    landed = true;
+                }
+            }
+            // Чи закінчується тут платформа? Тільки тоді наступну придатну клітинку на промені можна перестрибнути.
+            // Для повних блоків - одразу за нею провалля (на ЇЇ Ж рівні +dy); для нерегулярних форм (ряд відкритих
+            // люків) - ще й коли з неї на наступну клітинку НЕ можна ступити пішки, хоч підлога там і є (див.
+            // platformEnd). Для променів із кроком >1 клітинки "клітинка за" береться тією самою відносною
+            // позицією, що й перша клітинка від краю (лінія періодична).
+            byte behind = platformEnd(ctx, ray, dx, dz, dy);
+            voidBehind = behind != BEHIND_NO_GAP;
+            unreachableBehind = behind == BEHIND_UNREACHABLE;
+        }
+        return count;
+    }
+
+    /** v20: шкода (HP, після Опору й чарів, до поглинання) від приземлення на {@code origin + (dx,dy,dz)} стрибком із цього вузла. */
+    private float fallDamageOf(BlockPos origin, int dx, int dz, int dy) {
+        FallMath.Profile profile = this.fallProfile;
+        if (profile == null) {
+            return 0.0F;
+        }
+        double apex = this.takeoffApex;
+        if (apex > 0.0 && this.walkOffModel && willWalkOff(origin, dx, dz, dy)) {
+            apex = 0.0; // v25: RNJ зійде з краю без стрибка - падає лише різниця рівнів, а не апекс + різниця
+        }
+        double fall = FallMath.fallBlocks(apex, dy);
+        if (fall <= profile.safeFall()) {
+            return 0.0F; // швидкий вихід: без звернень до світу
+        }
+        BlockPos landing = origin.offset(dx, dy, dz);
+        BlockState below = getBlockStateAt(landing.below());
+        BlockState feet = getBlockStateAt(landing);
+        BlockState head = getBlockStateAt(landing.above());
+        double multiplier = below == null || feet == null || head == null
+                ? 1.0 : FallLanding.multiplier(below, feet, head); // v22: + драбини/ліани
+        return FallMath.damageAfterReductions(profile, fall, multiplier);
+    }
+
+    /** Скільки з 4 сусідніх клітинок (того ж рівня) теж м'які: допуск на промах, 0 - одиночний блок, 4 - центр басейну 3x3. */
+    private int softMargin(BlockPos landing) {
+        int margin = 0;
+        for (int[] d : SOFT_NEIGHBORS) {
+            BlockPos c = landing.offset(d[0], 0, d[1]);
+            BlockState b = getBlockStateAt(c.below());
+            BlockState f = getBlockStateAt(c);
+            BlockState h = getBlockStateAt(c.above());
+            if (b != null && f != null && h != null && SoftLandings.kindOf(b, f, h) != null) {
+                margin++;
+            }
+        }
+        return margin;
+    }
+
+    /** Шкода від збігу з краю (без стрибка: падіння рівно на різницю рівнів) на клітинку {@code (x, y, z)}. */
     private float walkOffDamage(FallMath.Profile profile, BlockPos origin, int x, int y, int z) {
         int drop = origin.getY() - y;
         if (drop <= profile.safeFall()) {
@@ -1083,6 +1154,20 @@ public class GapJumpNodeEvaluator extends ShapeAwareNodeEvaluator {
         BlockState head = getBlockStateAt(landing.above());
         double multiplier = below == null || feet == null || head == null ? 1.0 : FallLanding.multiplier(below, feet, head);
         return FallMath.damageAfterReductions(profile, drop, multiplier);
+    }
+
+    /**
+     * Чи сам вузол - м'яке приземлення (його не штрафуємо як «конкуруючий спуск»): позначений DropNode.soft, доданий цим викликом,
+     * є в індексі, або (звичайний стрибок/крок на воду чи сіно, яких індекс не покриває) за блоками під/в/над клітинкою.
+     */
+    private boolean isSoftTarget(Node c, SoftLandings.Index index, java.util.Set<Node> softSet) {
+        if ((c instanceof DropNode d && d.soft) || softSet.contains(c)) {
+            return true;
+        }
+        if (index != null && index.cellAt(c.x, c.y, c.z) != null) {
+            return true;
+        }
+        return SoftLandings.kindChecked(this::getBlockStateAt, c.x, c.y, c.z) != null;
     }
 
     /**
@@ -1175,6 +1260,7 @@ public class GapJumpNodeEvaluator extends ShapeAwareNodeEvaluator {
             }
         }
         this.softAdded += added;
+        this.softReachableHere = added > 0 || softPresent; // v25: тверді спуски з цього вузла теж отримають пріоритет м'якого
         if (this.fallStats != null) {
             this.fallStats.onSoft(n, added, softPresent, indexSize);
         }
@@ -1192,36 +1278,65 @@ public class GapJumpNodeEvaluator extends ShapeAwareNodeEvaluator {
     }
 
     /**
-     * Чи сам вузол - м'яке приземлення (його не штрафуємо як «конкуруючий спуск»): позначений DropNode.soft, доданий цим викликом,
-     * є в індексі, або (звичайний стрибок/крок на воду чи сіно, яких індекс не покриває) за блоками під/в/над клітинкою.
+     * Підлога колонки {@code (x, z)}: шукається зверху вниз від рівня {@code yTop} (раз на пошук). {@code {вид м'якого або -1 для
+     * твердої, Y клітинки ніг}}, або {@code null} - нема (чи небезпечна). v25: повертає й ТВЕРДУ підлогу - для спусків по сходинках.
      */
-    private boolean isSoftTarget(Node c, SoftLandings.Index index, java.util.Set<Node> softSet) {
-        if ((c instanceof DropNode d && d.soft) || softSet.contains(c)) {
-            return true;
-        }
-        if (index != null && index.cellAt(c.x, c.y, c.z) != null) {
-            return true;
-        }
-        return SoftLandings.kindChecked(this::getBlockStateAt, c.x, c.y, c.z) != null;
-    }
-
-    /**
-     * Колонка {@code (x, z)}: м'яка клітинка шукається зверху вниз від рівня {@code yTop} (раз на пошук). {@code null} - нема.
-     */
-    private int[] softColumn(int x, int z, int yTop) {
+    private int[] floorColumn(int x, int z, int yTop) {
         long key = BlockPos.asLong(x, yTop, z);
         int[] hit = this.softColumnCache.get(key);
         if (hit == null) {
-            hit = SoftLandings.probeColumn(this::getBlockStateAt, x, z, yTop, yTop - this.softMaxDepth);
+            int depth = Math.max(this.softMaxDepth, this.hardMaxDepth);
+            hit = SoftLandings.probeFloor(this::getBlockStateAt, x, z, yTop, yTop - depth);
             this.softColumnCache.put(key, hit == null ? NO_SOFT : hit);
         }
         return hit == NO_SOFT ? null : hit;
     }
 
     /**
-     * М'які клітинки в 8 сусідніх колонках (впритик) - ребра-спуски, яких ванільний пошук не дав (глибше за getMaxFallDistance).
+     * v25: діагональний спуск. Повертає 0 - неможливий (обидва ортогональні боки закриті, чи єдиний відкритий має опору - тоді
+     * це ходьба, а не збіг); 1 - звичайна діагональ (жоден бік не закритий); 2 - КУТОВИЙ (один бік закритий перепоною, напр. стовпом,
+     * другий - провалля): моб сходить з краю відкритим боком {@code exitOut = {exitX, exitZ}}, а діагональ добирає в повітрі.
      */
+    private int diagonalMode(BlockPos origin, int dx, int dz, int[] exitOut) {
+        boolean blockedX = classifyFront(origin, dx, 0, 0) == BLOCKED;
+        boolean blockedZ = classifyFront(origin, 0, dz, 0) == BLOCKED;
+        if (blockedX && blockedZ) {
+            return 0;
+        }
+        if (!blockedX && !blockedZ) {
+            return 1;
+        }
+        if (!this.dropViaRnj) {
+            return 0; // кутовий спуск виконує лише RNJ
+        }
+        byte open = blockedX ? classifyFront(origin, 0, dz, 0) : classifyFront(origin, dx, 0, 0);
+        if (open != VOID) {
+            return 0;
+        }
+        exitOut[0] = blockedX ? 0 : dx;
+        exitOut[1] = blockedX ? dz : 0;
+        return 2;
+    }
+
+    /**
+     * Колонка виходу кутового спуску вільна від падіння з рівня вузла й до рівня приземлення (там моб падає, поки не зсунеться).
+     */
+    private boolean exitColumnClear(BlockPos origin, int exitX, int exitZ, int landingY) {
+        int x = origin.getX() + exitX;
+        int z = origin.getZ() + exitZ;
+        BlockPos.MutableBlockPos p = new BlockPos.MutableBlockPos();
+        for (int y = origin.getY() - 1; y >= landingY; y--) {
+            BlockState s = getBlockStateAt(p.set(x, y, z));
+            if (s == null || s.isSolid()) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /** М'які клітинки в 8 сусідніх колонках (впритик) - ребра-спуски, яких ванільний пошук не дав (глибше за getMaxFallDistance). */
     private int collectAdjacentSoft(Node[] found, int n, BlockPos origin, Node[] nodes, int count) {
+        int[] exit = new int[2];
         for (int dx = -1; dx <= 1; dx++) {
             for (int dz = -1; dz <= 1; dz++) {
                 if ((dx == 0 && dz == 0) || n >= found.length) {
@@ -1230,14 +1345,20 @@ public class GapJumpNodeEvaluator extends ShapeAwareNodeEvaluator {
                 if (classifyFront(origin, dx, dz, 0) != VOID) {
                     continue; // перед нами не провал
                 }
-                if (dx != 0 && dz != 0 && (classifyFront(origin, dx, 0, 0) == BLOCKED || classifyFront(origin, 0, dz, 0) == BLOCKED)) {
-                    continue; // діагональ без зрізання кутів
+                exit[0] = 0;
+                exit[1] = 0;
+                int mode = 1;
+                if (dx != 0 && dz != 0) {
+                    mode = diagonalMode(origin, dx, dz, exit); // v25: кут блока - не заборона, а особливий вихід
+                    if (mode == 0) {
+                        continue;
+                    }
                 }
                 int x = origin.getX() + dx;
                 int z = origin.getZ() + dz;
-                int[] hit = softColumn(x, z, origin.getY() - 1);
-                if (hit == null) {
-                    continue;
+                int[] hit = floorColumn(x, z, origin.getY() - 1);
+                if (hit == null || hit[0] < 0) {
+                    continue; // нема підлоги або вона тверда (твердими займається addAdjacentDrops)
                 }
                 int y = hit[1];
                 int dy = y - origin.getY();
@@ -1247,8 +1368,15 @@ public class GapJumpNodeEvaluator extends ShapeAwareNodeEvaluator {
                 if (indexOfCell(nodes, count, x, y, z) >= 0) {
                     continue; // вже є (ванільне ребро спуску)
                 }
+                if (mode == 2 && !exitColumnClear(origin, exit[0], exit[1], y)) {
+                    continue;
+                }
                 Node soft = softNode(origin, x, y, z, new int[]{hit[0], softMargin(new BlockPos(x, y, z))}, true);
                 if (soft != null) {
+                    if (mode == 2 && soft instanceof DropNode corner) {
+                        corner.exitX = exit[0];
+                        corner.exitZ = exit[1];
+                    }
                     found[n++] = soft;
                 }
             }
@@ -1257,8 +1385,152 @@ public class GapJumpNodeEvaluator extends ShapeAwareNodeEvaluator {
     }
 
     /**
-     * Промені стрибка на рівень {@code dy}: беруться лише клітинки, що є в індексі м'яких.
+     * v25: ТВЕРДІ спуски зі збігом на сусідню клітинку (8 колонок, включно з діагональними й КУТОВИМИ за кутом блока): ребро
+     * {@link DropNode} для RNJ на будь-яку глибину, яку моб переживе ({@code walkOffMaxDepth}), незалежно від ванільного
+     * {@code getMaxFallDistance()}. Без цього після першого падіння (HP менше -> ліміт 12 стає 3-8) ребро на нижню сходинку зникало
+     * з графа і моб ЗАСТРЯГАВ (в логу: жовтий блок, до підлоги 9 блоків при ліміті 8). Вартість - шкода * fallDamageCostPerHp (+
+     * невеликий штраф куту); якщо з вузла досяжне м'яке приземлення - ще й пріоритет м'якого.
      */
+    private int addAdjacentDrops(Node[] nodes, int count, BlockPos origin) {
+        if (!this.hardDropsEnabled || this.mob == null || this.fallProfile == null
+                || origin.getY() - this.softTargetY < HARD_MIN_TARGET_DROP) {
+            return count;
+        }
+        int added = 0;
+        try {
+            FallMath.Profile profile = this.fallProfile;
+            int safeWalk = (int) Math.floor(profile.safeFall());
+            int[] exit = new int[2];
+            boolean full = false;
+            for (int dx = -1; dx <= 1 && !full; dx++) {
+                for (int dz = -1; dz <= 1; dz++) {
+                    if (dx == 0 && dz == 0) {
+                        continue;
+                    }
+                    if (count >= nodes.length) {
+                        full = true;
+                        break;
+                    }
+                    if (classifyFront(origin, dx, dz, 0) != VOID) {
+                        continue;
+                    }
+                    exit[0] = 0;
+                    exit[1] = 0;
+                    int mode = 1;
+                    if (dx != 0 && dz != 0) {
+                        mode = diagonalMode(origin, dx, dz, exit);
+                        if (mode == 0) {
+                            continue;
+                        }
+                    }
+                    int x = origin.getX() + dx;
+                    int z = origin.getZ() + dz;
+                    int[] hit = floorColumn(x, z, origin.getY() - 1);
+                    if (hit == null || hit[0] >= 0) {
+                        continue; // нема підлоги або вона м'яка (м'якими займається collectAdjacentSoft)
+                    }
+                    int y = hit[1];
+                    int drop = origin.getY() - y;
+                    if (drop < 2 || drop > this.hardMaxDepth) {
+                        continue;
+                    }
+                    if (mode == 1 && drop <= safeWalk) {
+                        continue; // дрібне падіння без шкоди - справа ванільного ребра
+                    }
+                    if (indexOfCell(nodes, count, x, y, z) >= 0) {
+                        continue; // ванільне ребро вже є (воно DropNode з ціною шкоди)
+                    }
+                    if (!isStandableCell(x, y, z)) {
+                        continue;
+                    }
+                    if (mode == 2 && !exitColumnClear(origin, exit[0], exit[1], y)) {
+                        continue;
+                    }
+                    float damage = walkOffDamage(profile, origin, x, y, z);
+                    if (damage > 0.0F && !FallMath.survives(profile, damage)) {
+                        this.hardLethal++;
+                        this.lethalRemoved++;
+                        continue; // для цього моба така глибина смертельна
+                    }
+                    DropNode drop3 = new DropNode(x, y, z);
+                    drop3.type = PathType.WALKABLE;
+                    drop3.costMalus = (damage > 0.0F ? damage * this.fallCostPerHp : 0.0F)
+                            + (mode == 2 ? CORNER_DROP_MALUS : 0.0F)
+                            + (this.softReachableHere ? this.softPriority : 0.0F);
+                    drop3.exitX = exit[0];
+                    drop3.exitZ = exit[1];
+                    nodes[count++] = drop3;
+                    added++;
+                }
+            }
+        } catch (RuntimeException ex) {
+            // спуски по сходинках - надбавка: проблема з читанням світу не повинна ламати пошук шляху
+        }
+        this.hardAdded += added;
+        return count;
+    }
+
+    /**
+     * v25: коридор променя; для стрибків ВНИЗ (від 2 блоків) - з допуском на дотичне зачеплення кута.
+     */
+    private int[][] corridorOf(GapJumpRays.Ray ray, int k, int dy) {
+        return this.glanceCorridor && dy <= -2 ? ray.corridorGlance()[k] : ray.corridor()[k];
+    }
+
+    /**
+     * v25: скільки клітинок рівної опори позаду краю у напрямку, ЗВОРОТНОМУ до {@code (dx, dz)} (до {@link #SOFT_RUNUP_MAX_CELLS}).
+     */
+    private int runUpCellsFor(BlockPos origin, int dx, int dz) {
+        int g = gcd(Math.abs(dx), Math.abs(dz));
+        if (g == 0) {
+            return 0;
+        }
+        int sx = dx / g;
+        int sz = dz / g;
+        int m = Math.max(Math.abs(sx), Math.abs(sz));
+        int cells = 0;
+        for (int j = 1; j <= SOFT_RUNUP_MAX_CELLS; j++) {
+            int bx = -Math.round((float) (j * sx) / m);
+            int bz = -Math.round((float) (j * sz) / m);
+            if (!hasFloorAt(origin, bx, bz, 0)) {
+                break;
+            }
+            cells = j;
+        }
+        return cells;
+    }
+
+    /**
+     * v25: чи виконає RNJ стрибок на {@code origin + (dx, dy, dz)} ЗБІГОМ БЕЗ СТРИБКА (тоді падіння = лише різниця рівнів, без
+     * апекса 1.25 бл). Те саме рішення, що й у виконавці ({@code reachableWithoutJump}: дальність на повній швидкості), плюс
+     * вимога, щоб моб ДОЛЕТІВ з розбігом, який реально є позаду краю (з блока 1x1 - лише ~0.2 бл/тік при сході з опори).
+     */
+    private boolean willWalkOff(BlockPos origin, int dx, int dz, int dy) {
+        GapJumpPhysics.Takeoff takeoff = this.takeoffModel;
+        if (takeoff == null || this.mob == null || dy >= 0) {
+            return false;
+        }
+        long key = ((long) (dx + 128) << 40) ^ ((long) (dz + 128) << 20) ^ (long) (dy + 4096);
+        if (this.walkOffCacheOrigin == origin && this.walkOffCacheKey == key) {
+            return this.walkOffCacheValue;
+        }
+        double dist = Math.sqrt((double) dx * dx + (double) dz * dz);
+        boolean ok = false;
+        if (dist > 1.0E-6) {
+            double setpoint = GapJumpUtils.runSpeedSetpoint(this.mob);
+            double flight = Math.max(0.0, dist - GapJumpPhysics.frontBorder(dx / dist, dz / dist));
+            if (GapJumpPhysics.reachableWithoutJump(takeoff, setpoint, dy, flight)) {
+                ok = GapJumpPhysics.reachableWithoutJumpFromRunUp(takeoff, setpoint, dy, flight,
+                        runUpCellsFor(origin, dx, dz) + WALK_OFF_LEAVE_RUN);
+            }
+        }
+        this.walkOffCacheOrigin = origin;
+        this.walkOffCacheKey = key;
+        this.walkOffCacheValue = ok;
+        return ok;
+    }
+
+    /** Промені стрибка на рівень {@code dy}: беруться лише клітинки, що є в індексі м'яких. */
     private int scanSoftLevel(Node[] found, int n, JumpCtx ctx, GapJumpPhysics.Takeoff takeoff, byte[] frontCache, int dy,
                               SoftLandings.Index index) {
         int gap = Math.min(GapJumpUtils.maxJumpGap(this.mob, takeoff, dy), SOFT_MAX_SCAN_GAP);
@@ -1316,7 +1588,7 @@ public class GapJumpNodeEvaluator extends ShapeAwareNodeEvaluator {
             if (cell == null) {
                 continue;
             }
-            if (!isCorridorClear(origin, ray.corridor()[k], dy)) {
+            if (!isCorridorClear(origin, corridorOf(ray, k, dy), dy)) {
                 continue;
             }
             if (this.runUpCheck) {

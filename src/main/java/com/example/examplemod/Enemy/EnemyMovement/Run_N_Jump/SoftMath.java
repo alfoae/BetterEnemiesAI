@@ -10,21 +10,13 @@ final class SoftMath {
      */
     static final float RESERVE_RANK_PENALTY = 10.0F;
 
-    /**
-     * Ресинхронізація шляху: моб ближче за цю відстань (квадрат, 2 блоки) до "наступного" вузла - ванільна логіка справляється.
-     */
+    /** Ресинхронізація шляху: моб ближче за цю відстань (квадрат, 2 блоки) до "наступного" вузла - ванільна логіка справляється. */
     static final double RESYNC_MIN_DIST_SQ = 4.0;
-    /**
-     * Вузол попереду вважається "тим, біля якого моб стоїть", якщо ближче за 1 блок (квадрат)...
-     */
+    /** Вузол попереду вважається "тим, біля якого моб стоїть", якщо ближче за 1 блок (квадрат)... */
     static final double RESYNC_NEAR_DIST_SQ = 1.0;
-    /**
-     * ...і не вище/нижче за цю різницю висот.
-     */
+    /** ...і не вище/нижче за цю різницю висот. */
     static final double RESYNC_MAX_DY = 1.2;
-    /**
-     * Моб поза шляхом, якщо він далі за 3 блоки (квадрат 9) і від попереднього, і від наступного вузла.
-     */
+    /** Моб поза шляхом, якщо він далі за 3 блоки (квадрат 9) і від попереднього, і від наступного вузла. */
     static final double OFF_PATH_DIST_SQ = 9.0;
 
     static final int RESYNC_NONE = -1;
@@ -33,9 +25,7 @@ final class SoftMath {
     private SoftMath() {
     }
 
-    /**
-     * Надбавка за ранг: 0 - вода, сіно, драбина, ліжко; запасні - {@link #RESERVE_RANK_PENALTY}.
-     */
+    /** Надбавка за ранг: 0 - вода, сіно, драбина, ліжко; запасні - {@link #RESERVE_RANK_PENALTY}. */
     static float rankPenalty(int rank) {
         return rank <= 0 ? 0.0F : RESERVE_RANK_PENALTY;
     }
@@ -62,8 +52,8 @@ final class SoftMath {
      * @param aheadDistSq відстані (квадрат) до вузлів next+1, next+2, ... по порядку;
      * @param aheadAbsDy  |Δy| до тих самих вузлів
      * @return зсув (&gt;= 1) від next до вузла, біля якого моб фізично стоїть (переставити "наступним" його) - перший такий;
-     * {@link #RESYNC_REFRESH} - поблизу жодного вузла, моб поза шляхом (треба свіжий шлях);
-     * {@link #RESYNC_NONE} - нічого робити
+     *         {@link #RESYNC_REFRESH} - поблизу жодного вузла, моб поза шляхом (треба свіжий шлях);
+     *         {@link #RESYNC_NONE} - нічого робити
      */
     static int pickResync(double dNextSq, double dPrevSq, double[] aheadDistSq, double[] aheadAbsDy) {
         if (dNextSq <= RESYNC_MIN_DIST_SQ) {

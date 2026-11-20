@@ -923,6 +923,20 @@ final class GapJumpPhysics {
     }
 
     /**
+     * v25: {@link #reachableWithoutJump}, але з обмеженим розбігом ({@code runUp} блоків з місця до сходу з опори, див.
+     * {@link #velocityAfterRunUp}), а не з усталеною швидкістю: з блока 1x1 (стовп, сходинка) моб набирає лише ~0.2 бл/тік.
+     */
+    static boolean reachableWithoutJumpFromRunUp(Takeoff t, double setpointMax, double deltaY, double flight, double runUp) {
+        if (!(deltaY < 0.0)) {
+            return false;
+        }
+        double a = groundAccel(setpointMax, t.friction());
+        Forecast f = forecastFlight(velocityAfterRunUp(setpointMax, t, runUp), a, t, false,
+                MAX_AIR_ACCEL * NOMINAL_AIR_FRACTION, deltaY, true);
+        return f != null && f.reach() + NO_JUMP_TOLERANCE >= flight;
+    }
+
+    /**
      * Геометрія стрибка вздовж його осі (початок відліку - точка відриву, тобто центр блока-краю або точка стояння
      * на нестандартній опорі).
      *

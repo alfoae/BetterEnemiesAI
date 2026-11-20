@@ -48,6 +48,14 @@ final class GapJumpRays {
      */
     private static final double CORRIDOR_HALF_WIDTH = 0.3;
 
+    /**
+     * v25: допуск на ДОТИЧНЕ зачеплення. Хітбокс моба (0.6 бл) повзе вздовж кута блока - це ковзання, а не перепона. Другий коридор
+     * (див. {@link Ray#corridorGlance}) рахується з півшириною {@code CORRIDOR_HALF_WIDTH - GLANCE_TOLERANCE}: клітинки, які хітбокс
+     * зачіпає менш ніж на цю величину (по обох осях, бо хітбокс - квадрат), до нього не входять. Користуватись ним лише для
+     * стрибків ВНИЗ (там є повітряне керування). 0.14: сходинка, що стоїть упритул до стовпа, зачіпає його кут на ~0.13.
+     */
+    static final double GLANCE_TOLERANCE = 0.14;
+
     private static final double CORRIDOR_SAMPLE_STEP = 0.2;
 
     private static final int MAX_CACHED_GAP = 12;
@@ -71,22 +79,6 @@ final class GapJumpRays {
         }
         double d = Math.sqrt((double) dx * dx + (double) dz * dz);
         return d * (1.0 - 0.5 / m);
-    }
-
-    /**
-     * Один промінь: примітивний крок, перша клітинка на шляху (вона ж перевіряється на "чи є тут
-     * край"), діапазон k придатних приземлень і коридори польоту.
-     *
-     * @param frontX          Перша клітинка, у яку заходить центральна лінія, відносно блока-краю.
-     * @param corridor        corridor[k] — клітинки {dx, dz} коридору для приземлення k*(stepX, stepZ); індекси kMin..kMax.
-     * @param nearestDistance Відстань між центрами для найближчого придатного приземлення (для сортування).
-     */
-        record Ray(int stepX, int stepZ, int frontX, int frontZ, int kMin, int kMax, int[][][] corridor,
-                   double nearestDistance) {
-    }
-
-    static double maxFlight(int maxGap) {
-        return maxGap + 0.5 + FLIGHT_TOLERANCE;
     }
 
     private static Ray[] build(int maxGap) {
@@ -122,8 +114,10 @@ final class GapJumpRays {
                 }
 
                 int[][][] corridor = new int[kMax + 1][][];
+                int[][][] corridorGlance = new int[kMax + 1][][];
                 for (int k = 1; k <= kMax; k++) {
-                    corridor[k] = corridorCells(k * p, k * q);
+                    corridor[k] = corridorCells(k * p, k * q, CORRIDOR_HALF_WIDTH);
+                    corridorGlance[k] = corridorCells(k * p, k * q, CORRIDOR_HALF_WIDTH - GLANCE_TOLERANCE);
                 }
                 int frontX;
                 int frontZ;
@@ -140,7 +134,7 @@ final class GapJumpRays {
                     frontZ = Integer.signum(q);
                 }
                 double nearest = Math.sqrt((double) (kMin * p) * (kMin * p) + (double) (kMin * q) * (kMin * q));
-                rays.add(new Ray(p, q, frontX, frontZ, kMin, kMax, corridor, nearest));
+                rays.add(new Ray(p, q, frontX, frontZ, kMin, kMax, corridor, corridorGlance, nearest));
             }
         }
         rays.sort(Comparator.comparingDouble((Ray r) -> r.nearestDistance)
@@ -149,11 +143,15 @@ final class GapJumpRays {
         return rays.toArray(new Ray[0]);
     }
 
+    static double maxFlight(int maxGap) {
+        return maxGap + 0.5 + FLIGHT_TOLERANCE;
+    }
+
     /**
      * Клітинки (відносно блока-краю), які зачіпає хітбокс моба на прямій від центру краю до центру
      * приземлення (dx, dz), КРІМ самого краю та самого приземлення.
      */
-    private static int[][] corridorCells(int dx, int dz) {
+    private static int[][] corridorCells(int dx, int dz, double halfWidth) {
         double x0 = 0.5;
         double z0 = 0.5;
         double x1 = 0.5 + dx;
@@ -166,10 +164,10 @@ final class GapJumpRays {
             double t = (double) i / samples;
             double sx = x0 + (x1 - x0) * t;
             double sz = z0 + (z1 - z0) * t;
-            int minX = (int) Math.floor(sx - CORRIDOR_HALF_WIDTH + 1.0E-9);
-            int maxX = (int) Math.floor(sx + CORRIDOR_HALF_WIDTH - 1.0E-9);
-            int minZ = (int) Math.floor(sz - CORRIDOR_HALF_WIDTH + 1.0E-9);
-            int maxZ = (int) Math.floor(sz + CORRIDOR_HALF_WIDTH - 1.0E-9);
+            int minX = (int) Math.floor(sx - halfWidth + 1.0E-9);
+            int maxX = (int) Math.floor(sx + halfWidth - 1.0E-9);
+            int minZ = (int) Math.floor(sz - halfWidth + 1.0E-9);
+            int maxZ = (int) Math.floor(sz + halfWidth - 1.0E-9);
             for (int cx = minX; cx <= maxX; cx++) {
                 for (int cz = minZ; cz <= maxZ; cz++) {
                     cells.add(pack(cx, cz));
@@ -187,6 +185,18 @@ final class GapJumpRays {
         list.sort(Comparator.comparingInt((int[] c) -> c[0] * c[0] + c[1] * c[1])
                 .thenComparingInt(c -> c[0]).thenComparingInt(c -> c[1]));
         return list.toArray(new int[0][]);
+    }
+
+    /**
+     * Один промінь: примітивний крок, перша клітинка на шляху (вона ж перевіряється на "чи є тут
+     * край"), діапазон k придатних приземлень і коридори польоту.
+     *
+     * @param frontX          Перша клітинка, у яку заходить центральна лінія, відносно блока-краю.
+     * @param corridor        corridor[k] — клітинки {dx, dz} коридору для приземлення k*(stepX, stepZ); індекси kMin..kMax.
+     * @param nearestDistance Відстань між центрами для найближчого придатного приземлення (для сортування).
+     */
+        record Ray(int stepX, int stepZ, int frontX, int frontZ, int kMin, int kMax, int[][][] corridor,
+                   int[][][] corridorGlance, double nearestDistance) {
     }
 
     private static long pack(int x, int z) {

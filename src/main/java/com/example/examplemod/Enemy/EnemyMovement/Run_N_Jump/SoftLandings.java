@@ -22,20 +22,82 @@ import java.util.*;
  */
 final class SoftLandings {
 
+    /** Скільки м'яких клітинок максимум в одному індексі (великі озера не повинні роздувати пошук). */
+    private static final int MAX_CELLS = 400;
+    /** Індекс покриває вузол, якщо той не далі за стільки блоків по висоті від центру індексу. */
+    private static final int COVER_VERTICAL_TOLERANCE = 6;
+
     /**
      * v24: до {@link #MAX_INDEXES_PER_MOB} індексів на моба (A* розкриває вузли далеко від старту - кожен район має свій індекс).
      */
     private static final Map<Mob, List<Index>> CACHE = new WeakHashMap<>();
     private static final int CACHE_TTL_TICKS = 40;
     private static final int MAX_INDEXES_PER_MOB = 4;
+
     /**
-     * Скільки м'яких клітинок максимум в одному індексі (великі озера не повинні роздувати пошук).
+     * v24: м'яка клітинка в колонці {@code (x, z)}, шукаючи ЗВЕРХУ ВНИЗ від рівня {@code yTop} до {@code yBottom} - те саме правило,
+     * що й в індексі, але від довільного рівня й без індексу. Індекс скануються від рівня свого центру, тому для вузла НИЖЧЕ за
+     * центр (або під виступом) вода внизу лишалась би схованою за першим твердим блоком вище; для приземлення впритик читаємо
+     * колонку від рівня самого вузла.
+     *
+     * @return {вид (ordinal {@link Kind}), Y клітинки ніг} або {@code null}
      */
-    private static final int MAX_CELLS = 400;
+    static int[] probeColumn(Reader r, int x, int z, int yTop, int yBottom) {
+        BlockPos.MutableBlockPos p = new BlockPos.MutableBlockPos();
+        for (int y = yTop; y >= yBottom; y--) {
+            BlockState state = r.get(p.set(x, y, z));
+            if (state == null) {
+                return null;
+            }
+            if (state.isAir()) {
+                continue;
+            }
+            if (isHazardBlock(state)) {
+                return null; // лава, порошковий сніг, кущ...: за ними воду не шукаємо
+            }
+            if (state.getFluidState().is(FluidTags.WATER) || state.is(BlockTags.CLIMBABLE) || state.is(Blocks.COBWEB)) {
+                return probeCell(r, p, x, y, z);
+            }
+            if (state.isSolid()) {
+                return probeCell(r, p, x, y + 1, z);
+            }
+        }
+        return null;
+    }
+
     /**
-     * Індекс покриває вузол, якщо той не далі за стільки блоків по висоті від центру індексу.
+     * v25: ПІДЛОГА колонки {@code (x, z)} зверху вниз від {@code yTop} до {@code yBottom}: перший твердий блок (або вода/драбина/
+     * павутиння). Те саме, що {@link #probeColumn}, але повертає й ТВЕРДУ підлогу (для спусків на сходинки), а не лише м'яку.
+     *
+     * @return {вид м'якого (ordinal {@link Kind}) або -1 для твердої (чи небезпечної для м'якого) підлоги, Y клітинки ніг} або
+     * {@code null}, якщо підлоги нема, вона небезпечна (лава, кактус, магма...) або колонку не прочитано
      */
-    private static final int COVER_VERTICAL_TOLERANCE = 6;
+    static int[] probeFloor(Reader r, int x, int z, int yTop, int yBottom) {
+        BlockPos.MutableBlockPos p = new BlockPos.MutableBlockPos();
+        for (int y = yTop; y >= yBottom; y--) {
+            BlockState state = r.get(p.set(x, y, z));
+            if (state == null) {
+                return null;
+            }
+            if (state.isAir()) {
+                continue;
+            }
+            if (isHazardBlock(state)) {
+                return null;
+            }
+            if (state.getFluidState().is(FluidTags.WATER) || state.is(BlockTags.CLIMBABLE) || state.is(Blocks.COBWEB)) {
+                Kind kind = kindChecked(r, p, x, y, z);
+                return kind == null ? null : new int[]{kind.ordinal(), y};
+            }
+            if (state.isSolid()) {
+                int feetY = y + 1;
+                Kind kind = kindChecked(r, p, x, feetY, z); // сіно, мед, слайм, ліжко - тверді, але м'які
+                return new int[]{kind == null ? -1 : kind.ordinal(), feetY};
+            }
+        }
+        return null;
+    }
+
     private SoftLandings() {
     }
 
@@ -72,6 +134,28 @@ final class SoftLandings {
             return Kind.SLIME;
         }
         return null;
+    }
+
+    /** Колонка зверху вниз до першої не-порожньої клітинки: вона й вирішує, чи є тут м'яке приземлення. */
+    private static void scanColumn(Reader r, BlockPos.MutableBlockPos p, Index index, int x, int z, int yTop, int yBottom) {
+        for (int y = yTop; y >= yBottom; y--) {
+            BlockState state = r.get(p.set(x, y, z));
+            if (state == null) {
+                return;
+            }
+            if (state.isAir()) {
+                continue;
+            }
+            if (state.getFluidState().is(FluidTags.WATER) || state.is(BlockTags.CLIMBABLE) || state.is(Blocks.COBWEB)) {
+                tryRecord(r, p, index, x, y, z); // вода - її ПОВЕРХНЯ (перша клітинка води згори)
+                return;
+            }
+            if (state.isSolid()) {
+                tryRecord(r, p, index, x, y + 1, z); // тверда опора: м'яка лише якщо це сіно/ліжко/мед/слайм - клітинка НАД нею
+                return;
+            }
+            // решта (трава, сніг-шар, плита без колізії) - проходимо далі вниз
+        }
     }
 
     private static long columnKey(int x, int z) {
@@ -124,32 +208,28 @@ final class SoftLandings {
         return index;
     }
 
-    /**
-     * v24: м'яка клітинка в колонці {@code (x, z)}, шукаючи ЗВЕРХУ ВНИЗ від рівня {@code yTop} до {@code yBottom} - те саме правило,
-     * що й в індексі, але від довільного рівня й без індексу. Індекс скануються від рівня свого центру, тому для вузла НИЖЧЕ за
-     * центр (або під виступом) вода внизу лишалась би схованою за першим твердим блоком вище; для приземлення впритик читаємо
-     * колонку від рівня самого вузла.
-     *
-     * @return {вид (ordinal {@link Kind}), Y клітинки ніг} або {@code null}
-     */
-    static int[] probeColumn(Reader r, int x, int z, int yTop, int yBottom) {
-        BlockPos.MutableBlockPos p = new BlockPos.MutableBlockPos();
-        for (int y = yTop; y >= yBottom; y--) {
-            BlockState state = r.get(p.set(x, y, z));
-            if (state == null) {
-                return null;
-            }
-            if (state.isAir()) {
-                continue;
-            }
-            if (state.getFluidState().is(FluidTags.WATER) || state.is(BlockTags.CLIMBABLE) || state.is(Blocks.COBWEB)) {
-                return probeCell(r, p, x, y, z);
-            }
-            if (state.isSolid()) {
-                return probeCell(r, p, x, y + 1, z);
+    /** Лава, вогонь, багаття, кактус, магма, ягідний кущ, порошковий сніг, сталагміт, іссохла троянда в кубі 3x3x3 навколо клітинки. */
+    private static boolean hazardNear(Reader r, BlockPos.MutableBlockPos p, int x, int y, int z) {
+        for (int dx = -1; dx <= 1; dx++) {
+            for (int dy = -1; dy <= 1; dy++) {
+                for (int dz = -1; dz <= 1; dz++) {
+                    BlockState s = r.get(p.set(x + dx, y + dy, z + dz));
+                    if (s != null && isHazardBlock(s)) {
+                        return true;
+                    }
+                }
             }
         }
-        return null;
+        return false;
+    }
+
+    /**
+     * v25: блок, на який/в який падати не можна (для куба навколо м'якого приземлення й для підлоги твердого приземлення).
+     */
+    static boolean isHazardBlock(BlockState s) {
+        return s.getFluidState().is(FluidTags.LAVA) || s.is(BlockTags.FIRE) || s.is(BlockTags.CAMPFIRES)
+                || s.is(Blocks.CACTUS) || s.is(Blocks.MAGMA_BLOCK) || s.is(Blocks.SWEET_BERRY_BUSH)
+                || s.is(Blocks.POWDER_SNOW) || s.is(Blocks.POINTED_DRIPSTONE) || s.is(Blocks.WITHER_ROSE);
     }
 
     private static int[] probeCell(Reader r, BlockPos.MutableBlockPos p, int x, int y, int z) {
@@ -180,66 +260,6 @@ final class SoftLandings {
         return kindChecked(r, new BlockPos.MutableBlockPos(), x, y, z);
     }
 
-    /**
-     * Колонка зверху вниз до першої не-порожньої клітинки: вона й вирішує, чи є тут м'яке приземлення.
-     */
-    private static void scanColumn(Reader r, BlockPos.MutableBlockPos p, Index index, int x, int z, int yTop, int yBottom) {
-        for (int y = yTop; y >= yBottom; y--) {
-            BlockState state = r.get(p.set(x, y, z));
-            if (state == null) {
-                return;
-            }
-            if (state.isAir()) {
-                continue;
-            }
-            if (state.getFluidState().is(FluidTags.WATER) || state.is(BlockTags.CLIMBABLE) || state.is(Blocks.COBWEB)) {
-                tryRecord(r, p, index, x, y, z); // вода - її ПОВЕРХНЯ (перша клітинка води згори)
-                return;
-            }
-            if (state.isSolid()) {
-                tryRecord(r, p, index, x, y + 1, z); // тверда опора: м'яка лише якщо це сіно/ліжко/мед/слайм - клітинка НАД нею
-                return;
-            }
-            // решта (трава, сніг-шар, плита без колізії) - проходимо далі вниз
-        }
-    }
-
-    private static void tryRecord(Reader r, BlockPos.MutableBlockPos p, Index index, int x, int y, int z) {
-        BlockState below = r.get(p.set(x, y - 1, z));
-        BlockState feet = r.get(p.set(x, y, z));
-        BlockState head = r.get(p.set(x, y + 1, z));
-        if (below == null || feet == null || head == null) {
-            return;
-        }
-        Kind kind = kindOf(below, feet, head);
-        if (kind == null || hazardNear(r, p, x, y, z)) {
-            return;
-        }
-        index.record(x, y, z, kind);
-    }
-
-    /**
-     * Лава, вогонь, багаття, кактус, магма, ягідний кущ, порошковий сніг, сталагміт, іссохла троянда в кубі 3x3x3 навколо клітинки.
-     */
-    private static boolean hazardNear(Reader r, BlockPos.MutableBlockPos p, int x, int y, int z) {
-        for (int dx = -1; dx <= 1; dx++) {
-            for (int dy = -1; dy <= 1; dy++) {
-                for (int dz = -1; dz <= 1; dz++) {
-                    BlockState s = r.get(p.set(x + dx, y + dy, z + dz));
-                    if (s == null) {
-                        continue;
-                    }
-                    if (s.getFluidState().is(FluidTags.LAVA) || s.is(BlockTags.FIRE) || s.is(BlockTags.CAMPFIRES)
-                            || s.is(Blocks.CACTUS) || s.is(Blocks.MAGMA_BLOCK) || s.is(Blocks.SWEET_BERRY_BUSH)
-                            || s.is(Blocks.POWDER_SNOW) || s.is(Blocks.POINTED_DRIPSTONE) || s.is(Blocks.WITHER_ROSE)) {
-                        return true;
-                    }
-                }
-            }
-        }
-        return false;
-    }
-
     enum Kind {
         WATER(0, "вода"),
         HAY(0, "сіно"),
@@ -256,6 +276,20 @@ final class SoftLandings {
             this.rank = rank;
             this.label = label;
         }
+    }
+
+    private static void tryRecord(Reader r, BlockPos.MutableBlockPos p, Index index, int x, int y, int z) {
+        BlockState below = r.get(p.set(x, y - 1, z));
+        BlockState feet = r.get(p.set(x, y, z));
+        BlockState head = r.get(p.set(x, y + 1, z));
+        if (below == null || feet == null || head == null) {
+            return;
+        }
+        Kind kind = kindOf(below, feet, head);
+        if (kind == null || hazardNear(r, p, x, y, z)) {
+            return;
+        }
+        index.record(x, y, z, kind);
     }
 
     @FunctionalInterface
@@ -307,23 +341,17 @@ final class SoftLandings {
             return this.cells.size();
         }
 
-        /**
-         * {вид (ordinal {@link Kind}), margin 0..4} або {@code null}.
-         */
+        /** {вид (ordinal {@link Kind}), margin 0..4} або {@code null}. */
         int[] cellAt(int x, int y, int z) {
             return this.cells.get(BlockPos.asLong(x, y, z));
         }
 
-        /**
-         * Y клітинки ніг м'якого приземлення в колонці (x, z) або {@code null}.
-         */
+        /** Y клітинки ніг м'якого приземлення в колонці (x, z) або {@code null}. */
         Integer softYAt(int x, int z) {
             return this.columns.get(columnKey(x, z));
         }
 
-        /**
-         * Абсолютні Y рівнів, де є м'які клітинки, строго нижчі за {@code y}, від вищих до нижчих.
-         */
+        /** Абсолютні Y рівнів, де є м'які клітинки, строго нижчі за {@code y}, від вищих до нижчих. */
         int[] levelsBelow(int y) {
             NavigableSet<Integer> below = this.levels.headSet(y, false).descendingSet();
             int[] out = new int[below.size()];
