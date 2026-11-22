@@ -269,6 +269,10 @@ public final class EnemyBreak_N_BuildUtils {
             return GapJumpAssistGoal.isFlightOnTrack(mob)
                     ? "паркур-політ іде за планом (моб вище нижньої межі польоту) - клатч не потрібен" : null;
         }
+        // v26: виступ спуску ставить сам RNJ зсередини польоту власного збігу ({@code LedgeDescent}) - гейт йому не заважає
+        if (reason == PlaceReason.DROP_LEDGE) {
+            return null;
+        }
         if (GapJumpAssistGoal.isActive(mob)) {
             return "активний паркур-стрибок (GapJumpAssistGoal): будівництво під час нього заборонене";
         }
@@ -671,6 +675,31 @@ public final class EnemyBreak_N_BuildUtils {
     }
 
     /**
+     * v26: "СТІНА" для виступу спуску: суцільний блок збоку (4 горизонтальні сусіди). На відміну від {@link #hasAdjacentSolid}, не
+     * рахує блок під клітинкою й над нею: виступ мусить приліпитись саме до стіни, повз яку моб падає.
+     */
+    public static boolean hasWallSupport(Level level, BlockPos pos) {
+        return level.getBlockState(pos.north()).isSolid()
+                || level.getBlockState(pos.south()).isSolid()
+                || level.getBlockState(pos.east()).isSolid()
+                || level.getBlockState(pos.west()).isSolid();
+    }
+
+    /**
+     * v26: зламати ВЛАСНИЙ тимчасовий блок мода (виступ спуску, див. {@code LedgeDescent}) - КРАЙНІЙ ВИПАДОК спуску (шахта 1x1).
+     * Чужі й ванільні блоки не чіпає. Дроп/"інвентар" не діють: {@link #breakBlock} знає, що блок власний.
+     *
+     * @return true, якщо блок був нашим тимчасовим і зламаний
+     */
+    public static boolean breakOwnTemporaryBlock(ServerLevel level, BlockPos pos, Mob mob) {
+        if (!TemporaryBlockData.get(level).isTracked(pos)) {
+            return false;
+        }
+        breakBlock(level, pos, mob);
+        return true;
+    }
+
+    /**
      * Повертає закешований (на цей тік, для цієї цілі) {@link Path}, рахуючи {@code createPath()}
      * лише якщо ще не рахували. Викликається і з {@link #isNavigationBlocked}, і напряму з
      * {@code PursuitEnemyMeleeBehavior.tick()} — щоб реальний рух ішов по ТОМУ САМОМУ шляху, який
@@ -801,7 +830,13 @@ public final class EnemyBreak_N_BuildUtils {
             buildLog(mob, "placeBlock[" + reason + "](" + pos.toShortString() + ") ВІДМОВА: клітинка не замінювана: " + existing);
             return false;
         }
-        if (!hasAdjacentSolid(level, pos)) {
+        // v26: виступ спуску - ТІЛЬКИ до стіни (бічний сусід): блок на підлозі/стелі без стіни був би "в повітрі" для спуску
+        if (reason == PlaceReason.DROP_LEDGE) {
+            if (!hasWallSupport(level, pos)) {
+                buildLog(mob, "placeBlock[" + reason + "](" + pos.toShortString() + ") ВІДМОВА: нема стіни збоку (виступ у повітрі заборонений)");
+                return false;
+            }
+        } else if (!hasAdjacentSolid(level, pos)) {
             buildLog(mob, "placeBlock[" + reason + "](" + pos.toShortString() + ") ВІДМОВА: нема суміжного isSolid()-блока для опори");
             return false;
         }
@@ -881,7 +916,7 @@ public final class EnemyBreak_N_BuildUtils {
     private static void deferForOwnHitbox(Mob mob, BlockPos pos, PlaceReason reason) {
         String head = "placeBlock[" + reason + "](" + pos.toShortString() + ") ";
         double lift = (pos.getY() + 1.0) - mob.getBoundingBox().minY;
-        if (reason == PlaceReason.CLUTCH || !TerraformRules.jumpClears(lift)) {
+        if (reason == PlaceReason.CLUTCH || reason == PlaceReason.DROP_LEDGE || !TerraformRules.jumpClears(lift)) {
             buildLog(mob, head + "ВІДМОВА: хітбокс моба перетинає клітинку, і стрибок її не звільнить (треба піднятись на "
                     + String.format("%.2f", lift) + " бл)");
             return;

@@ -26,5 +26,11 @@ public enum PlaceReason {
     /** Перекриття лави над проломом / гравецького хазарду. */
     HAZARD_COVER,
     /** Клатч після нокбеку ({@link MobClutchRecovery}). */
-    CLUTCH
+    CLUTCH,
+    /**
+     * v26: виступ СПУСКУ ВИСОТИ ({@code LedgeDescent}): моб збігає з краю стовпа/урвища й у польоті ставить блок ДО СТІНИ (бічний
+     * сусід - див. {@link EnemyBreak_N_BuildUtils#hasWallSupport}; не в повітрі), щоб приземлитись на нього без шкоди. Кличе сам RNJ
+     * зсередини свого польоту, тому паркур-гейт ({@link EnemyBreak_N_BuildUtils#placementVeto}) його пропускає.
+     */
+    DROP_LEDGE
 }

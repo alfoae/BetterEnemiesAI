@@ -116,12 +116,6 @@ public final class FallDebug {
         }
         return K_NORMAL;
     }
-    /**
-     * Підсумок останнього пошуку шляху моба: {tick, відкинуто смертельних спусків, додано м'яких приземлень}.
-     */
-    private static final Map<Mob, int[]> SEARCH_HINT = new WeakHashMap<>();
-    private static int softHits;
-    private static int softMisses;
 
     private static String kindName(int kind) {
         return switch (kind) {
@@ -134,6 +128,13 @@ public final class FallDebug {
             default -> "звичайний (x1.0)";
         };
     }
+
+    /**
+     * Підсумок останнього пошуку шляху моба: {tick, відкинуто смертельних спусків, додано м'яких приземлень}.
+     */
+    private static final Map<Mob, int[]> SEARCH_HINT = new WeakHashMap<>();
+    private static int softHits;
+    private static int softMisses;
 
     // ------------------------------------------------------------------------------------------
     // 1. Профіль падіння (початок пошуку шляху)
@@ -358,6 +359,62 @@ public final class FallDebug {
         }
     }
 
+    /**
+     * ЗАСТРЯГ: ціль нижче, шлях недосяжний, а останній пошук відкинув смертельні спуски й не знайшов жодного м'якого приземлення -
+     * безпечного шляху вниз нема. Повідомляємо в чат гравцеві й у лог; моб при цьому лишається в агро (пам'ять переслідування
+     * не скидається). v26: "будувати спуск" уже є - спуск виступами на стіні ({@link LedgeDescent}); тож це повідомлення тепер
+     * означає, що й виступи неможливі. TODO: чекати регенерації чи йти довшим обхідним шляхом; поки лише повідомлення (за домовленістю).
+     */
+    public static void reportStuckIfLethal(Mob mob, Path path) {
+        if (!DebugLog.on(DebugLog.Cat.FALL) || !relevant(mob) || (path != null && path.canReach())) {
+            return;
+        }
+        int[] hint = SEARCH_HINT.get(mob);
+        if (hint == null || mob.tickCount - hint[0] > 60 || hint[1] <= 0 || hint[2] > 0) {
+            return;
+        }
+        if (!DebugLog.throttle("fall-stuck-" + mob.getId(), 15000L)) {
+            return;
+        }
+        try {
+            String msg = "[УВАГА] моб застряг: усі спуски до гравця СМЕРТЕЛЬНІ при HP=" + f1(mob.getHealth()) + "+" + f1(mob.getAbsorptionAmount())
+                    + " (відкинуто смертельних ребер=" + hint[1] + "), м'якого приземлення поблизу нема, а спуск виступами (v26) неможливий: нема стіни"
+                    + " біля краю чи нема куди сходити, вимкнено (ledgeDescent / enableMobTerraforming / mobGriefing) або моб ширший за 0.9."
+                    + " Моб лишається в агро. TODO: чекати регенерації/обхід";
+            DebugLog.log(DebugLog.Cat.FALL, mob, msg);
+            Player player = PursuitEnemyBehavior.getTrackedPlayer(mob);
+            if (player != null) {
+                PursuitEnemyBehavior.sendChatOnly(player, "[DEBUG FALL] " + msg);
+            }
+        } catch (RuntimeException ignored) {
+            // тільки дебаг
+        }
+    }
+
+    /**
+     * Падіння моба від 2 блоків за подією гри ({@code LivingFallEvent}, ДО нанесення шкоди) - ВІДСТАНЬ і МНОЖНИК БЛОКА, які
+     * застосувала сама гра: це "правда" для порівняння з прогнозом моделі, навіть коли моб зійшов з краю без жодного стрибка.
+     */
+    public static void logActualFall(Mob mob, float distance, float damageMultiplier) {
+        if (!DebugLog.on(DebugLog.Cat.FALL) || !relevant(mob)
+                || !DebugLog.throttle("fall-event-" + mob.getId(), 250L)) {
+            return;
+        }
+        try {
+            FallMath.Profile p = FallDamage.profileOf(mob);
+            float damage = FallMath.damageAfterReductions(p, distance, damageMultiplier);
+            String kind = damageMultiplier >= 1.0F ? "звичайний" : damageMultiplier <= 0.0F ? "вода/павутиння/слайм (без шкоди)"
+                    : damageMultiplier <= 0.25F ? "сіно/мед" : "ліжко/інше";
+            DebugLog.log(DebugLog.Cat.FALL, mob, "ПАДІННЯ (подія гри LivingFallEvent, до нанесення шкоди): відстань=" + f2(distance)
+                    + " бл | множник блока (як рахує САМА гра)=" + f2(damageMultiplier) + " (" + kind + ")"
+                    + " | шкода за моделлю≈" + f1(damage) + " HP | HP до удару=" + f1(mob.getHealth()) + "+" + f1(mob.getAbsorptionAmount())
+                    + " | де=" + cell(mob.blockPosition()) + " | GapJumpAssistGoal активна=" + GapJumpAssistGoal.isActive(mob)
+                    + " | " + pathDeviation(mob));
+        } catch (RuntimeException ignored) {
+            // тільки дебаг
+        }
+    }
+
     /** Моб зараз У м'якій клітинці (вода, драбина) або стоїть на сіні/ліжку/меду/сліймі - тобто приземлення вдалось. */
     private static boolean softContactNow(Mob mob) {
         if (mob.isInWater() || mob.onClimbable()) {
@@ -415,33 +472,9 @@ public final class FallDebug {
     }
 
     /**
-     * ЗАСТРЯГ: ціль нижче, шлях недосяжний, а останній пошук відкинув смертельні спуски й не знайшов жодного м'якого приземлення -
-     * безпечного шляху вниз нема. Повідомляємо в чат гравцеві й у лог; моб при цьому лишається в агро (пам'ять переслідування
-     * не скидається). TODO: що робити далі - будувати сходи вниз, чекати регенерації, йти довшим обхідним шляхом; поки лише
-     * повідомлення (за домовленістю).
+     * Прогноз падіння/шкоди для сегмента, який збирається виконати {@code GapJumpAssistGoal} (потім порівнюється з фактом).
      */
-    public static void reportStuckIfLethal(Mob mob, Path path) {
-        if (!DebugLog.on(DebugLog.Cat.FALL) || !relevant(mob) || (path != null && path.canReach())) {
-            return;
-        }
-        int[] hint = SEARCH_HINT.get(mob);
-        if (hint == null || mob.tickCount - hint[0] > 60 || hint[1] <= 0 || hint[2] > 0) {
-            return;
-        }
-        if (!DebugLog.throttle("fall-stuck-" + mob.getId(), 15000L)) {
-            return;
-        }
-        try {
-            String msg = "[УВАГА] моб застряг: усі спуски до гравця СМЕРТЕЛЬНІ при HP=" + f1(mob.getHealth()) + "+" + f1(mob.getAbsorptionAmount())
-                    + " (відкинуто смертельних ребер=" + hint[1] + "), м'якого приземлення поблизу нема. Моб лишається в агро. TODO: будувати спуск/чекати/обхід";
-            DebugLog.log(DebugLog.Cat.FALL, mob, msg);
-            Player player = PursuitEnemyBehavior.getTrackedPlayer(mob);
-            if (player != null) {
-                PursuitEnemyBehavior.sendChatOnly(player, "[DEBUG FALL] " + msg);
-            }
-        } catch (RuntimeException ignored) {
-            // тільки дебаг
-        }
+    record Prediction(double fallBlocks, float damage, boolean soft, double landX, double landZ) {
     }
 
     /** Де моб відносно шляху: найближчий вузол і "наступний" - щоб бачити, чи зійшов він зі шляху (зліт зі сходів і т.п.). */
@@ -470,36 +503,6 @@ public final class FallDebug {
         double db = Math.sqrt(best);
         return "шлях: найближчий вузол [" + bestIndex + "] на " + f2(db) + " бл, \"наступний\" [" + next + "] на " + f2(dn) + " бл"
                 + (db > 1.5 ? "  <-- моб ПОЗА шляхом" : "");
-    }
-
-    /**
-     * Падіння моба від 2 блоків за подією гри ({@code LivingFallEvent}, ДО нанесення шкоди) - ВІДСТАНЬ і МНОЖНИК БЛОКА, які
-     * застосувала сама гра: це "правда" для порівняння з прогнозом моделі, навіть коли моб зійшов з краю без жодного стрибка.
-     */
-    public static void logActualFall(Mob mob, float distance, float damageMultiplier) {
-        if (!DebugLog.on(DebugLog.Cat.FALL) || !relevant(mob)
-                || !DebugLog.throttle("fall-event-" + mob.getId(), 250L)) {
-            return;
-        }
-        try {
-            FallMath.Profile p = FallDamage.profileOf(mob);
-            float damage = FallMath.damageAfterReductions(p, distance, damageMultiplier);
-            String kind = damageMultiplier >= 1.0F ? "звичайний" : damageMultiplier <= 0.0F ? "вода/павутиння/слайм (без шкоди)"
-                    : damageMultiplier <= 0.25F ? "сіно/мед" : "ліжко/інше";
-            DebugLog.log(DebugLog.Cat.FALL, mob, "ПАДІННЯ (подія гри LivingFallEvent, до нанесення шкоди): відстань=" + f2(distance)
-                    + " бл | множник блока (як рахує САМА гра)=" + f2(damageMultiplier) + " (" + kind + ")"
-                    + " | шкода за моделлю≈" + f1(damage) + " HP | HP до удару=" + f1(mob.getHealth()) + "+" + f1(mob.getAbsorptionAmount())
-                    + " | де=" + cell(mob.blockPosition()) + " | GapJumpAssistGoal активна=" + GapJumpAssistGoal.isActive(mob)
-                    + " | " + pathDeviation(mob));
-        } catch (RuntimeException ignored) {
-            // тільки дебаг
-        }
-    }
-
-    /**
-     * Прогноз падіння/шкоди для сегмента, який збирається виконати {@code GapJumpAssistGoal} (потім порівнюється з фактом).
-     */
-    record Prediction(double fallBlocks, float damage, boolean soft, double landX, double landZ) {
     }
 
     // ------------------------------------------------------------------------------------------

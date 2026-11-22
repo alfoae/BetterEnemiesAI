@@ -70,6 +70,15 @@ public class Config {
     public static final ModConfigSpec.BooleanValue CORRIDOR_GLANCE;
     public static final ModConfigSpec.BooleanValue RNJ_HANDOFF_HOLD;
     public static final ModConfigSpec.BooleanValue TOWER_JUMP_FIRST;
+    // v26: спуск ВИСТУПАМИ на стіні (LedgePlanner/LedgeDescent): стрибок виконує RNJ, блок ставить placeBlock з Break_N_Build.
+    public static final ModConfigSpec.BooleanValue LEDGE_DESCENT;
+    public static final ModConfigSpec.IntValue LEDGE_STAGE_BLOCKS;
+    public static final ModConfigSpec.IntValue LEDGE_MAX_STAGES;
+    public static final ModConfigSpec.DoubleValue LEDGE_STAGE_COST;
+    public static final ModConfigSpec.DoubleValue LEDGE_MIN_DAMAGE;
+    public static final ModConfigSpec.BooleanValue LEDGE_BREAK_FALLBACK;
+    public static final ModConfigSpec.DoubleValue LEDGE_BREAK_COST;
+    public static final ModConfigSpec.IntValue LEDGE_SETTLE_TICKS;
 
     // Дебаг (див. com.example.examplemod.debug.DebugLog): окремий файл logs/betterenemiesai-debug.log.
     public static final ModConfigSpec.BooleanValue DEBUG_ENABLED;
@@ -353,6 +362,48 @@ public class Config {
                         "до краю на повній швидкості: GoalSelector вибирає нові цілі раз на 2 тіки, і з маленької опори (стовп, сходинка 1x1) моб",
                         "встигав вилетіти за край ДО старту керування (в логу: «ЗАПІЗНІЛЕ КЕРУВАННЯ», +0.9 бл і швидкість 0.3 бл/тік).")
                 .define("rnjHandoffHold", true);
+
+        builder.pop();
+
+        builder.push("Ledge_Descent");
+
+        LEDGE_DESCENT = builder
+                .comment("Спуск ВИСТУПАМИ на стіні. З краю (стовп, урвище, дах), де прямий спуск завдав би шкоди чи вбив би моба, він сходить убік або за кут,",
+                        "у польоті ставить блок ДО СТІНИ (ніколи в повітрі), приземляється на нього без шкоди, сходить далі й так ступінь за ступенем до підлоги.",
+                        "Стрибок виконує RNJ, блок ставиться тим самим placeBlock, що й у Break_N_Build (той самий блок, таймер зникнення блоків, вимикачі",
+                        "enableMobTerraforming і mobGriefing). Потрібно dropViaRnj=true. false - як у v25 (моб із малим HP на висоті застрягає).")
+                .define("ledgeDescent", true);
+
+        LEDGE_STAGE_BLOCKS = builder
+                .comment("Висота одного ступеня, блоків: наскільки нижче опори ставиться виступ. Не більше безпечної висоти падіння моба (3 за замовчуванням,",
+                        "з урахуванням атрибута/ефектів). Рівно 3 - без запасу: якщо на виступах з'явиться шкода в півсерця, поставте 2.")
+                .defineInRange("ledgeStageBlocks", 3, 1, 6);
+
+        LEDGE_MAX_STAGES = builder
+                .comment("Найбільше кроків у плані спуску (запобіжник): 16 ступенів по 3 блоки ~ 48 блоків висоти.")
+                .defineInRange("ledgeMaxStages", 16, 1, 40);
+
+        LEDGE_STAGE_COST = builder
+                .comment("Ціна одного виступа в графі A* (у блоках шляху понад саму відстань). Більше - моб охочіше стрибає зі шкодою замість виступів.")
+                .defineInRange("ledgeStageCost", 4.0D, 0.0D, 100.0D);
+
+        LEDGE_MIN_DAMAGE = builder
+                .comment("Від якої шкоди (HP) прямого падіння моб узагалі розглядає виступи. 1 - з будь-якого падіння, що б'є (від 4 блоків); 3 - дрібні падіння",
+                        "моб просто стрибає, виступи лише з великої висоти. Падіння, смертельне для моба, - завжди виступами, якщо їх можна поставити.")
+                .defineInRange("ledgeMinDamage", 1.0D, 0.0D, 40.0D);
+
+        LEDGE_BREAK_FALLBACK = builder
+                .comment("КРАЙНІЙ ВИПАДОК: коли збігом убік іти нікуди (шахта 1x1, з усіх боків стіни), моб ламає виступ під собою й падає далі тією ж колонкою.",
+                        "false - у такому разі спуску виступами нема.")
+                .define("ledgeBreakFallback", true);
+
+        LEDGE_BREAK_COST = builder
+                .comment("Додаткова ціна в A* за кожне ламання виступу (крайній випадок дорожчий за збіг убік).")
+                .defineInRange("ledgeBreakCost", 8.0D, 0.0D, 100.0D);
+
+        LEDGE_SETTLE_TICKS = builder
+                .comment("Скільки тіків моб стоїть на виступі, перш ніж іти далі: гасить інерцію й виглядає природніше.")
+                .defineInRange("ledgeSettleTicks", 3, 0, 20);
 
         builder.pop();
 

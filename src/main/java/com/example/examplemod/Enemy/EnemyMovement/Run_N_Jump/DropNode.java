@@ -24,6 +24,11 @@ public final class DropNode extends Node {
      */
     public int exitX;
     public int exitZ;
+    /**
+     * v26: СПУСК ВИСТУПАМИ - вузол це підлога ВНИЗУ, до якої моб спускається ступенями (збіг убік, виступ біля стіни, збіг далі),
+     * а не падінням. {@code null} - звичайний спуск. Див. {@link LedgePlanner}, {@link LedgeDescent}.
+     */
+    public LedgeHint ledge;
 
     public DropNode(int x, int y, int z) {
         super(x, y, z);

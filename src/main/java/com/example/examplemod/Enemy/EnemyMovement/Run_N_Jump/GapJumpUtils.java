@@ -653,11 +653,15 @@ public final class GapJumpUtils {
                 }
                 int exitX = 0;
                 int exitZ = 0;
+                LedgeHint ledge = null;
                 if (b instanceof DropNode dropNode) { // v25: кутовий спуск несе сторону виходу з краю
                     exitX = dropNode.exitX;
                     exitZ = dropNode.exitZ;
+                    if (plan == null) {
+                        ledge = dropNode.ledge; // v26: спуск виступами (точний план нестандартної опори з ним не змішуємо)
+                    }
                 }
-                return new GapJump(edge, landing, Math.max(1, gapBlocks), plan, approach, exitX, exitZ);
+                return new GapJump(edge, landing, Math.max(1, gapBlocks), plan, approach, exitX, exitZ, ledge);
             }
         }
         return null;
@@ -744,14 +748,15 @@ public final class GapJumpUtils {
      * поточного місця до вузла відриву (для навігатора), або {@code null} (прямий розбіг, як і раніше).
      */
     public record GapJump(BlockPos edge, Vec3 landing, int gapBlocks, ShapeJump.Plan plan, Path approach, int exitX,
-                          int exitZ) {
+                          int exitZ,
+                          LedgeHint ledge) {
 
         public GapJump(BlockPos edge, Vec3 landing, int gapBlocks, ShapeJump.Plan plan, Path approach) {
-            this(edge, landing, gapBlocks, plan, approach, 0, 0);
+            this(edge, landing, gapBlocks, plan, approach, 0, 0, null);
         }
 
         public GapJump(BlockPos edge, Vec3 landing, int gapBlocks) {
-            this(edge, landing, gapBlocks, null, null, 0, 0);
+            this(edge, landing, gapBlocks, null, null, 0, 0, null);
         }
 
         /**
@@ -823,6 +828,7 @@ public final class GapJumpUtils {
         @Override
         public String toString() {
             return "GapJump[edge=" + this.edge + ", landing=" + this.landing + ", gap=" + this.gapBlocks
+                    + (this.ledge != null ? ", ВИСТУПИ(" + this.ledge.ledges() + ")" : "")
                     + (this.plan != null ? ", ТОЧНИЙ" : "") + (this.approach != null ? ", підхід=" + this.approach.getNodeCount() + " вуз." : "")
                     + "]";
         }

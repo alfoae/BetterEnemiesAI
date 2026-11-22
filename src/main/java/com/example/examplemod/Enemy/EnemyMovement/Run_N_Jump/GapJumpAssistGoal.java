@@ -210,6 +210,11 @@ public class GapJumpAssistGoal extends Goal {
     private FallDebug.Prediction fallPrediction;
     private float hpAtLaunch = Float.NaN;
     private double airFallMax;
+    /**
+     * v26: стан спуску ВИСТУПАМИ ({@link LedgeDescent}); null - звичайний сегмент. Ребро з {@link LedgeHint} розгортається в кроки плану:
+     * кожен крок - збіг RNJ без стрибка на сусідню колонку з метою "верх виступу", а сам виступ у польоті ставить Break_N_Build.
+     */
+    private LedgeDescent.Run ledgeRun;
 
     // =========================================
     private boolean debugRunupPrinted = false;
@@ -237,7 +242,8 @@ public class GapJumpAssistGoal extends Goal {
                 + " approachTicks=" + this.approachTicks + " chargeTicks=" + this.chargeTicks
                 + " airborne=" + this.hasBeenAirborne + " jumpFired=" + this.jumpFired
                 + " chain=" + this.chainCount + " setpoint=" + String.format("%.3f", this.lastSetpoint)
-                + " sprint=" + this.runBoost + " noJump=" + this.segNoJump;
+                + " sprint=" + this.runBoost + " noJump=" + this.segNoJump
+                + " ledge=" + (this.ledgeRun == null ? "нема" : this.ledgeRun.debug());
     }
 
     @Override
@@ -410,6 +416,38 @@ public class GapJumpAssistGoal extends Goal {
      * при переході на НАСТУПНИЙ стрибок ланцюжка ({@link #chainNextSegment}).
      */
     private void beginSegment(boolean chained) {
+        // v26: ребро "спуск виступами" розгортаємо в кроки плану (тим самим планувальником, що й граф)
+        this.ledgeRun = null;
+        if (this.jump.ledge() != null) {
+            LedgeDescent.Run run = LedgeDescent.begin(this.mob, this.jump);
+            if (run == null) {
+                // Плану нема (світ змінився, вимкнено): падати на всю висоту за цим ребром НЕ МОЖНА - воно було про виступи.
+                jumpLog("[ЛЕДЖ] план спуску виступами не збудувався - ціль не стартує, шлях буде перераховано");
+                LedgeDescent.noteFailure(this.mob, "виконавець не зміг відтворити план");
+                this.done = true;
+                return;
+            }
+            this.ledgeRun = run;
+            this.jump = LedgeDescent.jumpFor(run);
+        }
+        beginStepCommon(chained);
+    }
+
+    /**
+     * v26: перехід на наступний крок плану виступів - той самий стан, що на початку сегмента, але {@link #ledgeRun} лишається. Моб
+     * стоїть на виступі, тож без спринту й без підходу навігатором.
+     */
+    private void beginLedgeStep() {
+        this.jump = LedgeDescent.jumpFor(this.ledgeRun);
+        this.approachActive = false;
+        beginStepCommon(false);
+        this.mob.setSprinting(false);
+    }
+
+    /**
+     * Спільна частина початку сегмента й кроку виступів: скидає стан під поточний {@code this.jump}.
+     */
+    private void beginStepCommon(boolean chained) {
         this.hasBeenAirborne = false;
         this.jumpFired = false;
         this.chargeTicks = 0;
@@ -487,6 +525,9 @@ public class GapJumpAssistGoal extends Goal {
         double flight = Math.max(0.0, axisLength - this.jump.front(dirX, dirZ));
         this.segNoJump = GapJumpPhysics.reachableWithoutJump(
                 this.takeoff, GapJumpUtils.runSpeedSetpoint(this.mob), this.segDeltaY, flight);
+        if (this.ledgeRun != null) {
+            this.segNoJump = true; // v26: крок виступів - лише збіг: стрибок додав би апекс 1.25 бл до падіння (а ступінь = безпечна висота)
+        }
     }
 
     @Override
@@ -516,7 +557,9 @@ public class GapJumpAssistGoal extends Goal {
             if (!this.hasBeenAirborne && !this.jumpFired) {
                 // Моб втратив опору, так і не отримавши команди на стрибок - майже завжди через ЗАПІЗНІЛЕ
                 // керування (див. canUse). Поки він просів зовсім небагато, стрибаємо просто з повітря.
-                if (!tryRescueJump()) {
+                if (this.ledgeRun != null) {
+                    this.jumpFired = true; // v26: зійшов без команди - це той самий збіг, лишається повітряне керування; рятувальний стрибок додав би апекс
+                } else if (!tryRescueJump()) {
                     jumpLog(
                             "[DEBUG GAP JUMP] !!! МОБ ЗІЙШОВ З КРАЮ БЕЗ СТРИБКА (врятувати вже не можна)"
                                     + " | pos=" + formatVec(this.mob.position())
@@ -532,6 +575,12 @@ public class GapJumpAssistGoal extends Goal {
             // (див. controlFlight). Швидкість мобу НЕ перезаписується, тож відкидання та інше діють самі.
             if (this.jumpFired) {
                 controlFlight();
+            }
+            if (this.ledgeRun != null) {
+                if (this.ledgeRun.grace > 0) {
+                    this.ledgeRun.grace--;
+                }
+                LedgeDescent.airTick(this.mob, this.ledgeRun); // v26: виступ кроку ставиться щотіку, доки не вийде
             }
 
             // Штатний рух моба в повітрі гасимо: ціль moveControl = поточна позиція (інакше він і далі тягне до цілі
@@ -556,6 +605,10 @@ public class GapJumpAssistGoal extends Goal {
         // ПОСАДКА
         // =========================================================
         if (this.hasBeenAirborne) {
+            if (this.ledgeRun != null && this.ledgeRun.grace > 0) {
+                this.ledgeRun.grace--; // v26: щойно зламали виступ - прапор onGround оновиться лише після travel(), це ще не посадка
+                return;
+            }
             // Похибка приземлення відносно ЦЕНТРУ блока: вздовж осі стрибка (+ переліт, - недоліт) і
             // вбік. v15: політ природний, тож це ПРЯМА перевірка моделі (GapJumpPhysics.predict): повітряне
             // керування підтягує до центру, і при звичайних блоках очікуємо |вздовж| ~ 0.0-0.2. Стабільний зсув
@@ -585,6 +638,11 @@ public class GapJumpAssistGoal extends Goal {
             );
             FallDebug.logLanding(this.mob, this.airFallMax, this.hpAtLaunch, this.fallPrediction); // v21 [FALL]: факт проти прогнозу
 
+            // v26: посадка на ВИСТУП - не кінець цілі, а початок наступного кроку плану; на справжній підлозі - звичайне завершення
+            if (this.ledgeRun != null && handleLedgeLanding()) {
+                return;
+            }
+
             // ЛАНЦЮЖОК: якщо попереду знову стрибок - стартуємо його ЩЕ В ЦЬОМУ ТІКУ, не віддаючи керування
             // Pursuit. Інакше після кожного приземлення моб ~3 тіки лишався без керування (done -> ще
             // один порожній тік -> stop -> старт Pursuit -> ~2 тіки до нової цілі) і стояв на місці.
@@ -606,6 +664,9 @@ public class GapJumpAssistGoal extends Goal {
         // =========================================================
         // НА ЗЕМЛІ, ДО ВІДРИВУ
         // =========================================================
+        if (this.ledgeRun != null && ledgeGroundTick()) {
+            return; // v26: стоїмо на виступі (чекаємо/ламаємо під собою)
+        }
         Vec3 landing = this.jump.landing();
         Vec3 edgeCenter = this.jump.takeoffPoint();
 
@@ -862,7 +923,7 @@ public class GapJumpAssistGoal extends Goal {
         this.chainCount++;
         this.jump = next;
         beginSegment(true);
-        return true;
+        return !this.done; // v26: наступне ребро - виступи, а плану нема: не виконуємо
     }
 
     /**
@@ -961,6 +1022,7 @@ public class GapJumpAssistGoal extends Goal {
         FLIGHT_FLOOR_Y.remove(this.mob);
 
         this.jump = null;
+        this.ledgeRun = null;
         this.approachActive = false;
 
         this.mob.setSprinting(false);
@@ -1104,5 +1166,80 @@ public class GapJumpAssistGoal extends Goal {
         this.mob.getLookControl().setLookAt(target.x, target.y, target.z, 30.0F, 30.0F);
         this.mob.getMoveControl().setWantedPosition(
                 target.x, target.y, target.z, GapJumpUtils.speedModifierFor(this.mob, setpoint));
+    }
+
+    // =========================================================================================================
+    // v26: СПУСК ВИСТУПАМИ (див. LedgePlanner / LedgeDescent)
+    // =========================================================================================================
+
+    /**
+     * Посадка в режимі спуску виступами.
+     *
+     * @return true - тік вичерпано (стоїмо на виступі й береться наступний крок, або збій); false - це була остання посадка на
+     * справжню підлогу: далі звичайне завершення (ланцюжок стрибків чи кінець цілі)
+     */
+    private boolean handleLedgeLanding() {
+        LedgeDescent.Run run = this.ledgeRun;
+        LedgePlanner.Step step = run.step();
+        if (step.isFinal()) {
+            jumpLog("[ЛЕДЖ] спуск закінчено: приземлення на справжню підлогу " + this.mob.blockPosition()
+                    + " | виступів=" + run.plan.ledges() + " ламань=" + run.plan.breaks());
+            this.ledgeRun = null;
+            return false;
+        }
+        BlockPos cell = run.ledgeCell();
+        if (cell == null || !LedgeDescent.standsOn(this.mob, cell)) {
+            jumpLog("[ЛЕДЖ] ПРОМАХ: моб приземлився не на виступ " + cell + " | pos=" + formatVec(this.mob.position()));
+            LedgeDescent.noteFailure(this.mob, "приземлення повз виступ");
+            this.ledgeRun = null;
+            this.done = true;
+            return true;
+        }
+        // Стоїмо на виступі 1x1: залишок швидкості польоту зсунув би моба з нього - гасимо горизонталь у перший же тік.
+        Vec3 landedVel = this.mob.getDeltaMovement();
+        this.mob.setDeltaMovement(0.0, landedVel.y, 0.0);
+        run.advance(LedgeDescent.settleTicks());
+        jumpLog("[ЛЕДЖ] приземлився на виступ " + cell.toShortString() + " | далі: " + run.debug());
+        beginLedgeStep();
+        return true;
+    }
+
+    /**
+     * Наземна фаза кроку виступів. Перші {@code settle} тіків моб стоїть на виступі (центруємось, інерція згасла); крок "зламати
+     * виступ під собою" (КРАЙНІЙ ВИПАДОК, шахта 1x1) виконується тут же; звичайний крок далі йде звичайним збігом RNJ.
+     *
+     * @return true, якщо тік вичерпано
+     */
+    private boolean ledgeGroundTick() {
+        LedgeDescent.Run run = this.ledgeRun;
+        LedgePlanner.Step step = run.step();
+        if (run.index > 0 && run.settle > 0) {
+            run.settle--;
+            Vec3 center = Vec3.atBottomCenterOf(new BlockPos(step.fromX(), step.fromY(), step.fromZ()));
+            Vec3 here = this.mob.position();
+            if (horizontalDistance(here, center) > 0.12) {
+                steerTo(center, 0.05);
+            } else {
+                this.mob.getMoveControl().setWantedPosition(here.x, here.y, here.z, 0.0);
+            }
+            return true;
+        }
+        if (step.breaksLedge()) {
+            if (!LedgeDescent.breakStandingLedge(this.mob, run)) {
+                LedgeDescent.noteFailure(this.mob, "не вдалося зламати виступ під ногами");
+                this.ledgeRun = null;
+                this.done = true;
+                return true;
+            }
+            // Падаємо тією ж колонкою: політ вмикаємо вручну (onGround ще кілька тіків може бути true - див. grace).
+            this.jump = LedgeDescent.jumpFor(run);
+            this.approachActive = false;
+            beginStepCommon(false);
+            this.hasBeenAirborne = true;
+            this.jumpFired = true;
+            run.grace = LedgeDescent.BREAK_GRACE_TICKS;
+            return true;
+        }
+        return false;
     }
 }
