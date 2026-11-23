@@ -2,7 +2,6 @@ package com.example.examplemod.Enemy.EnemyMovement.Run_N_Jump;
 
 import com.example.examplemod.Config;
 import com.example.examplemod.Enemy.EnemyBehavior.EnemyPursuit_N_Search.PursuitBehavior.PursuitEnemyBehavior;
-import com.example.examplemod.Enemy.EnemyMovement.SafeFall.LedgeDescent;
 import com.example.examplemod.Enemy.EnemyMovement.TerrainShape.HopNode;
 import com.example.examplemod.debug.DebugLog;
 import net.minecraft.core.BlockPos;

@@ -1,4 +1,4 @@
-package com.example.examplemod.Enemy.EnemyMovement.SafeFall;
+package com.example.examplemod.Enemy.EnemyMovement.Run_N_Jump;
 
 import java.util.ArrayList;
 import java.util.HashSet;
