@@ -1,8 +1,9 @@
-package com.example.examplemod.Enemy.EnemyMovement.Run_N_Jump;
+package com.example.examplemod.Enemy.EnemyMovement.SafeFall;
 
 import com.example.examplemod.Config;
 import com.example.examplemod.Enemy.EnemyBehavior.EnemyBreak_N_Build.EnemyBreak_N_BuildUtils;
 import com.example.examplemod.Enemy.EnemyBehavior.EnemyBreak_N_Build.PlaceReason;
+import com.example.examplemod.Enemy.EnemyMovement.Run_N_Jump.*;
 import com.example.examplemod.debug.DebugLog;
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerLevel;
@@ -42,34 +43,27 @@ import java.util.function.Function;
  */
 public final class LedgeDescent {
 
+    /** Ліміт вузлів одного пошуку плану (запобіжник часу): успішний спуск зазвичай потребує кількох десятків вузлів. */
+    static final int MAX_PLAN_NODES = 300;
+
     /**
      * Ширші за це мобі на виступі 1x1 не вміщуються (рейвен, голем...) - для них спуск виступами вимкнено.
      */
     static final double MAX_MOB_WIDTH = 0.9;
-    /**
-     * Ліміт вузлів одного пошуку плану (запобіжник часу): успішний спуск зазвичай потребує кількох десятків вузлів.
-     */
-    static final int MAX_PLAN_NODES = 300;
-    /**
-     * Після збою ребра виступів для моба вимкнено на стільки тіків (шлях тим часом перераховується без них).
-     */
+    /** Після збою ребра виступів для моба вимкнено на стільки тіків (шлях тим часом перераховується без них). */
     static final long FAIL_COOLDOWN_TICKS = 200L;
-    /**
-     * Скільки тіків після ламання виступу ігноруємо "стоїть на землі": прапор onGround оновиться лише після travel().
-     */
+    /** Скільки тіків після ламання виступу ігноруємо "стоїть на землі": прапор onGround оновиться лише після travel(). */
     static final int BREAK_GRACE_TICKS = 3;
-    private static final Map<Mob, Long> FAILED_UNTIL = new WeakHashMap<>();
-
     private LedgeDescent() {
     }
+
+    private static final Map<Mob, Long> FAILED_UNTIL = new WeakHashMap<>();
 
     // =====================================================================================================
     // Налаштування й параметри
     // =====================================================================================================
 
-    /**
-     * Чи вмикати спуск виступами для цього моба: конфіг, ті самі вимикачі, що в Break_N_Build, ширина, пауза після збою.
-     */
+    /** Чи вмикати спуск виступами для цього моба: конфіг, ті самі вимикачі, що в Break_N_Build, ширина, пауза після збою. */
     public static boolean enabledFor(Mob mob) {
         if (mob == null || !Config.LEDGE_DESCENT.get() || !Config.ENABLE_MOB_TERRAFORMING.get()) {
             return false;
@@ -87,9 +81,7 @@ public final class LedgeDescent {
         return until == null || level.getGameTime() >= until;
     }
 
-    /**
-     * Висота ступеня - не більше безпечної висоти падіння моба; null - виступи для цього моба безглузді (імунний чи безпечна <1).
-     */
+    /** Висота ступеня - не більше безпечної висоти падіння моба; null - виступи для цього моба безглузді (імунний чи безпечна <1). */
     static LedgePlanner.Params paramsFor(Mob mob, FallMath.Profile profile) {
         if (profile == null || profile.immune()) {
             return null;
@@ -112,9 +104,7 @@ public final class LedgeDescent {
     // Світ для планувальника
     // =====================================================================================================
 
-    /**
-     * Блоки, на які не можна стати, у які не можна поставити блок і крізь які не можна падати: шкодять чи тримають.
-     */
+    /** Блоки, на які не можна стати, у які не можна поставити блок і крізь які не можна падати: шкодять чи тримають. */
     private static boolean hazard(BlockState s) {
         return s.is(BlockTags.FIRE) || s.is(BlockTags.CAMPFIRES) || s.is(Blocks.COBWEB) || s.is(Blocks.POWDER_SNOW)
                 || s.is(Blocks.SWEET_BERRY_BUSH) || s.is(Blocks.CACTUS) || s.is(Blocks.MAGMA_BLOCK)
@@ -171,6 +161,15 @@ public final class LedgeDescent {
     // Виконання плану (стан кроку, зв'язок з GapJumpAssistGoal)
     // =====================================================================================================
 
+    /** Сегмент RNJ для поточного кроку: збіг з опори кроку на колонку цілі; ціль приземлення - верх виступа (чи підлога). */
+    static GapJumpUtils.GapJump jumpFor(Run run) {
+        LedgePlanner.Step s = run.step();
+        BlockPos edge = new BlockPos(s.fromX(), s.fromY(), s.fromZ());
+        Vec3 landing = Vec3.atBottomCenterOf(new BlockPos(s.toX(), s.landingY(), s.toZ()));
+        Path approach = run.index == 0 && run.base != null ? run.base.approach() : null;
+        return new GapJumpUtils.GapJump(edge, landing, 1, null, approach, s.exitX(), s.exitZ(), null);
+    }
+
     /**
      * Розгортає ребро {@code jump} (з {@link LedgeHint}) у план: ТОЙ САМИЙ планувальник і ті самі параметри, що в графі.
      *
@@ -204,19 +203,19 @@ public final class LedgeDescent {
     }
 
     /**
-     * Сегмент RNJ для поточного кроку: збіг з опори кроку на колонку цілі; ціль приземлення - верх виступа (чи підлога).
+     * Чи минув темп постановки блока цим мобом: якщо ні, відрив від опори варто відкласти - у польоті на постановку є лише
+     * кілька тіків (вікно {@code ledgePlaceMinAbove..ledgePlaceMaxAbove}), і втрачений тік означав би падіння зі шкодою.
      */
-    static GapJumpUtils.GapJump jumpFor(Run run) {
-        LedgePlanner.Step s = run.step();
-        BlockPos edge = new BlockPos(s.fromX(), s.fromY(), s.fromZ());
-        Vec3 landing = Vec3.atBottomCenterOf(new BlockPos(s.toX(), s.landingY(), s.toZ()));
-        Path approach = run.index == 0 && run.base != null ? run.base.approach() : null;
-        return new GapJumpUtils.GapJump(edge, landing, 1, null, approach, s.exitX(), s.exitZ(), null);
+    static boolean readyToPlace(Mob mob) {
+        return EnemyBreak_N_BuildUtils.canPlaceNow(mob, PlaceReason.DROP_LEDGE, mob.level().getGameTime());
     }
 
     /**
-     * Щотіку в польоті кроку: поставити виступ, якщо ще не стоїть. {@code placeBlock} сам стежить за темпом, видимістю клітинки й
-     * хітбоксом, тож просто повторюємо спробу кожен тік, поки не вийде (виступ завжди на 1+ блок нижче ніг - у хітбокс не потрапляє).
+     * Щотіку в польоті кроку: поставити виступ, але НЕ РАНІШЕ, ніж моб наблизиться до точки приземлення: коли його ноги не вище за
+     * {@code ledgePlaceMaxAbove} (1 бл) над верхом виступу. Моб за тік пролітає ~0.5-0.65 бл, тож вікно {@code 0.5..1} бл він
+     * проходить за 1-2 тіки: якщо цей тік винесе його нижче {@code ledgePlaceMinAbove} (0.5 бл), ставимо одразу. Далі повторюємо
+     * спробу щотіку, поки не вийде ({@code placeBlock} сам стежить за темпом, видимістю клітинки й хітбоксом; виступ нижче ніг, тож
+     * у хітбокс не потрапляє, доки моб не торкнеться верху).
      */
     static void airTick(Mob mob, Run run) {
         if (run.placed) {
@@ -230,8 +229,15 @@ public final class LedgeDescent {
             run.placed = true; // уже стоїть (наш попередній блок чи чужий) - лишається приземлитись
             return;
         }
-        run.placeTries++;
         double above = mob.getY() - (cell.getY() + 1.0);
+        // goal.tick() іде ДО travel(): deltaMovement.y - це саме той рух, який моб зробить у цьому тіку
+        double thisStep = Math.max(0.0, -mob.getDeltaMovement().y);
+        boolean inWindow = above <= Config.LEDGE_PLACE_MAX_ABOVE.get();
+        boolean lastChance = above - thisStep < Config.LEDGE_PLACE_MIN_ABOVE.get(); // після цього тіка моб уже буде нижче вікна
+        if (!inWindow && !lastChance) {
+            return; // ще зарано: блок не з'являється раніше, ніж моб підійде до точки приземлення
+        }
+        run.placeTries++;
         if (EnemyBreak_N_BuildUtils.placeBlock(level, cell, mob, PlaceReason.DROP_LEDGE)) {
             run.placed = true;
             log(mob, "виступ ПОСТАВЛЕНО " + cell.toShortString() + " зі спроби " + run.placeTries
@@ -242,9 +248,7 @@ public final class LedgeDescent {
         }
     }
 
-    /**
-     * Моб стоїть на виступі {@code cell}: блок на місці, хітбокс над його верхньою гранню (центр може трохи виступати за край).
-     */
+    /** Моб стоїть на виступі {@code cell}: блок на місці, хітбокс над його верхньою гранню (центр може трохи виступати за край). */
     static boolean standsOn(Mob mob, BlockPos cell) {
         if (!mob.level().getBlockState(cell).isSolid()) {
             return false;
@@ -257,9 +261,7 @@ public final class LedgeDescent {
                 && box.maxZ > cell.getZ() && box.minZ < cell.getZ() + 1.0;
     }
 
-    /**
-     * КРАЙНІЙ ВИПАДОК: зламати власний виступ під ногами. Чужі й ванільні блоки не чіпає.
-     */
+    /** КРАЙНІЙ ВИПАДОК: зламати власний виступ під ногами. Чужі й ванільні блоки не чіпає. */
     static boolean breakStandingLedge(Mob mob, Run run) {
         BlockPos cell = run.standingLedge();
         if (cell == null || !(mob.level() instanceof ServerLevel level)) {
@@ -272,50 +274,21 @@ public final class LedgeDescent {
     }
 
     /**
-     * Збій виконання: ребра виступів для цього моба вимикаються на {@link #FAIL_COOLDOWN_TICKS}, поточний шлях скидається, а новий
-     * рахується вже без них - моб не піде сліпим падінням на всю висоту за застарілим ребром.
-     */
-    static void noteFailure(Mob mob, String why) {
-        FAILED_UNTIL.put(mob, mob.level().getGameTime() + FAIL_COOLDOWN_TICKS);
-        mob.getNavigation().stop();
-        EnemyBreak_N_BuildUtils.requestFreshPath(mob);
-        log(mob, "ЗБІЙ: " + why + " -> виступи вимкнено для цього моба на " + FAIL_COOLDOWN_TICKS + " тіків, шлях буде перераховано");
-    }
-
-    static void log(Mob mob, String msg) {
-        if (DebugLog.on(DebugLog.Cat.JUMP)) {
-            DebugLog.log(DebugLog.Cat.JUMP, mob, "[ЛЕДЖ] " + msg);
-        }
-    }
-
-    /**
      * Стан виконання плану в {@link GapJumpAssistGoal}.
      */
     static final class Run {
         final LedgePlanner.Plan plan;
-        /**
-         * Початковий сегмент з графа: з нього беремо шлях підходу до краю (лише для першого кроку).
-         */
+        /** Початковий сегмент з графа: з нього беремо шлях підходу до краю (лише для першого кроку). */
         final GapJumpUtils.GapJump base;
-        /**
-         * Поточний крок плану (рух ІЗ поточної опори).
-         */
+        /** Поточний крок плану (рух ІЗ поточної опори). */
         int index;
-        /**
-         * Виступ поточного кроку вже стоїть.
-         */
+        /** Виступ поточного кроку вже стоїть. */
         boolean placed;
-        /**
-         * Скільки тіків ще постояти на виступі перед наступним кроком.
-         */
+        /** Скільки тіків ще постояти на виступі перед наступним кроком. */
         int settle;
-        /**
-         * Тіки після ламання виступу, коли onGround ще може бути хибним "true".
-         */
+        /** Тіки після ламання виступу, коли onGround ще може бути хибним "true". */
         int grace;
-        /**
-         * Скільки разів у польоті цього кроку пробували поставити виступ.
-         */
+        /** Скільки разів у польоті цього кроку пробували поставити виступ. */
         int placeTries;
 
         Run(LedgePlanner.Plan plan, GapJumpUtils.GapJump base) {
@@ -327,17 +300,13 @@ public final class LedgeDescent {
             return this.plan.steps().get(this.index);
         }
 
-        /**
-         * Клітинка виступу, який ставимо на цьому кроці; null - крок без блока (останній збіг).
-         */
+        /** Клітинка виступу, який ставимо на цьому кроці; null - крок без блока (останній збіг). */
         BlockPos ledgeCell() {
             LedgePlanner.Step s = step();
             return s.placesLedge() ? new BlockPos(s.toX(), s.ledgeY(), s.toZ()) : null;
         }
 
-        /**
-         * Виступ під ногами на початку кроку (null - перший крок: стоїмо на справжній опорі краю).
-         */
+        /** Виступ під ногами на початку кроку (null - перший крок: стоїмо на справжній опорі краю). */
         BlockPos standingLedge() {
             if (this.index == 0) {
                 return null;
@@ -359,6 +328,23 @@ public final class LedgeDescent {
                     + " з (" + s.fromX() + "," + s.fromY() + "," + s.fromZ() + ") у колонку (" + s.toX() + "," + s.toZ() + ")"
                     + (s.placesLedge() ? " виступ y=" + s.ledgeY() + (this.placed ? " [стоїть]" : " [ще нема]") : " [без блока]")
                     + " settle=" + this.settle + " grace=" + this.grace;
+        }
+    }
+
+    /**
+     * Збій виконання: ребра виступів для цього моба вимикаються на {@link #FAIL_COOLDOWN_TICKS}, поточний шлях скидається, а новий
+     * рахується вже без них - моб не піде сліпим падінням на всю висоту за застарілим ребром.
+     */
+    static void noteFailure(Mob mob, String why) {
+        FAILED_UNTIL.put(mob, mob.level().getGameTime() + FAIL_COOLDOWN_TICKS);
+        mob.getNavigation().stop();
+        EnemyBreak_N_BuildUtils.requestFreshPath(mob);
+        log(mob, "ЗБІЙ: " + why + " -> виступи вимкнено для цього моба на " + FAIL_COOLDOWN_TICKS + " тіків, шлях буде перераховано");
+    }
+
+    static void log(Mob mob, String msg) {
+        if (DebugLog.on(DebugLog.Cat.JUMP)) {
+            DebugLog.log(DebugLog.Cat.JUMP, mob, "[ЛЕДЖ] " + msg);
         }
     }
 }

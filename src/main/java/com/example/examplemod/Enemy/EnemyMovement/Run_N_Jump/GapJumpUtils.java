@@ -2,6 +2,7 @@ package com.example.examplemod.Enemy.EnemyMovement.Run_N_Jump;
 
 import com.example.examplemod.Enemy.EnemyBehavior.EnemyBreak_N_Build.EnemyBreak_N_BuildUtils;
 import com.example.examplemod.Enemy.EnemyBehavior.EnemyPursuit_N_Search.PursuitBehavior.PursuitEnemyBehavior;
+import com.example.examplemod.Enemy.EnemyMovement.SafeFall.LedgeHint;
 import com.example.examplemod.Enemy.EnemyMovement.TerrainShape.*;
 import com.example.examplemod.Enemy.EnemyMovement.TerrainShape.ShapeWalk.BodyDims;
 import com.example.examplemod.Enemy.EnemyMovement.TerrainShape.ShapeWalk.Spot;
@@ -747,8 +748,7 @@ public final class GapJumpUtils {
      * Для звичайних блоків {@code plan == null} і нічого не змінюється. {@code approach} - вузли шляху від
      * поточного місця до вузла відриву (для навігатора), або {@code null} (прямий розбіг, як і раніше).
      */
-    public record GapJump(BlockPos edge, Vec3 landing, int gapBlocks, ShapeJump.Plan plan, Path approach, int exitX,
-                          int exitZ,
+    public record GapJump(BlockPos edge, Vec3 landing, int gapBlocks, ShapeJump.Plan plan, Path approach, int exitX, int exitZ,
                           LedgeHint ledge) {
 
         public GapJump(BlockPos edge, Vec3 landing, int gapBlocks, ShapeJump.Plan plan, Path approach) {
@@ -759,9 +759,7 @@ public final class GapJumpUtils {
             this(edge, landing, gapBlocks, null, null, 0, 0, null);
         }
 
-        /**
-         * v25: кутовий спуск (див. {@link DropNode#exitX}): сходимо з краю відкритою ортогональною стороною, а не по діагоналі.
-         */
+        /** v25: кутовий спуск (див. {@link DropNode#exitX}): сходимо з краю відкритою ортогональною стороною, а не по діагоналі. */
         public boolean corner() {
             return this.exitX != 0 || this.exitZ != 0;
         }

@@ -1,4 +1,4 @@
-package com.example.examplemod.Enemy.EnemyMovement.Run_N_Jump;
+package com.example.examplemod.Enemy.EnemyMovement.SafeFall;
 
 /**
  * v23: чиста логіка (без типів Minecraft - перевіряється окремо): ціни м'яких приземлень і вибір вузла для ресинхронізації шляху.

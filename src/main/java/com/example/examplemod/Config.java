@@ -79,6 +79,10 @@ public class Config {
     public static final ModConfigSpec.BooleanValue LEDGE_BREAK_FALLBACK;
     public static final ModConfigSpec.DoubleValue LEDGE_BREAK_COST;
     public static final ModConfigSpec.IntValue LEDGE_SETTLE_TICKS;
+    public static final ModConfigSpec.DoubleValue LEDGE_PLACE_MAX_ABOVE;
+    public static final ModConfigSpec.DoubleValue LEDGE_PLACE_MIN_ABOVE;
+    public static final ModConfigSpec.DoubleValue LEDGE_SMALL_DAMAGE_MAX;
+    public static final ModConfigSpec.DoubleValue LEDGE_HEALTHY_FRACTION;
 
     // Дебаг (див. com.example.examplemod.debug.DebugLog): окремий файл logs/betterenemiesai-debug.log.
     public static final ModConfigSpec.BooleanValue DEBUG_ENABLED;
@@ -388,9 +392,28 @@ public class Config {
                 .defineInRange("ledgeStageCost", 4.0D, 0.0D, 100.0D);
 
         LEDGE_MIN_DAMAGE = builder
-                .comment("Від якої шкоди (HP) прямого падіння моб узагалі розглядає виступи. 1 - з будь-якого падіння, що б'є (від 4 блоків); 3 - дрібні падіння",
-                        "моб просто стрибає, виступи лише з великої висоти. Падіння, смертельне для моба, - завжди виступами, якщо їх можна поставити.")
-                .defineInRange("ledgeMinDamage", 1.0D, 0.0D, 40.0D);
+                .comment("Від якої шкоди (HP) прямого падіння моб узагалі розглядає виступи: дрібніша шкода (з урахуванням броні й ефектів) - просто стрибок.",
+                        "0.5 - з будь-якого падіння, що б'є (4 блоки = 1 HP). Падіння, смертельне для моба, - завжди виступами, якщо їх можна поставити.")
+                .defineInRange("ledgeMinDamage", 0.5D, 0.0D, 40.0D);
+
+        LEDGE_SMALL_DAMAGE_MAX = builder
+                .comment("Верхня межа ДРІБНОЇ шкоди (HP) від прямого падіння. Падіння на ledgeMinDamage..ledgeSmallDamageMax HP (0.5-1 HP, тобто 4 блоки) ЗДОРОВИЙ моб",
+                        "(HP вище ledgeHealthyFraction) бере замість виступів: стрибок має пріоритет. Поставте 2, щоб до дрібних належали й 5 блоків.")
+                .defineInRange("ledgeSmallDamageMax", 1.0D, 0.0D, 40.0D);
+
+        LEDGE_HEALTHY_FRACTION = builder
+                .comment("Частка максимуму HP, вище якої моб здоровий: поки HP > цієї частки, дрібне падіння (ledgeMinDamage..ledgeSmallDamageMax) має ПРІОРИТЕТ над виступами.",
+                        "На цій частці й нижче пріоритет, як зазвичай, у виступів. 1.0 - виступи в пріоритеті завжди; 0 - дрібні падіння завжди стрибком.")
+                .defineInRange("ledgeHealthyFraction", 0.8D, 0.0D, 1.0D);
+
+        LEDGE_PLACE_MAX_ABOVE = builder
+                .comment("Коли ставити виступ: щойно ноги моба не вище за стільки блоків над ВЕРХОМ виступу (точкою приземлення). Раніше блок не з'являється.")
+                .defineInRange("ledgePlaceMaxAbove", 1.0D, 0.3D, 3.0D);
+
+        LEDGE_PLACE_MIN_ABOVE = builder
+                .comment("Нижня межа вікна постановки, блоків над верхом виступу. Моб за тік пролітає ~0.5-0.65 бл, тож якщо наступний тік проскочить нижче цієї висоти,",
+                        "блок ставиться одразу, навіть трохи вище верхньої межі. Звичайно постановка потрапляє у вікно ledgePlaceMinAbove..ledgePlaceMaxAbove (0.5-1 бл).")
+                .defineInRange("ledgePlaceMinAbove", 0.5D, 0.0D, 2.0D);
 
         LEDGE_BREAK_FALLBACK = builder
                 .comment("КРАЙНІЙ ВИПАДОК: коли збігом убік іти нікуди (шахта 1x1, з усіх боків стіни), моб ламає виступ під собою й падає далі тією ж колонкою.",

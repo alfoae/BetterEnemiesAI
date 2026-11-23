@@ -1,4 +1,4 @@
-package com.example.examplemod.Enemy.EnemyMovement.Run_N_Jump;
+package com.example.examplemod.Enemy.EnemyMovement.SafeFall;
 
 import net.minecraft.core.BlockPos;
 import net.minecraft.tags.BlockTags;

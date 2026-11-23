@@ -3,6 +3,8 @@ package com.example.examplemod.Enemy.EnemyMovement.Run_N_Jump;
 import com.example.examplemod.Config;
 import com.example.examplemod.Enemy.EnemyBehavior.EnemyBreak_N_Build.EnemyBreak_N_BuildUtils;
 import com.example.examplemod.Enemy.EnemyBehavior.EnemyPursuit_N_Search.PursuitBehavior.PursuitEnemyBehavior;
+import com.example.examplemod.Enemy.EnemyMovement.SafeFall.SoftMath;
+import com.example.examplemod.Enemy.EnemyMovement.SafeFall.StairBrake;
 import com.example.examplemod.Enemy.EnemyMovement.TerrainShape.HopNode;
 import com.example.examplemod.Enemy.EnemyMovement.TerrainShape.ShapePathAccess;
 import com.example.examplemod.debug.DebugLog;

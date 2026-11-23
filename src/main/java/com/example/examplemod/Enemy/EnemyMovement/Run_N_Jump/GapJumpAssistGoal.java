@@ -1,5 +1,8 @@
 package com.example.examplemod.Enemy.EnemyMovement.Run_N_Jump;
 
+import com.example.examplemod.Enemy.EnemyMovement.SafeFall.LedgeDescent;
+import com.example.examplemod.Enemy.EnemyMovement.SafeFall.LedgeHint;
+import com.example.examplemod.Enemy.EnemyMovement.SafeFall.LedgePlanner;
 import com.example.examplemod.debug.DebugLog;
 import net.minecraft.core.BlockPos;
 import net.minecraft.world.entity.Mob;
@@ -444,9 +447,7 @@ public class GapJumpAssistGoal extends Goal {
         this.mob.setSprinting(false);
     }
 
-    /**
-     * Спільна частина початку сегмента й кроку виступів: скидає стан під поточний {@code this.jump}.
-     */
+    /** Спільна частина початку сегмента й кроку виступів: скидає стан під поточний {@code this.jump}. */
     private void beginStepCommon(boolean chained) {
         this.hasBeenAirborne = false;
         this.jumpFired = false;
@@ -1222,6 +1223,12 @@ public class GapJumpAssistGoal extends Goal {
             } else {
                 this.mob.getMoveControl().setWantedPosition(here.x, here.y, here.z, 0.0);
             }
+            return true;
+        }
+        if (step.placesLedge() && !LedgeDescent.readyToPlace(this.mob)) {
+            // Темп постановки ще не минув: у польоті виступ треба поставити за 1-2 тіки, тож тримаємось на опорі, доки можна.
+            Vec3 here = this.mob.position();
+            this.mob.getMoveControl().setWantedPosition(here.x, here.y, here.z, 0.0);
             return true;
         }
         if (step.breaksLedge()) {
