@@ -1,7 +1,9 @@
-package com.example.examplemod.Enemy.EnemyBehavior.EnemyBreak_N_Build;
+package com.example.examplemod.Enemy.EnemyMovement.SafeFall;
 
 import com.example.examplemod.BetterEnemiesAI;
 import com.example.examplemod.Config;
+import com.example.examplemod.Enemy.EnemyBehavior.EnemyBreak_N_Build.EnemyBreak_N_BuildUtils;
+import com.example.examplemod.Enemy.EnemyBehavior.EnemyBreak_N_Build.PlaceReason;
 import com.example.examplemod.Enemy.EnemyMovement.Run_N_Jump.GapJumpAssistGoal;
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerLevel;

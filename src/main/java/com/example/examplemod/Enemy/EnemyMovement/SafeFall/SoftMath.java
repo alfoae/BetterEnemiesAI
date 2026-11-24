@@ -1,9 +1,9 @@
-package com.example.examplemod.Enemy.EnemyMovement.Run_N_Jump;
+package com.example.examplemod.Enemy.EnemyMovement.SafeFall;
 
 /**
  * v23: чиста логіка (без типів Minecraft - перевіряється окремо): ціни м'яких приземлень і вибір вузла для ресинхронізації шляху.
  */
-final class SoftMath {
+public final class SoftMath {
 
     /**
      * Надбавка до ціни "запасних" м'яких приземлень (мед, слайм, павутиння) - щоб їх брали лише коли кращого нема.
@@ -26,7 +26,7 @@ final class SoftMath {
     }
 
     /** Надбавка за ранг: 0 - вода, сіно, драбина, ліжко; запасні - {@link #RESERVE_RANK_PENALTY}. */
-    static float rankPenalty(int rank) {
+    public static float rankPenalty(int rank) {
         return rank <= 0 ? 0.0F : RESERVE_RANK_PENALTY;
     }
 
@@ -34,7 +34,7 @@ final class SoftMath {
      * Штраф за вузьке приземлення: чим більше сусідніх м'яких клітинок (margin 0..4), тим більший допуск на промах - центр басейну
      * 3x3 (margin 4) краще за одиночний блок (margin 0). Лише додатний: негативний malus у вузлі означає "прохід заборонено".
      */
-    static float tolerancePenalty(int margin) {
+    public static float tolerancePenalty(int margin) {
         return switch (Math.max(0, Math.min(4, margin))) {
             case 0 -> 1.5F;
             case 1 -> 0.9F;

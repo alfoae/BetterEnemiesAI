@@ -1,4 +1,4 @@
-package com.example.examplemod.Enemy.EnemyMovement.Run_N_Jump;
+package com.example.examplemod.Enemy.EnemyMovement.SafeFall;
 
 /**
  * Чиста арифметика шкоди від падіння БЕЗ типів Minecraft (тому її можна перевірити окремо від гри, див.
@@ -15,7 +15,7 @@ package com.example.examplemod.Enemy.EnemyMovement.Run_N_Jump;
  * {@code N} блоків нижче дає {@code N + апекс} (апекс звичайного стрибка ~1.25 блока), а не просто {@code N}: стрибок на
  * -2 уже дає 1 HP шкоди, на -3 - 2 HP. Старий код вважав -3 безкоштовним.
  */
-final class FallMath {
+public final class FallMath {
 
     private FallMath() {
     }
@@ -23,7 +23,7 @@ final class FallMath {
     /**
      * Висота апекса (блоків) стрибка з початковою вертикальною швидкістю {@code vy0}: за тією ж моделлю, що й політ у GapJumpPhysics.
      */
-    static double apexHeight(double vy0, double gravityPerTick, double dragPerTick) {
+    public static double apexHeight(double vy0, double gravityPerTick, double dragPerTick) {
         double y = 0.0;
         double vy = vy0;
         for (int tick = 0; tick < 200 && vy > 0.0; tick++) { // 200 - лише захист від нескінченного циклу при сміттєвих вхідних
@@ -36,7 +36,7 @@ final class FallMath {
     /**
      * Скільки блоків рахує лічильник падіння: спуск від апекса до поверхні приземлення (dy < 0 - нижче відриву).
      */
-    static double fallBlocks(double apex, int dy) {
+    public static double fallBlocks(double apex, int dy) {
         return Math.max(0.0, apex - dy);
     }
 
@@ -44,7 +44,7 @@ final class FallMath {
      * Шкода моба після Опору й чарів (ще БЕЗ поглинання) від падіння на {@code fallBlocks} блоків на поверхню з множником
      * {@code blockMultiplier}. 0 - без шкоди.
      */
-    static float damageAfterReductions(Profile p, double fallBlocks, double blockMultiplier) {
+    public static float damageAfterReductions(Profile p, double fallBlocks, double blockMultiplier) {
         if (p.immune || blockMultiplier <= 0.0) {
             return 0.0F;
         }
@@ -71,14 +71,14 @@ final class FallMath {
     /**
      * Скільки HEALTH моб втратить (поглинання вже віднято).
      */
-    static float healthLoss(Profile p, float damage) {
+    public static float healthLoss(Profile p, float damage) {
         return Math.max(damage - p.absorption, 0.0F);
     }
 
     /**
      * Чи виживе моб (і збереже хоча б {@code reserve} HP).
      */
-    static boolean survives(Profile p, float damage) {
+    public static boolean survives(Profile p, float damage) {
         return p.health - healthLoss(p, damage) >= p.reserve - 1.0E-4F;
     }
 
@@ -87,7 +87,7 @@ final class FallMath {
      * динамічний "нижній предел" стрибка вниз: здоровий моб з Невагомістю - глибше, ледь живий - мілко (сканування все
      * одно не менше старого ліміту, а смертельні кандидати відсікаються окремо).
      */
-    static int maxSurvivableDrop(Profile p, double apex, int cap) {
+    public static int maxSurvivableDrop(Profile p, double apex, int cap) {
         if (p.immune) {
             return cap;
         }
@@ -110,7 +110,7 @@ final class FallMath {
      * @param protection      Сума захисту чарами спорядження від падіння (ванільний {@code getDamageProtection}); діє в межах 0..20.
      * @param immune          Падіння не завдає шкоди взагалі (імунний тип, Повільне падіння, невразливість).
      */
-        record Profile(float health, float absorption, float reserve, double safeFall, double fallMultiplier,
+    public record Profile(float health, float absorption, float reserve, double safeFall, double fallMultiplier,
                        int resistanceLevel, float protection, boolean immune) {
     }
 }

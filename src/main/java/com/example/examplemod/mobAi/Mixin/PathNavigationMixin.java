@@ -1,6 +1,6 @@
 package com.example.examplemod.mobAi.Mixin;
 
-import com.example.examplemod.Enemy.EnemyMovement.Run_N_Jump.DropAssist;
+import com.example.examplemod.Enemy.EnemyMovement.SafeFall.DropAssist;
 import com.example.examplemod.Enemy.EnemyMovement.TerrainShape.ShapePathAccess;
 import com.example.examplemod.Enemy.EnemyMovement.TerrainShape.ShapeProbe;
 import com.example.examplemod.debug.DebugLog;

@@ -2,11 +2,13 @@ package com.example.examplemod.Enemy.EnemyMovement.Run_N_Jump;
 
 import com.example.examplemod.Config;
 import com.example.examplemod.Enemy.EnemyBehavior.EnemyPursuit_N_Search.PursuitBehavior.PursuitEnemyBehavior;
+import com.example.examplemod.Enemy.EnemyMovement.SafeFall.*;
 import com.example.examplemod.Enemy.EnemyMovement.TerrainShape.HopNode;
 import com.example.examplemod.Enemy.EnemyMovement.TerrainShape.ShapeAwareNodeEvaluator;
 import com.example.examplemod.Enemy.EnemyMovement.TerrainShape.ShapeSettings;
 import com.example.examplemod.Enemy.EnemyMovement.TerrainShape.ShapeWalk.Spot;
 import com.example.examplemod.debug.DebugLog;
+import com.example.examplemod.debug.FallDebug;
 import com.example.examplemod.debug.GraphProbe;
 import net.minecraft.core.BlockPos;
 import net.minecraft.world.entity.Mob;
@@ -267,8 +269,8 @@ public class GapJumpNodeEvaluator extends ShapeAwareNodeEvaluator {
     private SoftLandings.Index softIndex;
     /** v24: перевіряти розбіг для стрибків у м'яке НЕ впритик ({@code softLandingRunUpCheck}). */
     private boolean runUpCheck;
-    private static final int[] NO_SOFT = new int[0];
     private static final int LEDGE_PLAN_BUDGET = 24;
+    private static final int[] NO_SOFT = new int[0];
     /** Скільки смертельних спусків відкинуто в цьому пошуку (для повідомлення "моб застряг"). */
     private int lethalRemoved;
     /** Скільки м'яких приземлень додано в граф у цьому пошуку. */
@@ -335,12 +337,18 @@ public class GapJumpNodeEvaluator extends ShapeAwareNodeEvaluator {
      * v24: колонки впритик, прочитані в цьому пошуку: ключ (x, верхній рівень, z) -> {вид, Y клітинки ніг} або {@link #NO_SOFT}.
      */
     private final java.util.HashMap<Long, int[]> softColumnCache = new java.util.HashMap<>();
-    /** v24: скільки стрибків у м'яке відкинуто через замалий розбіг (для зведення [FALL]). */
+    /**
+     * v24: скільки стрибків у м'яке відкинуто через замалий розбіг (для зведення [FALL]).
+     */
     private int softRunUpRejected;
-    /** Спуски зі збігом на сусідню клітинку на ТВЕРДИЙ блок будь-якої переживаної глибини ({@code walkOffAnyDepth}). */
+    /**
+     * Спуски зі збігом на сусідню клітинку на ТВЕРДИЙ блок будь-якої переживаної глибини ({@code walkOffAnyDepth}).
+     */
     private boolean hardDropsEnabled;
     private int hardMaxDepth;
-    /** Шкода стрибка на близьку платформу - як від збігу з краю (без апекса), якщо RNJ так і виконає ({@code hopWalkOffDamage}). */
+    /**
+     * Шкода стрибка на близьку платформу - як від збігу з краю (без апекса), якщо RNJ так і виконає ({@code hopWalkOffDamage}).
+     */
     private boolean walkOffModel;
 
     /**
@@ -349,9 +357,13 @@ public class GapJumpNodeEvaluator extends ShapeAwareNodeEvaluator {
     private boolean exactReady() {
         return this.exactJumps && this.source != null && this.dims != null;
     }
-    /** Коридор стрибка вниз з допуском на дотичне зачеплення кута ({@code corridorGlance}). */
+    /**
+     * Коридор стрибка вниз з допуском на дотичне зачеплення кута ({@code corridorGlance}).
+     */
     private boolean glanceCorridor;
-    /** Фізика опори відриву поточного вузла (та сама, що в getNeighbors). */
+    /**
+     * Фізика опори відриву поточного вузла (та сама, що в getNeighbors).
+     */
     private GapJumpPhysics.Takeoff takeoffModel;
 
     @Override
@@ -485,7 +497,9 @@ public class GapJumpNodeEvaluator extends ShapeAwareNodeEvaluator {
         }
         return count;
     }
-    /** З поточного вузла досяжне м'яке приземлення (результат addSoftLandings) - тоді тверді спуски теж штрафуються пріоритетом. */
+    /**
+     * З поточного вузла досяжне м'яке приземлення (результат addSoftLandings) - тоді тверді спуски теж штрафуються пріоритетом.
+     */
     private boolean softReachableHere;
 
     // -------------------------------------------------------------------------------------
@@ -670,7 +684,9 @@ public class GapJumpNodeEvaluator extends ShapeAwareNodeEvaluator {
         sizes[dy + downLimit] = found;
         return found;
     }
-    /** Кеш "збіг без стрибка" для кандидата (dx, dz, dy) поточного вузла: ключ і значення. */
+    /**
+     * Кеш "збіг без стрибка" для кандидата (dx, dz, dy) поточного вузла: ключ і значення.
+     */
     private BlockPos walkOffCacheOrigin;
     private long walkOffCacheKey;
 
@@ -760,7 +776,9 @@ public class GapJumpNodeEvaluator extends ShapeAwareNodeEvaluator {
      * Моб здоровий: HP вище {@code ledgeHealthyFraction} від максимуму - дрібне падіння має пріоритет над виступами.
      */
     private boolean ledgeHealthy;
-    /** Скільки разів у цьому пошуку ще можна запускати планувальник виступів (запобіжник часу A*). */
+    /**
+     * Скільки разів у цьому пошуку ще можна запускати планувальник виступів (запобіжник часу A*).
+     */
     private int ledgeBudget;
     /** Скільки вузлів пошуку планувальника ще можна витратити за весь пошук шляху (сумарно по всіх краях). */
     private int ledgeNodeBudget;
@@ -804,9 +822,7 @@ public class GapJumpNodeEvaluator extends ShapeAwareNodeEvaluator {
         return -1;
     }
 
-    /**
-     * Копія вузла з іншою ціною (спільний вузол пошуку міняти не можна: інші шляхи на ту саму клітинку теж заплатили б).
-     */
+    /** Копія вузла з іншою ціною (спільний вузол пошуку міняти не можна: інші шляхи на ту саму клітинку теж заплатили б). */
     private static Node copyWithMalus(Node source, float malus) {
         Node copy = source instanceof DropNode ? new DropNode(source.x, source.y, source.z) : new Node(source.x, source.y, source.z);
         copy.type = source.type;
@@ -1094,60 +1110,6 @@ public class GapJumpNodeEvaluator extends ShapeAwareNodeEvaluator {
     }
 
     /**
-     * v20: шкода (HP, після Опору й чарів, до поглинання) від приземлення на {@code origin + (dx,dy,dz)} стрибком із цього вузла.
-     */
-    private float fallDamageOf(BlockPos origin, int dx, int dz, int dy) {
-        FallMath.Profile profile = this.fallProfile;
-        if (profile == null) {
-            return 0.0F;
-        }
-        double apex = this.takeoffApex;
-        if (apex > 0.0 && this.walkOffModel && willWalkOff(origin, dx, dz, dy)) {
-            apex = 0.0; // v25: RNJ зійде з краю без стрибка - падає лише різниця рівнів, а не апекс + різниця
-        }
-        double fall = FallMath.fallBlocks(apex, dy);
-        if (fall <= profile.safeFall()) {
-            return 0.0F; // швидкий вихід: без звернень до світу
-        }
-        BlockPos landing = origin.offset(dx, dy, dz);
-        BlockState below = getBlockStateAt(landing.below());
-        BlockState feet = getBlockStateAt(landing);
-        BlockState head = getBlockStateAt(landing.above());
-        double multiplier = below == null || feet == null || head == null
-                ? 1.0 : FallLanding.multiplier(below, feet, head); // v22: + драбини/ліани
-        return FallMath.damageAfterReductions(profile, fall, multiplier);
-    }
-
-    /** v20: штраф у вартості ребра за шкоду від падіння; заодно запам'ятовує найменшу шкоду (див. getNeighbors). */
-    private float fallPenalty(BlockPos origin, int dx, int dz, int dy) {
-        float damage = fallDamageOf(origin, dx, dz, dy);
-        if (damage < this.minJumpDamage) {
-            this.minJumpDamage = damage;
-        }
-        if (this.fallStats != null && dy < 0) {
-            dbgCandidate(origin, dx, dz, dy, damage);
-        }
-        return damage > 0.0F ? damage * this.fallCostPerHp : 0.0F;
-    }
-
-    /**
-     * Скільки з 4 сусідніх клітинок (того ж рівня) теж м'які: допуск на промах, 0 - одиночний блок, 4 - центр басейну 3x3.
-     */
-    private int softMargin(BlockPos landing) {
-        int margin = 0;
-        for (int[] d : SOFT_NEIGHBORS) {
-            BlockPos c = landing.offset(d[0], 0, d[1]);
-            BlockState b = getBlockStateAt(c.below());
-            BlockState f = getBlockStateAt(c);
-            BlockState h = getBlockStateAt(c.above());
-            if (b != null && f != null && h != null && SoftLandings.kindOf(b, f, h) != null) {
-                margin++;
-            }
-        }
-        return margin;
-    }
-
-    /**
      * Вузол м'якого приземлення. Ціна: ранг + штраф за вузьке приземлення + шкода (v24: рахується, а не вважається нульовою: сіно
      * й ліжко пом'якшують падіння, але не скасовують його, а з великої висоти можуть і вбити). БЕЗ штрафу за відстань: м'яке
      * приземлення з поточної платформи має бути дешевшим за спуск пішки.
@@ -1175,6 +1137,62 @@ public class GapJumpNodeEvaluator extends ShapeAwareNodeEvaluator {
         n.costMalus = SoftMath.rankPenalty(kind.rank) + SoftMath.tolerancePenalty(cell[1])
                 + (damage > 0.0F ? damage * this.fallCostPerHp : 0.0F);
         return n;
+    }
+
+    /**
+     * v20: шкода (HP, після Опору й чарів, до поглинання) від приземлення на {@code origin + (dx,dy,dz)} стрибком із цього вузла.
+     */
+    private float fallDamageOf(BlockPos origin, int dx, int dz, int dy) {
+        FallMath.Profile profile = this.fallProfile;
+        if (profile == null) {
+            return 0.0F;
+        }
+        double apex = this.takeoffApex;
+        if (apex > 0.0 && this.walkOffModel && willWalkOff(origin, dx, dz, dy)) {
+            apex = 0.0; // v25: RNJ зійде з краю без стрибка - падає лише різниця рівнів, а не апекс + різниця
+        }
+        double fall = FallMath.fallBlocks(apex, dy);
+        if (fall <= profile.safeFall()) {
+            return 0.0F; // швидкий вихід: без звернень до світу
+        }
+        BlockPos landing = origin.offset(dx, dy, dz);
+        BlockState below = getBlockStateAt(landing.below());
+        BlockState feet = getBlockStateAt(landing);
+        BlockState head = getBlockStateAt(landing.above());
+        double multiplier = below == null || feet == null || head == null
+                ? 1.0 : FallLanding.multiplier(below, feet, head); // v22: + драбини/ліани
+        return FallMath.damageAfterReductions(profile, fall, multiplier);
+    }
+
+    /**
+     * v20: штраф у вартості ребра за шкоду від падіння; заодно запам'ятовує найменшу шкоду (див. getNeighbors).
+     */
+    private float fallPenalty(BlockPos origin, int dx, int dz, int dy) {
+        float damage = fallDamageOf(origin, dx, dz, dy);
+        if (damage < this.minJumpDamage) {
+            this.minJumpDamage = damage;
+        }
+        if (this.fallStats != null && dy < 0) {
+            dbgCandidate(origin, dx, dz, dy, damage);
+        }
+        return damage > 0.0F ? damage * this.fallCostPerHp : 0.0F;
+    }
+
+    /**
+     * Скільки з 4 сусідніх клітинок (того ж рівня) теж м'які: допуск на промах, 0 - одиночний блок, 4 - центр басейну 3x3.
+     */
+    private int softMargin(BlockPos landing) {
+        int margin = 0;
+        for (int[] d : SOFT_NEIGHBORS) {
+            BlockPos c = landing.offset(d[0], 0, d[1]);
+            BlockState b = getBlockStateAt(c.below());
+            BlockState f = getBlockStateAt(c);
+            BlockState h = getBlockStateAt(c.above());
+            if (b != null && f != null && h != null && SoftLandings.kindOf(b, f, h) != null) {
+                margin++;
+            }
+        }
+        return margin;
     }
 
     /**
@@ -1507,32 +1525,6 @@ public class GapJumpNodeEvaluator extends ShapeAwareNodeEvaluator {
         return true;
     }
 
-    /** v25: коридор променя; для стрибків ВНИЗ (від 2 блоків) - з допуском на дотичне зачеплення кута. */
-    private int[][] corridorOf(GapJumpRays.Ray ray, int k, int dy) {
-        return this.glanceCorridor && dy <= -2 ? ray.corridorGlance()[k] : ray.corridor()[k];
-    }
-
-    /** v25: скільки клітинок рівної опори позаду краю у напрямку, ЗВОРОТНОМУ до {@code (dx, dz)} (до {@link #SOFT_RUNUP_MAX_CELLS}). */
-    private int runUpCellsFor(BlockPos origin, int dx, int dz) {
-        int g = gcd(Math.abs(dx), Math.abs(dz));
-        if (g == 0) {
-            return 0;
-        }
-        int sx = dx / g;
-        int sz = dz / g;
-        int m = Math.max(Math.abs(sx), Math.abs(sz));
-        int cells = 0;
-        for (int j = 1; j <= SOFT_RUNUP_MAX_CELLS; j++) {
-            int bx = -Math.round((float) (j * sx) / m);
-            int bz = -Math.round((float) (j * sz) / m);
-            if (!hasFloorAt(origin, bx, bz, 0)) {
-                break;
-            }
-            cells = j;
-        }
-        return cells;
-    }
-
     /**
      * v26: ребра "СПУСК ВИСТУПАМИ". З краю, звідки прямий спуск вниз бив би (чи вбив) моба, питаємо {@link LedgePlanner}: чи можна
      * спуститись ступенями - збіг убік або за кут, виступ ДО СТІНИ (не в повітрі), збіг з нього далі, і так до підлоги. Для A* це
@@ -1615,6 +1607,36 @@ public class GapJumpNodeEvaluator extends ShapeAwareNodeEvaluator {
         }
         this.ledgeAdded += added;
         return count;
+    }
+
+    /**
+     * v25: коридор променя; для стрибків ВНИЗ (від 2 блоків) - з допуском на дотичне зачеплення кута.
+     */
+    private int[][] corridorOf(GapJumpRays.Ray ray, int k, int dy) {
+        return this.glanceCorridor && dy <= -2 ? ray.corridorGlance()[k] : ray.corridor()[k];
+    }
+
+    /**
+     * v25: скільки клітинок рівної опори позаду краю у напрямку, ЗВОРОТНОМУ до {@code (dx, dz)} (до {@link #SOFT_RUNUP_MAX_CELLS}).
+     */
+    private int runUpCellsFor(BlockPos origin, int dx, int dz) {
+        int g = gcd(Math.abs(dx), Math.abs(dz));
+        if (g == 0) {
+            return 0;
+        }
+        int sx = dx / g;
+        int sz = dz / g;
+        int m = Math.max(Math.abs(sx), Math.abs(sz));
+        int cells = 0;
+        for (int j = 1; j <= SOFT_RUNUP_MAX_CELLS; j++) {
+            int bx = -Math.round((float) (j * sx) / m);
+            int bz = -Math.round((float) (j * sz) / m);
+            if (!hasFloorAt(origin, bx, bz, 0)) {
+                break;
+            }
+            cells = j;
+        }
+        return cells;
     }
 
     /**

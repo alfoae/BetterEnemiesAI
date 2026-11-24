@@ -1,9 +1,12 @@
-package com.example.examplemod.Enemy.EnemyMovement.Run_N_Jump;
+package com.example.examplemod.debug;
 
 import com.example.examplemod.Config;
 import com.example.examplemod.Enemy.EnemyBehavior.EnemyPursuit_N_Search.PursuitBehavior.PursuitEnemyBehavior;
+import com.example.examplemod.Enemy.EnemyMovement.Run_N_Jump.GapJumpAssistGoal;
+import com.example.examplemod.Enemy.EnemyMovement.Run_N_Jump.GapJumpPhysics;
+import com.example.examplemod.Enemy.EnemyMovement.Run_N_Jump.GapJumpRays;
+import com.example.examplemod.Enemy.EnemyMovement.SafeFall.*;
 import com.example.examplemod.Enemy.EnemyMovement.TerrainShape.HopNode;
-import com.example.examplemod.debug.DebugLog;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.tags.BlockTags;
@@ -69,15 +72,10 @@ public final class FallDebug {
     // ------------------------------------------------------------------------------------------
     // Форматування
     // ------------------------------------------------------------------------------------------
-
     /**
-     * Лише моби, що когось переслідують/шукають або саме виконують стрибок: пошук шляху йде в усіх наземних мобів світу, і без цього
-     * фільтра лог заливали б корови з вівцями.
+     * Підсумок останнього пошуку шляху моба: {tick, відкинуто смертельних спусків, додано м'яких приземлень}.
      */
-    static boolean relevant(Mob mob) {
-        return mob != null && (mob.getTarget() != null || PursuitEnemyBehavior.getChasePosition(mob) != null
-                || GapJumpAssistGoal.isActive(mob));
-    }
+    private static final Map<Mob, int[]> SEARCH_HINT = new WeakHashMap<>();
 
     private static String f1(double v) {
         return String.format(Locale.ROOT, "%.1f", v);
@@ -128,19 +126,50 @@ public final class FallDebug {
             default -> "звичайний (x1.0)";
         };
     }
-    /**
-     * Підсумок останнього пошуку шляху моба: {tick, відкинуто смертельних спусків, додано м'яких приземлень}.
-     */
-    private static final Map<Mob, int[]> SEARCH_HINT = new WeakHashMap<>();
     private static int softHits;
     private static int softMisses;
+
+    /**
+     * Лише моби, що когось переслідують/шукають або саме виконують стрибок: пошук шляху йде в усіх наземних мобів світу, і без цього
+     * фільтра лог заливали б корови з вівцями.
+     */
+    public static boolean relevant(Mob mob) {
+        return mob != null && (mob.getTarget() != null || PursuitEnemyBehavior.getChasePosition(mob) != null
+                || GapJumpAssistGoal.isActive(mob));
+    }
 
     // ------------------------------------------------------------------------------------------
     // 1. Профіль падіння (початок пошуку шляху)
     // ------------------------------------------------------------------------------------------
 
+    /**
+     * Що під/в клітинці приземлення й який множник шкоди з цього виходить за {@link FallDamage#landingMultiplier}.
+     */
+    static String describeLanding(BlockState below, BlockState feet, BlockState head) {
+        double multiplier = FallLanding.multiplier(below, feet, head);
+        int kind = landingKind(below, feet, head);
+        String sb = "блоки: під=" + blockName(below) + " ноги=" + blockName(feet) +
+                " голова=" + blockName(head) + " | вид=" + kindName(kind) +
+                " | множник у моделі=" + f2(multiplier);
+        return sb;
+    }
+
+    private static String dmg(FallMath.Profile p, double fall, double multiplier) {
+        float damage = FallMath.damageAfterReductions(p, fall, multiplier);
+        return f1(damage) + (FallMath.survives(p, damage) ? "" : "✗");
+    }
+
+    private static double normalApex() {
+        return FallMath.apexHeight(GapJumpPhysics.JUMP_VERTICAL_VELOCITY, GapJumpPhysics.GRAVITY_PER_TICK,
+                GapJumpPhysics.VERTICAL_DRAG_PER_TICK);
+    }
+
+    // ------------------------------------------------------------------------------------------
+    // 2. Статистика одного пошуку шляху (GapJumpNodeEvaluator)
+    // ------------------------------------------------------------------------------------------
+
     /** Профіль побудовано: HP/чари/ефекти, скільки моб переживе, нижній предел і таблиця шкоди за глибиною. */
-    static void logProfile(Mob mob, FallMath.Profile p, int cap, double apex, int survivable, int downLimit, float costPerHp) {
+    public static void logProfile(Mob mob, FallMath.Profile p, int cap, double apex, int survivable, int downLimit, float costPerHp) {
         try {
             String sig = f1(p.health()) + "|" + f1(p.absorption()) + "|" + f1(p.reserve()) + "|" + f2(p.safeFall()) + "|" + f2(p.fallMultiplier())
                     + "|" + p.resistanceLevel() + "|" + f1(p.protection()) + "|" + p.immune() + "|" + downLimit + "|" + mob.getMaxFallDistance();
@@ -192,8 +221,12 @@ public final class FallDebug {
         }
     }
 
+    // ------------------------------------------------------------------------------------------
+    // 3. Спуски в побудованому шляху
+    // ------------------------------------------------------------------------------------------
+
     /** Профіль не будується, бо вимкнено в конфігу ({@code fallDamageAwareJumps=false}). */
-    static void logProfileOff(Mob mob) {
+    public static void logProfileOff(Mob mob) {
         if (!DebugLog.throttle("fall-profile-off-" + mob.getId(), 10000L)) {
             return;
         }
@@ -201,8 +234,12 @@ public final class FallDebug {
                 + GapJumpPhysics.JUMP_DOWN_LIMIT_BLOCKS + ", без штрафів за шкоду й без відсікання смертельних приземлень");
     }
 
+    // ------------------------------------------------------------------------------------------
+    // 4. Виконавець (GapJumpAssistGoal)
+    // ------------------------------------------------------------------------------------------
+
     /** Профіль НЕ побудовано через виняток (раніше це мовчки перемикало пошук на стару логіку). */
-    static void logProfileFailed(Mob mob, RuntimeException failure) {
+    public static void logProfileFailed(Mob mob, RuntimeException failure) {
         if (!DebugLog.throttle("fall-profile-fail-" + mob.getId(), 5000L)) {
             return;
         }
@@ -210,40 +247,6 @@ public final class FallDebug {
         DebugLog.log(DebugLog.Cat.FALL, mob, "!!! ПРОФІЛЬ ПАДІННЯ НЕ ПОБУДОВАНО - виняток у FallDamage.profileOf; пошук іде за СТАРОЮ логікою"
                 + " (нижній предел -" + GapJumpPhysics.JUMP_DOWN_LIMIT_BLOCKS + ", без штрафів і без відсікання смертельних): "
                 + failure + (trace.length > 0 ? " @ " + trace[0] : ""));
-    }
-
-    // ------------------------------------------------------------------------------------------
-    // 2. Статистика одного пошуку шляху (GapJumpNodeEvaluator)
-    // ------------------------------------------------------------------------------------------
-
-    /**
-     * Що під/в клітинці приземлення й який множник шкоди з цього виходить за {@link FallDamage#landingMultiplier}.
-     */
-    static String describeLanding(BlockState below, BlockState feet, BlockState head) {
-        double multiplier = FallLanding.multiplier(below, feet, head);
-        int kind = landingKind(below, feet, head);
-        String sb = "блоки: під=" + blockName(below) + " ноги=" + blockName(feet) +
-                " голова=" + blockName(head) + " | вид=" + kindName(kind) +
-                " | множник у моделі=" + f2(multiplier);
-        return sb;
-    }
-
-    // ------------------------------------------------------------------------------------------
-    // 3. Спуски в побудованому шляху
-    // ------------------------------------------------------------------------------------------
-
-    private static String dmg(FallMath.Profile p, double fall, double multiplier) {
-        float damage = FallMath.damageAfterReductions(p, fall, multiplier);
-        return f1(damage) + (FallMath.survives(p, damage) ? "" : "✗");
-    }
-
-    // ------------------------------------------------------------------------------------------
-    // 4. Виконавець (GapJumpAssistGoal)
-    // ------------------------------------------------------------------------------------------
-
-    private static double normalApex() {
-        return FallMath.apexHeight(GapJumpPhysics.JUMP_VERTICAL_VELOCITY, GapJumpPhysics.GRAVITY_PER_TICK,
-                GapJumpPhysics.VERTICAL_DRAG_PER_TICK);
     }
 
     /**
@@ -321,7 +324,7 @@ public final class FallDebug {
      * Сегмент стрибка/збігу, що ПОЧИНАЄТЬСЯ: звідки й куди, скільки блоків падіння, блок приземлення, прогноз шкоди. Друкується
      * лише для спусків (Δy &lt;= -1); повертає прогноз для {@link #logLanding}, або {@code null}.
      */
-    static Prediction logSegment(Mob mob, BlockPos edge, Vec3 landing, double segDeltaY, double jumpFactor, boolean runOff) {
+    public static Prediction logSegment(Mob mob, BlockPos edge, Vec3 landing, double segDeltaY, double jumpFactor, boolean runOff) {
         if (mob == null || segDeltaY > -0.99 || !DebugLog.on(DebugLog.Cat.FALL)) {
             return null;
         }
@@ -358,9 +361,7 @@ public final class FallDebug {
         }
     }
 
-    /**
-     * Моб зараз У м'якій клітинці (вода, драбина) або стоїть на сіні/ліжку/меду/сліймі - тобто приземлення вдалось.
-     */
+    /** Моб зараз У м'якій клітинці (вода, драбина) або стоїть на сіні/ліжку/меду/сліймі - тобто приземлення вдалось. */
     private static boolean softContactNow(Mob mob) {
         if (mob.isInWater() || mob.onClimbable()) {
             return true;
@@ -370,10 +371,8 @@ public final class FallDebug {
         return FallLanding.multiplier(level.getBlockState(pos.below()), level.getBlockState(pos), level.getBlockState(pos.above())) < 1.0;
     }
 
-    /**
-     * Результат: фактичне падіння, втрата HP й відхилення від центру проти прогнозу {@link #logSegment}; лічильники влучань.
-     */
-    static void logLanding(Mob mob, double airFallMax, float hpAtLaunch, Prediction predicted) {
+    /** Результат: фактичне падіння, втрата HP й відхилення від центру проти прогнозу {@link #logSegment}; лічильники влучань. */
+    public static void logLanding(Mob mob, double airFallMax, float hpAtLaunch, Prediction predicted) {
         if (mob == null || predicted == null || !DebugLog.on(DebugLog.Cat.FALL)) {
             return;
         }
@@ -411,10 +410,8 @@ public final class FallDebug {
         }
     }
 
-    /**
-     * Підсумок пошуку шляху (викликається з evaluator.done()) - щоб потім сказати, чи моб застряг через смертельні спуски.
-     */
-    static void noteSearch(Mob mob, int lethalRemoved, int softAdded) {
+    /** Підсумок пошуку шляху (викликається з evaluator.done()) - щоб потім сказати, чи моб застряг через смертельні спуски. */
+    public static void noteSearch(Mob mob, int lethalRemoved, int softAdded) {
         if (mob != null) {
             SEARCH_HINT.put(mob, new int[]{mob.tickCount, lethalRemoved, softAdded});
         }
@@ -452,9 +449,7 @@ public final class FallDebug {
         }
     }
 
-    /**
-     * Де моб відносно шляху: найближчий вузол і "наступний" - щоб бачити, чи зійшов він зі шляху (зліт зі сходів і т.п.).
-     */
+    /** Де моб відносно шляху: найближчий вузол і "наступний" - щоб бачити, чи зійшов він зі шляху (зліт зі сходів і т.п.). */
     private static String pathDeviation(Mob mob) {
         Path p = mob.getNavigation().getPath();
         if (p == null || p.getNodeCount() == 0) {
@@ -509,7 +504,7 @@ public final class FallDebug {
     /**
      * Прогноз падіння/шкоди для сегмента, який збирається виконати {@code GapJumpAssistGoal} (потім порівнюється з фактом).
      */
-    record Prediction(double fallBlocks, float damage, boolean soft, double landX, double landZ) {
+    public record Prediction(double fallBlocks, float damage, boolean soft, double landX, double landZ) {
     }
 
     // ------------------------------------------------------------------------------------------
@@ -520,23 +515,24 @@ public final class FallDebug {
      * Збирається ЛИШЕ в одному пошуку на моба раз на 2 с ({@code GapJumpNodeEvaluator#prepare}); друкується в
      * {@code GapJumpNodeEvaluator#done}. Рівний паркур без жодного спуску нічого не друкує.
      */
-    static final class SearchStats {
+    public static final class SearchStats {
         private static final int REL_DOWN = 12;
         private static final int REL_UP = 3;
         private static final int DY_SLOTS = 25; // Δy = 0..-24
 
         private final Mob mob;
         private final FallMath.Profile profile;
-        private int startY = Integer.MIN_VALUE;
-        private int expanded;
-        private int scanned;
         private final int[] expandedByRel = new int[REL_DOWN + REL_UP + 1];
         private final int[] candByDy = new int[DY_SLOTS];
         private final int[] lethalByDy = new int[DY_SLOTS];
         private final int[] landKinds = new int[7];
         private final int[] dropKinds = new int[7];
+        public int deepTriggered;
+        public int deepSkippedFree;
+        private int startY = Integer.MIN_VALUE;
+        private int expanded;
+        private int scanned;
         private int candFlatOrUp;
-        int deepTriggered;
         private float bestDamage = Float.MAX_VALUE;
         private String bestDesc;
         private float rejectedBestLoss = Float.MAX_VALUE;
@@ -546,7 +542,6 @@ public final class FallDebug {
         private int dropsFree;
         private int dropsPenalized;
         private int dropsRemoved;
-        int deepSkippedFree;
         private float cheapestDropDamage = Float.MAX_VALUE;
         private String cheapestDropDesc;
         private float removedBestLoss = Float.MAX_VALUE;
@@ -562,22 +557,9 @@ public final class FallDebug {
         private int hardLethal;
         private boolean hardOn;
 
-        SearchStats(Mob mob, FallMath.Profile profile) {
+        public SearchStats(Mob mob, FallMath.Profile profile) {
             this.mob = mob;
             this.profile = profile;
-        }
-
-        void onExpand(Node node) {
-            this.expanded++;
-            if (this.startY == Integer.MIN_VALUE) {
-                this.startY = node.y; // перший розкритий вузол - стартовий
-            }
-            int rel = Mth.clamp(node.y - this.startY, -REL_DOWN, REL_UP);
-            this.expandedByRel[rel + REL_DOWN]++;
-        }
-
-        void onScan() {
-            this.scanned++;
         }
 
         private static String describeEdge(BlockPos origin, int dx, int dz, int dy) {
@@ -595,8 +577,23 @@ public final class FallDebug {
             return sb.length() == 0 ? " немає" : sb.toString();
         }
 
-        /** Кандидати, що лишились після сканування рівнів (до розподілу буфера сусідів). {@code sizes[dy + downLimit]}. */
-        void onLevels(int[] sizes, int downLimit) {
+        public void onExpand(Node node) {
+            this.expanded++;
+            if (this.startY == Integer.MIN_VALUE) {
+                this.startY = node.y; // перший розкритий вузол - стартовий
+            }
+            int rel = Mth.clamp(node.y - this.startY, -REL_DOWN, REL_UP);
+            this.expandedByRel[rel + REL_DOWN]++;
+        }
+
+        public void onScan() {
+            this.scanned++;
+        }
+
+        /**
+         * Кандидати, що лишились після сканування рівнів (до розподілу буфера сусідів). {@code sizes[dy + downLimit]}.
+         */
+        public void onLevels(int[] sizes, int downLimit) {
             for (int i = 0; i < sizes.length; i++) {
                 int dy = i - downLimit;
                 if (dy < 0) {
@@ -608,8 +605,10 @@ public final class FallDebug {
             }
         }
 
-        /** Кандидат спуску потрапив у граф (з його шкодою й блоком приземлення). */
-        void onCandidate(BlockPos origin, int dx, int dz, int dy, float damage, BlockState below, BlockState feet, BlockState head) {
+        /**
+         * Кандидат спуску потрапив у граф (з його шкодою й блоком приземлення).
+         */
+        public void onCandidate(BlockPos origin, int dx, int dz, int dy, float damage, BlockState below, BlockState feet, BlockState head) {
             this.landKinds[landingKind(below, feet, head)]++;
             if (damage < this.bestDamage) {
                 this.bestDamage = damage;
@@ -617,9 +616,11 @@ public final class FallDebug {
             }
         }
 
-        /** Приземлення відсічено як смертельне. */
-        void onLethal(BlockPos origin, int dx, int dz, int dy, float damage, float healthLoss,
-                      BlockState below, BlockState feet, BlockState head) {
+        /**
+         * Приземлення відсічено як смертельне.
+         */
+        public void onLethal(BlockPos origin, int dx, int dz, int dy, float damage, float healthLoss,
+                             BlockState below, BlockState feet, BlockState head) {
             int slot = Math.min(-dy, DY_SLOTS - 1);
             this.lethalByDy[slot]++;
             if (healthLoss < this.rejectedBestLoss) {
@@ -631,8 +632,10 @@ public final class FallDebug {
             }
         }
 
-        /** Вузол звернувся до індексу м'яких приземлень: скільки кандидатів знайдено, скільки додано в граф. */
-        void onSoft(int candidates, int added, boolean present, int indexSize) {
+        /**
+         * Вузол звернувся до індексу м'яких приземлень: скільки кандидатів знайдено, скільки додано в граф.
+         */
+        public void onSoft(int candidates, int added, boolean present, int indexSize) {
             this.softSearches++;
             this.softCandidates += candidates;
             this.softAdded += added;
@@ -640,21 +643,27 @@ public final class FallDebug {
             this.softIndexSize = indexSize;
         }
 
-        /** v24: скільки стрибків у м'яке відкинуто через замалий розбіг (коротка платформа позаду краю). */
-        void onRunUp(int rejected) {
+        /**
+         * v24: скільки стрибків у м'яке відкинуто через замалий розбіг (коротка платформа позаду краю).
+         */
+        public void onRunUp(int rejected) {
             this.softRunUpRejected = rejected;
         }
 
-        /** v25: твердих спусків впритик (в т.ч. кутових) додано в граф і скільки відкинуто як смертельні. */
-        void onHard(boolean enabled, int added, int lethal) {
+        /**
+         * v25: твердих спусків впритик (в т.ч. кутових) додано в граф і скільки відкинуто як смертельні.
+         */
+        public void onHard(boolean enabled, int added, int lethal) {
             this.hardOn = enabled;
             this.hardAdded = added;
             this.hardLethal = lethal;
         }
 
-        /** Ребро спуску (зрив з краю) розглянуто: безкоштовне, зі штрафом чи відкинуте як смертельне. */
-        void onDrop(Node from, Node to, int drop, float damage, float healthLoss, boolean lethal,
-                    BlockState below, BlockState feet, BlockState head) {
+        /**
+         * Ребро спуску (зрив з краю) розглянуто: безкоштовне, зі штрафом чи відкинуте як смертельне.
+         */
+        public void onDrop(Node from, Node to, int drop, float damage, float healthLoss, boolean lethal,
+                           BlockState below, BlockState feet, BlockState head) {
             this.dropsSeen++;
             this.dropKinds[landingKind(below, feet, head)]++;
             String desc = "(" + from.x + "," + from.y + "," + from.z + ") -> (" + to.x + "," + to.y + "," + to.z + ") спуск=" + drop
@@ -676,7 +685,7 @@ public final class FallDebug {
             }
         }
 
-        void flush(int downLimit, float costPerHp, boolean dropAware) {
+        public void flush(int downLimit, float costPerHp, boolean dropAware) {
             try {
                 boolean anyDescent = this.deepTriggered > 0 || this.dropsSeen > 0 || this.softSearches > 0;
                 for (int i = 1; i < DY_SLOTS && !anyDescent; i++) {

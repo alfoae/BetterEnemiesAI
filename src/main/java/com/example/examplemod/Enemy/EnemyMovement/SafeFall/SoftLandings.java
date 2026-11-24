@@ -1,4 +1,4 @@
-package com.example.examplemod.Enemy.EnemyMovement.Run_N_Jump;
+package com.example.examplemod.Enemy.EnemyMovement.SafeFall;
 
 import net.minecraft.core.BlockPos;
 import net.minecraft.tags.BlockTags;
@@ -20,7 +20,7 @@ import java.util.*;
  * першої не-порожньої клітинки; кеш на моба ~2 с ({@link #CACHE_TTL_TICKS}); на кожну записану клітинку ще 27 читань блоків
  * (перевірка небезпек) - тому {@link #MAX_CELLS} обмежує розмір.
  */
-final class SoftLandings {
+public final class SoftLandings {
 
     /** Скільки м'яких клітинок максимум в одному індексі (великі озера не повинні роздувати пошук). */
     private static final int MAX_CELLS = 400;
@@ -33,6 +33,65 @@ final class SoftLandings {
     private static final Map<Mob, List<Index>> CACHE = new WeakHashMap<>();
     private static final int CACHE_TTL_TICKS = 40;
     private static final int MAX_INDEXES_PER_MOB = 4;
+
+    /**
+     * Вид приземлення в клітинку ніг {@code feet} (під нею {@code below}, над нею {@code head}) або {@code null}, якщо клітинка
+     * не м'яка або в неї не вміщується тіло.
+     */
+    public static Kind kindOf(BlockState below, BlockState feet, BlockState head) {
+        if (head.isSolid()) {
+            return null; // тіло не вміщується
+        }
+        if (feet.getFluidState().is(FluidTags.WATER)) {
+            return Kind.WATER;
+        }
+        if (feet.is(BlockTags.CLIMBABLE)) {
+            return Kind.CLIMB;
+        }
+        if (feet.is(Blocks.COBWEB)) {
+            return Kind.WEB;
+        }
+        if (feet.isSolid()) {
+            return null;
+        }
+        if (below.is(Blocks.HAY_BLOCK)) {
+            return Kind.HAY;
+        }
+        if (below.is(BlockTags.BEDS)) {
+            return Kind.BED;
+        }
+        if (below.is(Blocks.HONEY_BLOCK)) {
+            return Kind.HONEY;
+        }
+        if (below.is(Blocks.SLIME_BLOCK)) {
+            return Kind.SLIME;
+        }
+        return null;
+    }
+
+    /**
+     * Індекс для вузла {@code (cx, cy, cz)} із запасом {@code reach} блоків навколо: з кешу моба (до ~2 с), якщо котрийсь
+     * наявний його покриває, інакше побудований заново з радіусом {@code radius} (і доданий у кеш, до
+     * {@link #MAX_INDEXES_PER_MOB} штук - найстаріші витісняються).
+     */
+    public static Index obtain(Mob mob, Reader reader, int cx, int cy, int cz, int reach, int radius, int maxDepth, long tick) {
+        List<Index> list = CACHE.computeIfAbsent(mob, k -> new ArrayList<>(MAX_INDEXES_PER_MOB));
+        list.removeIf(i -> tick < i.tick || tick - i.tick > CACHE_TTL_TICKS);
+        for (Index cached : list) {
+            if (cached.covers(cx, cy, cz, reach, maxDepth)) {
+                return cached;
+            }
+        }
+        Index fresh = build(reader, cx, cy, cz, Math.max(radius, reach), maxDepth, tick);
+        list.add(fresh);
+        while (list.size() > MAX_INDEXES_PER_MOB) {
+            list.remove(0);
+        }
+        return fresh;
+    }
+
+    private SoftLandings() {
+    }
 
     /**
      * v24: м'яка клітинка в колонці {@code (x, z)}, шукаючи ЗВЕРХУ ВНИЗ від рівня {@code yTop} до {@code yBottom} - те саме правило,
@@ -70,9 +129,9 @@ final class SoftLandings {
      * павутиння). Те саме, що {@link #probeColumn}, але повертає й ТВЕРДУ підлогу (для спусків на сходинки), а не лише м'яку.
      *
      * @return {вид м'якого (ordinal {@link Kind}) або -1 для твердої (чи небезпечної для м'якого) підлоги, Y клітинки ніг} або
-     * {@code null}, якщо підлоги нема, вона небезпечна (лава, кактус, магма...) або колонку не прочитано
+     *         {@code null}, якщо підлоги нема, вона небезпечна (лава, кактус, магма...) або колонку не прочитано
      */
-    static int[] probeFloor(Reader r, int x, int z, int yTop, int yBottom) {
+    public static int[] probeFloor(Reader r, int x, int z, int yTop, int yBottom) {
         BlockPos.MutableBlockPos p = new BlockPos.MutableBlockPos();
         for (int y = yTop; y >= yBottom; y--) {
             BlockState state = r.get(p.set(x, y, z));
@@ -98,89 +157,27 @@ final class SoftLandings {
         return null;
     }
 
-    private SoftLandings() {
-    }
-
-    /**
-     * Вид приземлення в клітинку ніг {@code feet} (під нею {@code below}, над нею {@code head}) або {@code null}, якщо клітинка
-     * не м'яка або в неї не вміщується тіло.
-     */
-    static Kind kindOf(BlockState below, BlockState feet, BlockState head) {
-        if (head.isSolid()) {
-            return null; // тіло не вміщується
-        }
-        if (feet.getFluidState().is(FluidTags.WATER)) {
-            return Kind.WATER;
-        }
-        if (feet.is(BlockTags.CLIMBABLE)) {
-            return Kind.CLIMB;
-        }
-        if (feet.is(Blocks.COBWEB)) {
-            return Kind.WEB;
-        }
-        if (feet.isSolid()) {
-            return null;
-        }
-        if (below.is(Blocks.HAY_BLOCK)) {
-            return Kind.HAY;
-        }
-        if (below.is(BlockTags.BEDS)) {
-            return Kind.BED;
-        }
-        if (below.is(Blocks.HONEY_BLOCK)) {
-            return Kind.HONEY;
-        }
-        if (below.is(Blocks.SLIME_BLOCK)) {
-            return Kind.SLIME;
-        }
-        return null;
-    }
-
-    /** Колонка зверху вниз до першої не-порожньої клітинки: вона й вирішує, чи є тут м'яке приземлення. */
-    private static void scanColumn(Reader r, BlockPos.MutableBlockPos p, Index index, int x, int z, int yTop, int yBottom) {
-        for (int y = yTop; y >= yBottom; y--) {
-            BlockState state = r.get(p.set(x, y, z));
-            if (state == null) {
-                return;
-            }
-            if (state.isAir()) {
-                continue;
-            }
-            if (state.getFluidState().is(FluidTags.WATER) || state.is(BlockTags.CLIMBABLE) || state.is(Blocks.COBWEB)) {
-                tryRecord(r, p, index, x, y, z); // вода - її ПОВЕРХНЯ (перша клітинка води згори)
-                return;
-            }
-            if (state.isSolid()) {
-                tryRecord(r, p, index, x, y + 1, z); // тверда опора: м'яка лише якщо це сіно/ліжко/мед/слайм - клітинка НАД нею
-                return;
-            }
-            // решта (трава, сніг-шар, плита без колізії) - проходимо далі вниз
-        }
-    }
-
     private static long columnKey(int x, int z) {
         return ((long) x << 32) ^ (z & 0xFFFFFFFFL);
     }
 
     /**
-     * Індекс для вузла {@code (cx, cy, cz)} із запасом {@code reach} блоків навколо: з кешу моба (до ~2 с), якщо котрийсь
-     * наявний його покриває, інакше побудований заново з радіусом {@code radius} (і доданий у кеш, до
-     * {@link #MAX_INDEXES_PER_MOB} штук - найстаріші витісняються).
+     * v24: вид приземлення в клітинку ніг {@code (x, y, z)} З перевіркою небезпек поруч (лава, вогонь, кактус...): одне правило для
+     * індексу, для колонок впритик і для ванільних ребер спуску ({@code applyDropCosts}) - щоб вода біля лави не була "м'якою"
+     * в одному місці й "небезпечною" в іншому.
      */
-    static Index obtain(Mob mob, Reader reader, int cx, int cy, int cz, int reach, int radius, int maxDepth, long tick) {
-        List<Index> list = CACHE.computeIfAbsent(mob, k -> new ArrayList<>(MAX_INDEXES_PER_MOB));
-        list.removeIf(i -> tick < i.tick || tick - i.tick > CACHE_TTL_TICKS);
-        for (Index cached : list) {
-            if (cached.covers(cx, cy, cz, reach, maxDepth)) {
-                return cached;
-            }
+    public static Kind kindChecked(Reader r, BlockPos.MutableBlockPos p, int x, int y, int z) {
+        BlockState below = r.get(p.set(x, y - 1, z));
+        BlockState feet = r.get(p.set(x, y, z));
+        BlockState head = r.get(p.set(x, y + 1, z));
+        if (below == null || feet == null || head == null) {
+            return null;
         }
-        Index fresh = build(reader, cx, cy, cz, Math.max(radius, reach), maxDepth, tick);
-        list.add(fresh);
-        while (list.size() > MAX_INDEXES_PER_MOB) {
-            list.remove(0);
+        Kind kind = kindOf(below, feet, head);
+        if (kind == null || hazardNear(r, p, x, y, z)) {
+            return null;
         }
-        return fresh;
+        return kind;
     }
 
     private static Index build(Reader reader, int cx, int cy, int cz, int radius, int maxDepth, long tick) {
@@ -208,7 +205,42 @@ final class SoftLandings {
         return index;
     }
 
-    /** Лава, вогонь, багаття, кактус, магма, ягідний кущ, порошковий сніг, сталагміт, іссохла троянда в кубі 3x3x3 навколо клітинки. */
+    public static Kind kindChecked(Reader r, int x, int y, int z) {
+        return kindChecked(r, new BlockPos.MutableBlockPos(), x, y, z);
+    }
+
+    /**
+     * Колонка зверху вниз до першої не-порожньої клітинки: вона й вирішує, чи є тут м'яке приземлення.
+     */
+    private static void scanColumn(Reader r, BlockPos.MutableBlockPos p, Index index, int x, int z, int yTop, int yBottom) {
+        for (int y = yTop; y >= yBottom; y--) {
+            BlockState state = r.get(p.set(x, y, z));
+            if (state == null) {
+                return;
+            }
+            if (state.isAir()) {
+                continue;
+            }
+            if (state.getFluidState().is(FluidTags.WATER) || state.is(BlockTags.CLIMBABLE) || state.is(Blocks.COBWEB)) {
+                tryRecord(r, p, index, x, y, z); // вода - її ПОВЕРХНЯ (перша клітинка води згори)
+                return;
+            }
+            if (state.isSolid()) {
+                tryRecord(r, p, index, x, y + 1, z); // тверда опора: м'яка лише якщо це сіно/ліжко/мед/слайм - клітинка НАД нею
+                return;
+            }
+            // решта (трава, сніг-шар, плита без колізії) - проходимо далі вниз
+        }
+    }
+
+    private static int[] probeCell(Reader r, BlockPos.MutableBlockPos p, int x, int y, int z) {
+        Kind kind = kindChecked(r, p, x, y, z);
+        return kind == null ? null : new int[]{kind.ordinal(), y};
+    }
+
+    /**
+     * Лава, вогонь, багаття, кактус, магма, ягідний кущ, порошковий сніг, сталагміт, іссохла троянда в кубі 3x3x3 навколо клітинки.
+     */
     private static boolean hazardNear(Reader r, BlockPos.MutableBlockPos p, int x, int y, int z) {
         for (int dx = -1; dx <= 1; dx++) {
             for (int dy = -1; dy <= 1; dy++) {
@@ -232,35 +264,7 @@ final class SoftLandings {
                 || s.is(Blocks.POWDER_SNOW) || s.is(Blocks.POINTED_DRIPSTONE) || s.is(Blocks.WITHER_ROSE);
     }
 
-    private static int[] probeCell(Reader r, BlockPos.MutableBlockPos p, int x, int y, int z) {
-        Kind kind = kindChecked(r, p, x, y, z);
-        return kind == null ? null : new int[]{kind.ordinal(), y};
-    }
-
-    /**
-     * v24: вид приземлення в клітинку ніг {@code (x, y, z)} З перевіркою небезпек поруч (лава, вогонь, кактус...): одне правило для
-     * індексу, для колонок впритик і для ванільних ребер спуску ({@code applyDropCosts}) - щоб вода біля лави не була "м'якою"
-     * в одному місці й "небезпечною" в іншому.
-     */
-    static Kind kindChecked(Reader r, BlockPos.MutableBlockPos p, int x, int y, int z) {
-        BlockState below = r.get(p.set(x, y - 1, z));
-        BlockState feet = r.get(p.set(x, y, z));
-        BlockState head = r.get(p.set(x, y + 1, z));
-        if (below == null || feet == null || head == null) {
-            return null;
-        }
-        Kind kind = kindOf(below, feet, head);
-        if (kind == null || hazardNear(r, p, x, y, z)) {
-            return null;
-        }
-        return kind;
-    }
-
-    static Kind kindChecked(Reader r, int x, int y, int z) {
-        return kindChecked(r, new BlockPos.MutableBlockPos(), x, y, z);
-    }
-
-    enum Kind {
+    public enum Kind {
         WATER(0, "вода"),
         HAY(0, "сіно"),
         CLIMB(0, "драбина/ліани/риштування"),
@@ -269,7 +273,7 @@ final class SoftLandings {
         SLIME(1, "слайм (запасне)"),
         WEB(1, "павутиння (запасне)");
 
-        final int rank;
+        public final int rank;
         final String label;
 
         Kind(int rank, String label) {
@@ -293,14 +297,14 @@ final class SoftLandings {
     }
 
     @FunctionalInterface
-    interface Reader {
+    public interface Reader {
         BlockState get(BlockPos pos);
     }
 
     /**
      * Індекс м'яких клітинок у кубі навколо центру (ключ - {@link BlockPos#asLong}).
      */
-    static final class Index {
+    public static final class Index {
         final int cx;
         final int cy;
         final int cz;
@@ -321,7 +325,7 @@ final class SoftLandings {
             this.tick = tick;
         }
 
-        boolean isEmpty() {
+        public boolean isEmpty() {
             return this.cells.isEmpty();
         }
 
@@ -329,7 +333,7 @@ final class SoftLandings {
          * v24: чи достатньо цього індексу для вузла {@code (x, y, z)}: індекс має сягати від вузла на {@code reach} блоків усіма
          * боками (інакше м'які клітинки в межах стрибка від вузла лишились би поза індексом) і не бути надто вище за вузол.
          */
-        boolean covers(int x, int y, int z, int reach, int maxDepth) {
+        public boolean covers(int x, int y, int z, int reach, int maxDepth) {
             return this.maxDepth >= maxDepth
                     && Math.abs(x - this.cx) + reach <= this.radius
                     && Math.abs(z - this.cz) + reach <= this.radius
@@ -337,12 +341,12 @@ final class SoftLandings {
                     && y >= this.cy - COVER_VERTICAL_TOLERANCE;
         }
 
-        int size() {
+        public int size() {
             return this.cells.size();
         }
 
         /** {вид (ordinal {@link Kind}), margin 0..4} або {@code null}. */
-        int[] cellAt(int x, int y, int z) {
+        public int[] cellAt(int x, int y, int z) {
             return this.cells.get(BlockPos.asLong(x, y, z));
         }
 
@@ -352,7 +356,7 @@ final class SoftLandings {
         }
 
         /** Абсолютні Y рівнів, де є м'які клітинки, строго нижчі за {@code y}, від вищих до нижчих. */
-        int[] levelsBelow(int y) {
+        public int[] levelsBelow(int y) {
             NavigableSet<Integer> below = this.levels.headSet(y, false).descendingSet();
             int[] out = new int[below.size()];
             int i = 0;

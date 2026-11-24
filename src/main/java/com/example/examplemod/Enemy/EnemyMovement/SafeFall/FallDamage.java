@@ -1,4 +1,4 @@
-package com.example.examplemod.Enemy.EnemyMovement.Run_N_Jump;
+package com.example.examplemod.Enemy.EnemyMovement.SafeFall;
 
 import com.example.examplemod.Config;
 import net.minecraft.server.level.ServerLevel;
@@ -19,7 +19,7 @@ import net.minecraft.world.level.block.state.BlockState;
  * приземлення ({@link #landingMultiplier}). Сама арифметика - у {@link FallMath}. Цей клас навмисно маленький: якщо якесь
  * ім'я API відрізнятиметься у твоїй версії - правити доведеться лише тут.
  */
-final class FallDamage {
+public final class FallDamage {
 
     private FallDamage() {
     }
@@ -29,7 +29,7 @@ final class FallDamage {
      * вже входить у безпечну висоту), Опір, захист чарами всього спорядження (ванільний {@code getDamageProtection} - сума
      * Невагомості й Захисту; БРОНЯ САМА падіння не зменшує) та імунітет (тип, Повільне падіння, невразливість).
      */
-    static FallMath.Profile profileOf(Mob mob) {
+    public static FallMath.Profile profileOf(Mob mob) {
         DamageSource fall = mob.damageSources().fall();
         float protection = 0.0F;
         if (mob.level() instanceof ServerLevel serverLevel) {

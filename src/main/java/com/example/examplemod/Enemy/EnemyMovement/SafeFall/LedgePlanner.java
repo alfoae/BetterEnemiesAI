@@ -1,4 +1,4 @@
-package com.example.examplemod.Enemy.EnemyMovement.Run_N_Jump;
+package com.example.examplemod.Enemy.EnemyMovement.SafeFall;
 
 import java.util.ArrayList;
 import java.util.HashSet;
@@ -32,6 +32,43 @@ public final class LedgePlanner {
     }
 
     /**
+     * Що планувальник знає про світ. Усі методи - для клітинки {@code (x, y, z)}; невідоме (незавантажене) = "ні" в усьому.
+     */
+    public interface World {
+        /** Є колізія: блок - перешкода для тіла і може бути "стіною", до якої приліплюється виступ. */
+        boolean solid(int x, int y, int z);
+
+        /** Зверху на цьому блоці можна БЕЗПЕЧНО стати (повний блок, не шкодить): підлога внизу. */
+        boolean floor(int x, int y, int z);
+
+        /** У клітинці може бути тіло моба: повітря/трава, без рідини, павутини, вогню та іншого, що шкодить чи тримає. */
+        boolean free(int x, int y, int z);
+
+        /** У клітинку можна поставити блок (повітря чи замінюване, без рідини й небезпек). */
+        boolean placeable(int x, int y, int z);
+    }
+
+    /**
+     * @param stage       висота одного ступеня, блоків (не більше безпечної висоти падіння моба)
+     * @param height      висота моба в клітинках (зомбі = 2)
+     * @param maxStages   найбільше кроків у плані (запобіжник)
+     * @param allowBreak  дозволити КРАЙНІЙ випадок - ламати виступ під собою
+     * @param maxNodes    ліміт вузлів пошуку (запобіжник часу)
+     */
+    public record Params(int stage, int height, int maxStages, boolean allowBreak, int maxNodes) {
+        public Params {
+            stage = Math.max(1, stage);
+            height = Math.max(1, height);
+            maxStages = Math.max(1, maxStages);
+            maxNodes = Math.max(16, maxNodes);
+        }
+
+        public Params withBreak(boolean value) {
+            return new Params(this.stage, this.height, this.maxStages, value, this.maxNodes);
+        }
+    }
+
+    /**
      * {@link Step#ledgeY} для кроку без нового виступу.
      */
     public static final int NO_LEDGE = Integer.MIN_VALUE;
@@ -39,6 +76,63 @@ public final class LedgePlanner {
      * 8 напрямків: спершу ортогональні, потім діагональні.
      */
     public static final int[][] DIRS = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}, {1, 1}, {1, -1}, {-1, 1}, {-1, -1}};
+
+    /**
+     * Один крок плану.
+     *
+     * @param fromX,fromY,fromZ клітинка ніг моба на початку кроку (стоїть на опорі під нею)
+     * @param toX,toZ           колонка, у яку моб потрапляє (для BREAK-кроків збігається з {@code from})
+     * @param exitX,exitZ       кутовий збіг: відкрита ортогональна сторона виходу з краю; {@code (0,0)} - звичайний
+     * @param ledgeY            Y клітинки нового виступу в колонці {@code (toX, toZ)} або {@link #NO_LEDGE}
+     * @param fall              скільки блоків моб падає за цей крок (від ніг на початку до ніг на приземленні)
+     */
+    public record Step(Kind kind, int fromX, int fromY, int fromZ, int toX, int toZ, int exitX, int exitZ,
+                       int ledgeY, int fall) {
+        public boolean placesLedge() {
+            return this.ledgeY != NO_LEDGE;
+        }
+
+        public boolean breaksLedge() {
+            return this.kind == Kind.BREAK_STEP || this.kind == Kind.BREAK_FINAL;
+        }
+
+        public boolean isFinal() {
+            return this.kind == Kind.FINAL || this.kind == Kind.BREAK_FINAL;
+        }
+
+        /** Рівень ніг після кроку. */
+        public int landingY() {
+            return this.fromY - this.fall;
+        }
+    }
+
+    /** Готовий план: кроки й клітинка ніг на справжній підлозі наприкінці. */
+    public record Plan(List<Step> steps, int landX, int landY, int landZ) {
+        /** Скільки виступів доведеться поставити. */
+        public int ledges() {
+            int n = 0;
+            for (Step s : this.steps) {
+                if (s.placesLedge()) {
+                    n++;
+                }
+            }
+            return n;
+        }
+
+        public int breaks() {
+            int n = 0;
+            for (Step s : this.steps) {
+                if (s.breaksLedge()) {
+                    n++;
+                }
+            }
+            return n;
+        }
+
+        public boolean usesBreak() {
+            return breaks() > 0;
+        }
+    }
 
     /**
      * Плани для КОЖНОГО першого напрямку збігу (різні - різні підлоги внизу), без повторів за точкою приземлення.
@@ -101,100 +195,6 @@ public final class LedgePlanner {
         STEP, FINAL, BREAK_STEP, BREAK_FINAL
     }
 
-    /**
-     * Що планувальник знає про світ. Усі методи - для клітинки {@code (x, y, z)}; невідоме (незавантажене) = "ні" в усьому.
-     */
-    public interface World {
-        /** Є колізія: блок - перешкода для тіла і може бути "стіною", до якої приліплюється виступ. */
-        boolean solid(int x, int y, int z);
-
-        /** Зверху на цьому блоці можна БЕЗПЕЧНО стати (повний блок, не шкодить): підлога внизу. */
-        boolean floor(int x, int y, int z);
-
-        /** У клітинці може бути тіло моба: повітря/трава, без рідини, павутини, вогню та іншого, що шкодить чи тримає. */
-        boolean free(int x, int y, int z);
-
-        /** У клітинку можна поставити блок (повітря чи замінюване, без рідини й небезпек). */
-        boolean placeable(int x, int y, int z);
-    }
-
-    /**
-     * @param stage       висота одного ступеня, блоків (не більше безпечної висоти падіння моба)
-     * @param height      висота моба в клітинках (зомбі = 2)
-     * @param maxStages   найбільше кроків у плані (запобіжник)
-     * @param allowBreak  дозволити КРАЙНІЙ випадок - ламати виступ під собою
-     * @param maxNodes    ліміт вузлів пошуку (запобіжник часу)
-     */
-    public record Params(int stage, int height, int maxStages, boolean allowBreak, int maxNodes) {
-        public Params {
-            stage = Math.max(1, stage);
-            height = Math.max(1, height);
-            maxStages = Math.max(1, maxStages);
-            maxNodes = Math.max(16, maxNodes);
-        }
-
-        public Params withBreak(boolean value) {
-            return new Params(this.stage, this.height, this.maxStages, value, this.maxNodes);
-        }
-    }
-
-    /**
-     * Один крок плану.
-     *
-     * @param fromX,fromY,fromZ клітинка ніг моба на початку кроку (стоїть на опорі під нею)
-     * @param toX,toZ           колонка, у яку моб потрапляє (для BREAK-кроків збігається з {@code from})
-     * @param exitX,exitZ       кутовий збіг: відкрита ортогональна сторона виходу з краю; {@code (0,0)} - звичайний
-     * @param ledgeY            Y клітинки нового виступу в колонці {@code (toX, toZ)} або {@link #NO_LEDGE}
-     * @param fall              скільки блоків моб падає за цей крок (від ніг на початку до ніг на приземленні)
-     */
-    public record Step(Kind kind, int fromX, int fromY, int fromZ, int toX, int toZ, int exitX, int exitZ,
-                       int ledgeY, int fall) {
-        public boolean placesLedge() {
-            return this.ledgeY != NO_LEDGE;
-        }
-
-        public boolean breaksLedge() {
-            return this.kind == Kind.BREAK_STEP || this.kind == Kind.BREAK_FINAL;
-        }
-
-        public boolean isFinal() {
-            return this.kind == Kind.FINAL || this.kind == Kind.BREAK_FINAL;
-        }
-
-        /** Рівень ніг після кроку. */
-        public int landingY() {
-            return this.fromY - this.fall;
-        }
-    }
-
-    /** Готовий план: кроки й клітинка ніг на справжній підлозі наприкінці. */
-    public record Plan(List<Step> steps, int landX, int landY, int landZ) {
-        /** Скільки виступів доведеться поставити. */
-        public int ledges() {
-            int n = 0;
-            for (Step s : this.steps) {
-                if (s.placesLedge()) {
-                    n++;
-                }
-            }
-            return n;
-        }
-
-        public int breaks() {
-            int n = 0;
-            for (Step s : this.steps) {
-                if (s.breaksLedge()) {
-                    n++;
-                }
-            }
-            return n;
-        }
-
-        public boolean usesBreak() {
-            return breaks() > 0;
-        }
-    }
-
     /** Колонка, у яку моб заходить з поточної опори. */
     private record Entry(int tx, int tz, int exitX, int exitZ) {
     }
@@ -241,17 +241,13 @@ public final class LedgePlanner {
             return !this.ledges.isEmpty() && this.ledges.contains(key(x, y, z));
         }
 
-        static int sq(int v) {
-            return v * v;
-        }
-
-        boolean solidV(int x, int y, int z) {
-            return this.w.solid(x, y, z) || isLedge(x, y, z);
-        }
-
         /** Клітинка вільна для тіла й не зайнята виступом плану. */
         boolean freeV(int x, int y, int z) {
             return this.w.free(x, y, z) && !isLedge(x, y, z);
+        }
+
+        static int sq(int v) {
+            return v * v;
         }
 
         /** Усі клітинки тіла на рівні {@code y} вільні. */
@@ -262,6 +258,10 @@ public final class LedgePlanner {
                 }
             }
             return true;
+        }
+
+        boolean solidV(int x, int y, int z) {
+            return this.w.solid(x, y, z) || isLedge(x, y, z);
         }
 
         /**
@@ -298,7 +298,9 @@ public final class LedgePlanner {
             return new Entry(tx, tz, ex, ez);
         }
 
-        /** Біля клітинки збоку є СПРАВЖНІЙ суцільний блок (не виступ плану): це "стіна", до якої приліплюється виступ. */
+        /**
+         * Біля клітинки збоку є СПРАВЖНІЙ суцільний блок (не виступ плану): це "стіна", до якої приліплюється виступ.
+         */
         boolean wallSupport(int x, int y, int z) {
             return (this.w.solid(x + 1, y, z) && !isLedge(x + 1, y, z))
                     || (this.w.solid(x - 1, y, z) && !isLedge(x - 1, y, z))
@@ -325,19 +327,6 @@ public final class LedgePlanner {
             return 0;
         }
 
-        /** Колонка падіння (і колонка виходу для кутового збігу) вільна на {@code fall} блоків униз від рівня ніг {@code sy}. */
-        boolean fallClear(Entry e, int sx, int sy, int sz, int fall) {
-            for (int y = sy - fall; y < sy; y++) {
-                if (!freeV(e.tx, y, e.tz)) {
-                    return false;
-                }
-                if ((e.exitX != 0 || e.exitZ != 0) && !freeV(sx + e.exitX, y, sz + e.exitZ)) {
-                    return false;
-                }
-            }
-            return true;
-        }
-
         /** Напрямки в порядку спроби: ближчі до початкової колонки першими (зигзаг біля стіни), ортогональні перед діагоналлю. */
         int[][] ordered(int sx, int sz, int depth) {
             if (depth == 0) {
@@ -357,6 +346,21 @@ public final class LedgePlanner {
                 return Integer.compare(oa, ob);
             });
             return order;
+        }
+
+        /**
+         * Колонка падіння (і колонка виходу для кутового збігу) вільна на {@code fall} блоків униз від рівня ніг {@code sy}.
+         */
+        boolean fallClear(Entry e, int sx, int sy, int sz, int fall) {
+            for (int y = sy - fall; y < sy; y++) {
+                if (!freeV(e.tx, y, e.tz)) {
+                    return false;
+                }
+                if ((e.exitX != 0 || e.exitZ != 0) && !freeV(sx + e.exitX, y, sz + e.exitZ)) {
+                    return false;
+                }
+            }
+            return true;
         }
 
         boolean solve(int sx, int sy, int sz, boolean onLedge, int depth) {

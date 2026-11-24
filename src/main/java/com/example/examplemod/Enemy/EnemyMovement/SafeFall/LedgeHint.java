@@ -1,4 +1,6 @@
-package com.example.examplemod.Enemy.EnemyMovement.Run_N_Jump;
+package com.example.examplemod.Enemy.EnemyMovement.SafeFall;
+
+import com.example.examplemod.Enemy.EnemyMovement.Run_N_Jump.GapJumpUtils;
 
 /**
  * v26: позначка ребра "СПУСК ВИСТУПАМИ" ({@link DropNode#ledge} у графі, {@link GapJumpUtils.GapJump#ledge()} у сегменті).

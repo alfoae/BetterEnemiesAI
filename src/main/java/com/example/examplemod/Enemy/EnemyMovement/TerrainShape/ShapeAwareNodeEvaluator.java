@@ -1,6 +1,6 @@
 package com.example.examplemod.Enemy.EnemyMovement.TerrainShape;
 
-import com.example.examplemod.Enemy.EnemyMovement.Run_N_Jump.DropNode;
+import com.example.examplemod.Enemy.EnemyMovement.SafeFall.DropNode;
 import com.example.examplemod.Enemy.EnemyMovement.TerrainShape.ShapeGeometry.Box;
 import com.example.examplemod.Enemy.EnemyMovement.TerrainShape.ShapeGeometry.Footprint;
 import com.example.examplemod.Enemy.EnemyMovement.TerrainShape.ShapeWalk.BodyDims;

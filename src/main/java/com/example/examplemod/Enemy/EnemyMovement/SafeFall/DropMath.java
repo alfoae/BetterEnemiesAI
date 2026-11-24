@@ -1,4 +1,6 @@
-package com.example.examplemod.Enemy.EnemyMovement.Run_N_Jump;
+package com.example.examplemod.Enemy.EnemyMovement.SafeFall;
+
+import com.example.examplemod.Enemy.EnemyMovement.Run_N_Jump.GapJumpPhysics;
 
 /**
  * v22: чиста математика керування падінням над м'яким приземленням (без типів Minecraft - перевіряється окремо).

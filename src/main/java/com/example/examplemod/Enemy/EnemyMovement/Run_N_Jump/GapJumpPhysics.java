@@ -41,16 +41,16 @@ package com.example.examplemod.Enemy.EnemyMovement.Run_N_Jump;
  * при jumpFactor=1, менше з нижчим) нижчий за Δy. Вниз - тіків більше (довше падати). {@link #AIRTIME_TICKS}
  * і {@code FLIGHT_FACTOR_*} лишаються як були - це просто {@code naturalAirtime(0, 1.0)} і супутні суми.
  */
-final class GapJumpPhysics {
+public final class GapJumpPhysics {
 
     /**
      * Скільки тіків моб у повітрі на рівному місці (включно з тіком відриву та тіком приземлення).
      */
     static final int AIRTIME_TICKS;
 
-    static final double JUMP_VERTICAL_VELOCITY = 0.42;
-    static final double GRAVITY_PER_TICK = 0.08;
-    static final double VERTICAL_DRAG_PER_TICK = 0.98;
+    public static final double JUMP_VERTICAL_VELOCITY = 0.42;
+    public static final double GRAVITY_PER_TICK = 0.08;
+    public static final double VERTICAL_DRAG_PER_TICK = 0.98;
     static final double AIR_FRICTION = 0.91;
 
     /**
@@ -117,7 +117,7 @@ final class GapJumpPhysics {
      * блоків нижче без жодної шкоди навіть на самій межі. Тому ліміт - рівно 3, а не 3 мінус висота
      * підйому: {@code Δy=-3} лишається безпечним.
      */
-    static final int JUMP_DOWN_LIMIT_BLOCKS = 3;
+    public static final int JUMP_DOWN_LIMIT_BLOCKS = 3;
     /** Стеля множника: навіть найслизькіший блок не дає більше x2 до дальності. */
     static final double MAX_BLOCK_RANGE_FACTOR = 2.0;
 
@@ -672,7 +672,7 @@ final class GapJumpPhysics {
      * {@code 0.0} - суто балістичний політ без жодного керування (тоді зомбі летить рівно так, як вийшов із розбігу).
      */
     static final double AIR_CONTROL_SCALE = 1.0;
-    static final double MAX_AIR_ACCEL = PLAYER_AIR_ACCEL * AIR_CONTROL_SCALE;
+    public static final double MAX_AIR_ACCEL = PLAYER_AIR_ACCEL * AIR_CONTROL_SCALE;
 
     /**
      * «Номінальний тиск на W» при розрахунку розбігу: частка {@link #MAX_AIR_ACCEL}, на яку цілимось, щоб у
@@ -951,7 +951,7 @@ final class GapJumpPhysics {
     }
 
     /** Результат {@link #predict}: де приземлиться моб і де він при цьому відірвався. */
-    record Prediction(double touchdown, double takeoffAlong, int groundTicks, double startSpeed) {
+    public record Prediction(double touchdown, double takeoffAlong, int groundTicks, double startSpeed) {
     }
 
     /** Межа, де хітбокс повного блока сходить з опори вздовж стрибка (для повного блока: {@code (0.5 + hw) / max(|dir|)}). */

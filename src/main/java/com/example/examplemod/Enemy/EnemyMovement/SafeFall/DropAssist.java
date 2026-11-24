@@ -1,10 +1,11 @@
-package com.example.examplemod.Enemy.EnemyMovement.Run_N_Jump;
+package com.example.examplemod.Enemy.EnemyMovement.SafeFall;
 
 import com.example.examplemod.Config;
 import com.example.examplemod.Enemy.EnemyBehavior.EnemyBreak_N_Build.EnemyBreak_N_BuildUtils;
 import com.example.examplemod.Enemy.EnemyBehavior.EnemyPursuit_N_Search.PursuitBehavior.PursuitEnemyBehavior;
-import com.example.examplemod.Enemy.EnemyMovement.SafeFall.SoftMath;
-import com.example.examplemod.Enemy.EnemyMovement.SafeFall.StairBrake;
+import com.example.examplemod.Enemy.EnemyMovement.Run_N_Jump.GapJumpAssistGoal;
+import com.example.examplemod.Enemy.EnemyMovement.Run_N_Jump.GapJumpUtils;
+import com.example.examplemod.Enemy.EnemyMovement.Run_N_Jump.StairBrake;
 import com.example.examplemod.Enemy.EnemyMovement.TerrainShape.HopNode;
 import com.example.examplemod.Enemy.EnemyMovement.TerrainShape.ShapePathAccess;
 import com.example.examplemod.debug.DebugLog;
@@ -64,24 +65,18 @@ public final class DropAssist {
     // Підхід до краю й корекція в польоті
     // ------------------------------------------------------------------------------------------
 
-    /**
-     * v25: скільки тіків поспіль моб чекає на старт RNJ (далі їде звичайно - на випадок, якщо RNJ чомусь не стартує).
-     */
+    /** v25: скільки тіків поспіль моб чекає на старт RNJ (далі їде звичайно - на випадок, якщо RNJ чомусь не стартує). */
     private static final int HANDOFF_HOLD_MAX_TICKS = 3;
-    /**
-     * v25: на якій відстані (по горизонталі) від точки відриву чекаємо на старт RNJ, а не біжимо до краю з розбігом.
-     */
+    /** v25: на якій відстані (по горизонталі) від точки відриву чекаємо на старт RNJ, а не біжимо до краю з розбігом. */
     private static final double HANDOFF_NEAR_EDGE = 1.5;
-    /**
-     * Для кожного моба: {позиція краю (BlockPos.asLong), скільки тіків уже чекав саме на цьому краї}.
-     */
+    /** Для кожного моба: {позиція краю (BlockPos.asLong), скільки тіків уже чекав саме на цьому краї}. */
     private static final Map<Mob, long[]> HANDOFF_HELD = new WeakHashMap<>();
-    /**
-     * Скільки вузлів шляху попереду дивимось у пошуку сходів (разом із висотою ніг моба - до 6 значень).
-     */
+    /** Скільки вузлів шляху попереду дивимось у пошуку сходів (разом із висотою ніг моба - до 6 значень). */
     private static final int STAIR_LOOKAHEAD_NODES = 5;
     private static final Map<Mob, Integer> LAST_REFRESH = new WeakHashMap<>();
-    /** Не частіше за стільки тіків просимо свіжий шлях, коли моб поза шляхом. */
+    /**
+     * Не частіше за стільки тіків просимо свіжий шлях, коли моб поза шляхом.
+     */
     private static final int REFRESH_INTERVAL_TICKS = 20;
 
     /**
@@ -226,7 +221,9 @@ public final class DropAssist {
     // Ресинхронізація вузлів шляху
     // ------------------------------------------------------------------------------------------
 
-    /** Кликається з {@code PathNavigation#tick} (TAIL) кожен тік; для не-переслідувачів і твердих приземлень нічого не робить. */
+    /**
+     * Кликається з {@code PathNavigation#tick} (TAIL) кожен тік; для не-переслідувачів і твердих приземлень нічого не робить.
+     */
     public static void onNavigationTick(Mob mob, Path path) {
         if (mob == null || path == null || path.isDone() || mob.level().isClientSide()) {
             return;

@@ -1,6 +1,6 @@
 package com.example.examplemod.debug;
 
-import com.example.examplemod.Enemy.EnemyMovement.Run_N_Jump.DropNode;
+import com.example.examplemod.Enemy.EnemyMovement.SafeFall.DropNode;
 import com.example.examplemod.Enemy.EnemyMovement.TerrainShape.HopNode;
 import net.minecraft.world.entity.Mob;
 import net.minecraft.world.level.pathfinder.Node;

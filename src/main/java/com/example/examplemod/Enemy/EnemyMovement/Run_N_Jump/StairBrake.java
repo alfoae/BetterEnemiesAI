@@ -9,14 +9,14 @@ package com.example.examplemod.Enemy.EnemyMovement.Run_N_Jump;
  * запусків зі сходів падали на 10-14 блоків). Тож поки попереду щонайменше два спуски по 1 блоку підряд, усталений зсув моба
  * за тік обмежується {@link #DEFAULT_MAX_STEP}: він іде сходинка за сходинкою, а не летить над ними.
  */
-final class StairBrake {
+public final class StairBrake {
 
     /**
      * Найбільший зсув за тік на сходах за замовчуванням (бл/тік; 0.20 = 4 бл/с, повільніше за гравця в спринті 5.6).
      */
     static final double DEFAULT_MAX_STEP = 0.20;
     /** З якої відстані (по горизонталі) до першого спуску сходів починаємо гальмувати: моб скидає 0.78 -> 0.22 бл/тік за ~0.7 блока. */
-    static final double LOOKAHEAD_DIST = 2.5;
+    public static final double LOOKAHEAD_DIST = 2.5;
     /** Спуск "сходинкою": від 0.5 до 1.5 блока вниз (глибше - це падіння, його веде RNJ/DropAssist). */
     static final double MIN_STEP_DROP = 0.5;
     static final double MAX_STEP_DROP = 1.5;
@@ -38,7 +38,7 @@ final class StairBrake {
      *
      * @return індекс {@code i}, з якого починаються два спуски підряд ({@code ys[i] -> ys[i+1] -> ys[i+2]}), або -1
      */
-    static int staircaseStart(double[] ys) {
+    public static int staircaseStart(double[] ys) {
         for (int i = 0; i + 2 < ys.length; i++) {
             if (isStepDown(ys[i], ys[i + 1]) && isStepDown(ys[i + 1], ys[i + 2])) {
                 return i;
@@ -60,7 +60,7 @@ final class StairBrake {
      * @param maxStep     найбільший дозволений зсув за тік
      * @param navModifier множник, який виставив навігатор (те, що було б без гальма)
      */
-    static double speedModifier(double attribute, double speedNow, double maxStep, double navModifier) {
+    public static double speedModifier(double attribute, double speedNow, double maxStep, double navModifier) {
         if (!(attribute > 1.0E-6) || !(navModifier > 0.0)) {
             return navModifier;
         }
