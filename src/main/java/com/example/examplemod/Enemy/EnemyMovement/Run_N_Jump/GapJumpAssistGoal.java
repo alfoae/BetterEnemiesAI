@@ -1,8 +1,7 @@
 package com.example.examplemod.Enemy.EnemyMovement.Run_N_Jump;
 
-import com.example.examplemod.Enemy.EnemyMovement.SafeFall.LedgeDescent;
-import com.example.examplemod.Enemy.EnemyMovement.SafeFall.LedgeHint;
-import com.example.examplemod.Enemy.EnemyMovement.SafeFall.LedgePlanner;
+import com.example.examplemod.Config;
+import com.example.examplemod.Enemy.EnemyMovement.SafeFall.*;
 import com.example.examplemod.debug.DebugLog;
 import com.example.examplemod.debug.FallDebug;
 import net.minecraft.core.BlockPos;
@@ -219,6 +218,18 @@ public class GapJumpAssistGoal extends Goal {
      * кожен крок - збіг RNJ без стрибка на сусідню колонку з метою "верх виступу", а сам виступ у польоті ставить Break_N_Build.
      */
     private LedgeDescent.Run ledgeRun;
+    /**
+     * v27: ЗОНА ПРИЗЕМЛЕННЯ поточного спуску збігом ({@link LandingZone}); {@code null} - ціль лише клітинка приземлення, як у v26. Розбіг
+     * цілиться в найкращу клітинку зони ({@link #planLength}), а в польоті щотіку обирається та, що найкраще просуває вздовж ходу шляху
+     * з тих, до яких вистачає сили гравця ({@link GapJumpPhysics#pickZoneTarget}); {@link #zonePick} - клітинка, обрана минулого тіку
+     * (-1 - ще не обирали).
+     */
+    private LandingZone zone;
+    private int zonePick = -1;
+    /**
+     * v27: куди вздовж осі цілиться РОЗБІГ: відстань від точки відриву до найкращої клітинки зони (без зони - до клітинки приземлення).
+     */
+    private double planLength;
 
     // =========================================
     private boolean debugRunupPrinted = false;
@@ -247,7 +258,9 @@ public class GapJumpAssistGoal extends Goal {
                 + " airborne=" + this.hasBeenAirborne + " jumpFired=" + this.jumpFired
                 + " chain=" + this.chainCount + " setpoint=" + String.format("%.3f", this.lastSetpoint)
                 + " sprint=" + this.runBoost + " noJump=" + this.segNoJump
-                + " ledge=" + (this.ledgeRun == null ? "нема" : this.ledgeRun.debug());
+                + " ledge=" + (this.ledgeRun == null ? "нема" : this.ledgeRun.debug())
+                + " zone=" + (this.zone == null ? "нема" : this.zone.size() + " точок, розбіг на " + String.format("%.2f", this.planLength)
+                + " бл, ціль #" + this.zonePick);
     }
 
     @Override
@@ -370,6 +383,7 @@ public class GapJumpAssistGoal extends Goal {
         //    наш steerTo(). Зупиняємо стару навігацію тут.
         ACTIVE_MOBS.add(this.mob);
         LAST_ACTIVE_TICK.put(this.mob, this.mob.tickCount);
+        DropAssist.cancelLandingCarry(this.mob); // v27: новий сегмент - керує ціль, а не біг по інерції після попередньої посадки
         // Підхід до краю: якщо є вузли шляху до вузла відриву (а опора нестандартна або шлях уточнений -
         // GapJumpUtils.buildApproach), віддаємо їх навігатору: він іде тим самим рухом, що й Pursuit (точні
         // точки біля люків/плит, гальмо на краях), а не прямою до центру краю, яка на кривих блоках веде повз
@@ -464,6 +478,17 @@ public class GapJumpAssistGoal extends Goal {
         Vec3 segAxis = this.jump.axisFrom(edgeCenter); // v25: кутовий спуск - вісь уздовж відкритої ортогональної сторони
         double axisLength = Math.sqrt(segAxis.x * segAxis.x + segAxis.z * segAxis.z);
         computeSegmentPhysics(axisLength);
+        // v27: зона приземлення - лише для звичайного спуску збігом (ті самі умови, що при збиранні вузлів у GapJumpUtils#findJumpSegmentInPath)
+        this.zone = null;
+        this.zonePick = -1;
+        this.planLength = axisLength;
+        if (this.ledgeRun == null && this.segNoJump && this.segDeltaY < 0.0 && this.jump.follow() != null && !this.jump.exact()
+                && !this.jump.corner() && Config.LANDING_ZONE.get()) {
+            this.zone = LandingZone.build(this.mob, this.jump, Config.LANDING_ZONE_MAX_REACH.get());
+            if (this.zone != null) {
+                this.planLength = Math.max(axisLength, this.zone.planAlong());
+            }
+        }
         FLIGHT_FLOOR_Y.put(this.mob, Math.min(edgeCenter.y, this.jump.landing().y) - FLIGHT_FLOOR_MARGIN);
 
         jumpLog(
@@ -481,6 +506,7 @@ public class GapJumpAssistGoal extends Goal {
                         + "\nБлок відриву: " + GapJumpUtils.describeTakeoffBlock(this.mob, this.jump.edge())
                         + platformsNote(edgeCenter)
                         + "\nЦентр краю -> центр приземлення: " + String.format("%.3f", axisLength)
+                        + zoneNote()
                         + "\nПоточна швидкість: " + String.format("%.3f", this.mob.getDeltaMovement().horizontalDistance())
                         + "\nФізика відриву: тертя=" + String.format("%.3f", this.takeoff.friction())
                         + " гальмо=" + String.format("%.2f", this.takeoff.slowdown())
@@ -562,12 +588,23 @@ public class GapJumpAssistGoal extends Goal {
                 if (this.ledgeRun != null) {
                     this.jumpFired = true; // v26: зійшов без команди - це той самий збіг, лишається повітряне керування; рятувальний стрибок додав би апекс
                 } else if (!tryRescueJump()) {
-                    jumpLog(
-                            "[DEBUG GAP JUMP] !!! МОБ ЗІЙШОВ З КРАЮ БЕЗ СТРИБКА (врятувати вже не можна)"
-                                    + " | pos=" + formatVec(this.mob.position())
-                                    + " | edge=" + this.jump.edge()
-                                    + " | speed=" + String.format("%.3f", this.mob.getDeltaMovement().horizontalDistance())
-                    );
+                    if (this.segNoJump && this.segDeltaY < 0.0) {
+                        // v27: спуск збігом: моб зійшов з краю ДО старту цілі (запізніле керування). Рятувальний стрибок для спуску
+                        // неможливий (landing далеко внизу), але приземлятись у зону/клітинку спуску все одно треба - вмикаємо повітряне
+                        // керування з польоту. Раніше таке падіння лишалось без жодного керування (моб падав, як камінь).
+                        this.jumpFired = true;
+                        jumpLog("[DEBUG GAP JUMP] МОБ ЗІЙШОВ З КРАЮ ДО СТАРТУ ЦІЛІ (спуск збігом) - керуємо польотом з повітря"
+                                + " | pos=" + formatVec(this.mob.position())
+                                + " | edge=" + this.jump.edge()
+                                + " | speed=" + String.format("%.3f", this.mob.getDeltaMovement().horizontalDistance()));
+                    } else {
+                        jumpLog(
+                                "[DEBUG GAP JUMP] !!! МОБ ЗІЙШОВ З КРАЮ БЕЗ СТРИБКА (врятувати вже не можна)"
+                                        + " | pos=" + formatVec(this.mob.position())
+                                        + " | edge=" + this.jump.edge()
+                                        + " | speed=" + String.format("%.3f", this.mob.getDeltaMovement().horizontalDistance())
+                        );
+                    }
                 }
             }
             this.hasBeenAirborne = true;
@@ -638,7 +675,18 @@ public class GapJumpAssistGoal extends Goal {
                             + " | speed=" + String.format("%.3f",
                             this.mob.getDeltaMovement().horizontalDistance())
             );
-            FallDebug.logLanding(this.mob, this.airFallMax, this.hpAtLaunch, this.fallPrediction); // v21 [FALL]: факт проти прогнозу
+            FallDebug.Prediction predicted = this.fallPrediction;
+            if (this.zone != null) {
+                // v27: «запланована точка» для лога [FALL] - найближча до моба точка зони (а не клітинка спуску): відхилення мале, якщо сів у зоні
+                int nearest = nearestZonePoint();
+                if (predicted != null) {
+                    predicted = new FallDebug.Prediction(predicted.fallBlocks(), predicted.damage(), predicted.soft(),
+                            this.zone.xs()[nearest], this.zone.zs()[nearest]);
+                }
+                jumpLog("[ЗОНА] приземлився біля точки #" + nearest + " з " + this.zone.size()
+                        + " (остання ціль у польоті #" + this.zonePick + ", розбіг цілився на " + String.format("%.2f", this.planLength) + " бл)");
+            }
+            FallDebug.logLanding(this.mob, this.airFallMax, this.hpAtLaunch, predicted); // v21 [FALL]: факт проти прогнозу
 
             // v26: посадка на ВИСТУП - не кінець цілі, а початок наступного кроку плану; на справжній підлозі - звичайне завершення
             if (this.ledgeRun != null && handleLedgeLanding()) {
@@ -648,6 +696,7 @@ public class GapJumpAssistGoal extends Goal {
             // ЛАНЦЮЖОК: якщо попереду знову стрибок - стартуємо його ЩЕ В ЦЬОМУ ТІКУ, не віддаючи керування
             // Pursuit. Інакше після кожного приземлення моб ~3 тіки лишався без керування (done -> ще
             // один порожній тік -> stop -> старт Pursuit -> ~2 тіки до нової цілі) і стояв на місці.
+            LandingZone landedZone = this.zone; // v27: chainNextSegment() може скинути зону під наступний сегмент
             boolean chained = chainNextSegment();
             if (!chained) {
                 // Вузька опора (стовпчик, ребро люка): залишок швидкості польоту (~0.3 бл/тік, ще пів блока ковзання)
@@ -656,6 +705,10 @@ public class GapJumpAssistGoal extends Goal {
                     Vec3 landedVel = this.mob.getDeltaMovement();
                     this.mob.setDeltaMovement(0.0, landedVel.y, 0.0);
                     jumpLog("[DEBUG GAP JUMP] ВУЗЬКА ОПОРА: інерцію погашено, моб лишається на місці");
+                } else if (landedZone != null && this.ledgeRun == null) {
+                    // v27: приземлились у зоні (там попереду та сама підлога) - біжимо далі, поки Pursuit не поклав новий шлях:
+                    // done -> stop() скидає навігацію, і без цього моб ~2-3 тіки стояв на місці
+                    DropAssist.registerLandingCarry(this.mob, landedZone.headingX(), landedZone.headingZ());
                 }
                 this.done = true;
                 return;
@@ -720,8 +773,9 @@ public class GapJumpAssistGoal extends Goal {
         // природний політ (ванільний відрив зі спринтом + повітряне керування) приземлив моба в центр. Далеко від краю -
         // повна швидкість; поблизу довгий стрибок бігом, короткий - повільніше (як гравець, що відпускає спринт).
         double setpointMax = GapJumpUtils.runSpeedSetpoint(this.mob);
+        // v27: без зони planLength == axisLength (ціль - клітинка спуску, як було); із зоною розбіг цілиться в її кінець і не гальмує на краю
         GapJumpPhysics.Geometry geometry = new GapJumpPhysics.Geometry(
-                front, lose, axisLength, this.segDeltaY, true, this.segNoJump);
+                front, lose, Math.max(axisLength, this.planLength), this.segDeltaY, true, this.segNoJump);
         GapJumpPhysics.RunPlan runPlan = GapJumpPhysics.chooseRunPlan(along, speedAlong, this.takeoff, geometry,
                 setpointMax, GapJumpPhysics.MAX_AIR_ACCEL * GapJumpPhysics.NOMINAL_AIR_FRACTION, this.runBoost);
         double setpoint = runPlan.setpoint();
@@ -873,9 +927,29 @@ public class GapJumpAssistGoal extends Goal {
         if (ticks <= 0) {
             return;
         }
+        double targetX = landing.x;
+        double targetZ = landing.z;
+        if (this.zone != null) {
+            // v27: «яку клавішу тиснути»: ціль - клітинка зони, що найкраще просуває вздовж ходу шляху з тих, до яких вистачає сили
+            // гравця із запасом; з плином польоту часу лишається менше, і ціль сама відкочується до ближчих (зрештою до клітинки спуску).
+            int pick = GapJumpPhysics.pickZoneTarget(this.mob.getX(), this.mob.getZ(), vel.x, vel.z, ticks,
+                    this.zone.xs(), this.zone.zs(), this.zone.scores(), GapJumpPhysics.MAX_AIR_ACCEL, this.zonePick);
+            if (pick != this.zonePick) {
+                if (DebugLog.on(DebugLog.Cat.JUMP)) {
+                    jumpLog("[ЗОНА] ціль у польоті: точка #" + pick + " з " + this.zone.size()
+                            + " (була #" + this.zonePick + ") | до неї X=" + String.format("%.2f", this.zone.xs()[pick] - this.mob.getX())
+                            + " Z=" + String.format("%.2f", this.zone.zs()[pick] - this.mob.getZ())
+                            + " | швидкість (" + String.format("%.3f", vel.x) + ", " + String.format("%.3f", vel.z) + ")"
+                            + " | тіків до землі=" + ticks);
+                }
+                this.zonePick = pick;
+            }
+            targetX = this.zone.xs()[pick];
+            targetZ = this.zone.zs()[pick];
+        }
         GapJumpPhysics.AirAccel accel = GapJumpPhysics.airAccel(
                 this.mob.getX(), this.mob.getZ(), vel.x, vel.z, ticks,
-                landing.x, landing.z, GapJumpPhysics.MAX_AIR_ACCEL);
+                targetX, targetZ, GapJumpPhysics.MAX_AIR_ACCEL);
         if (accel.ax() == 0.0 && accel.az() == 0.0) {
             return;
         }
@@ -945,19 +1019,38 @@ public class GapJumpAssistGoal extends Goal {
         double dz = landing.z - this.mob.getZ();
         double realDistance = Math.sqrt(dx * dx + dz * dz);
 
+        // v27: із зоною приземлення моб біжить на повній швидкості й на останньому тіку до відриву (onGround ще true) уже може бути ЗА
+        // центром клітинки спуску: тоді «обличчям на landing» означало б назад, і MoveControl гальмував би його просто на краю
+        // (швидкість 0.30 -> 0.03 за тік). Тому з зоною дивимось уздовж ОСІ спуску (центр краю -> клітинка спуску): вона від положення
+        // моба не залежить. Без зони все як у v26 (на landing).
+        double aimX = dx;
+        double aimZ = dz;
+        double aimDistance = realDistance;
+        if (this.zone != null) {
+            Vec3 edgeCenter = Vec3.atBottomCenterOf(this.jump.edge());
+            double axisX = landing.x - edgeCenter.x;
+            double axisZ = landing.z - edgeCenter.z;
+            double axisLength = Math.sqrt(axisX * axisX + axisZ * axisZ);
+            if (axisLength > 1.0E-6) {
+                aimX = axisX;
+                aimZ = axisZ;
+                aimDistance = axisLength;
+            }
+        }
+
         // Спринт - за рішенням розбігу (chooseRunPlan): якщо він увімкнений, ванільний jumpFromGround() сам додасть
         // поштовх +0.2 уздовж getYRot(); для короткого стрибка спринт відпущено (як у гравця) - поштовху нема.
         this.mob.setSprinting(this.runBoost);
 
-        if (realDistance > 1.0E-6) {
-            // Обличчям на landing. Ціль MoveControl - на 2 блоки вперед по лінії на landing, на ВИСОТІ МОБА: напрямок
-            // збігається з поглядом (MoveControl не довертає), а рівна висота не дає йому вирішити підстрибнути самому.
-            this.mob.setYRot((float) Math.toDegrees(Math.atan2(-dx, dz)));
+        if (aimDistance > 1.0E-6) {
+            // Обличчям на landing (з зоною - уздовж осі спуску). Ціль MoveControl - на 2 блоки вперед по цій лінії, на ВИСОТІ МОБА:
+            // напрямок збігається з поглядом (MoveControl не довертає), а рівна висота не дає йому вирішити підстрибнути самому.
+            this.mob.setYRot((float) Math.toDegrees(Math.atan2(-aimX, aimZ)));
             this.mob.setYHeadRot(this.mob.getYRot());
             this.mob.getMoveControl().setWantedPosition(
-                    this.mob.getX() + dx / realDistance * 2.0,
+                    this.mob.getX() + aimX / aimDistance * 2.0,
                     this.mob.getY(),
-                    this.mob.getZ() + dz / realDistance * 2.0,
+                    this.mob.getZ() + aimZ / aimDistance * 2.0,
                     GapJumpUtils.speedModifierFor(this.mob, setpoint));
         }
         this.mob.getLookControl().setLookAt(landing.x, landing.y, landing.z, 30.0F, 30.0F);
@@ -1025,10 +1118,45 @@ public class GapJumpAssistGoal extends Goal {
 
         this.jump = null;
         this.ledgeRun = null;
+        this.zone = null;
+        this.zonePick = -1;
         this.approachActive = false;
 
         this.mob.setSprinting(false);
         this.mob.getNavigation().stop();
+    }
+
+    /**
+     * Рядок для логу: зона приземлення (скільки точок, куди цілиться розбіг), або чому її нема, якщо шлях мав вузли за клітинкою спуску.
+     */
+    private String zoneNote() {
+        if (this.zone != null) {
+            return "\nЗОНА ПРИЗЕМЛЕННЯ: " + this.zone.size() + " клітинок (клітинка спуску + " + (this.zone.size() - 1)
+                    + " навколо шляху на тій самій підлозі), розбіг цілиться на " + String.format("%.2f", this.planLength)
+                    + " бл від центру краю, хід шляху (" + String.format("%.2f", this.zone.headingX()) + ", "
+                    + String.format("%.2f", this.zone.headingZ()) + ")";
+        }
+        return this.jump.follow() != null
+                ? "\nЗОНА ПРИЗЕМЛЕННЯ: нема (вузли шляху за клітинкою спуску не пройшли перевірку конуса/підлоги/повітря, або зона вимкнена) - ціль клітинка спуску"
+                : "";
+    }
+
+    /**
+     * Номер точки зони, найближчої до моба (для логу приземлення).
+     */
+    private int nearestZonePoint() {
+        int best = 0;
+        double bestDistance = Double.MAX_VALUE;
+        for (int k = 0; k < this.zone.size(); k++) {
+            double dx = this.zone.xs()[k] - this.mob.getX();
+            double dz = this.zone.zs()[k] - this.mob.getZ();
+            double distance = dx * dx + dz * dz;
+            if (distance < bestDistance) {
+                bestDistance = distance;
+                best = k;
+            }
+        }
+        return best;
     }
 
     /**

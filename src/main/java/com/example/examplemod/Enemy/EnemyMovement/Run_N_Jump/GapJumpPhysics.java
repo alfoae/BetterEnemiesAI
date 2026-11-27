@@ -1123,6 +1123,78 @@ public final class GapJumpPhysics {
         return new AirAccel(ax, az);
     }
 
+    // ---- v27: ЗОНА ПРИЗЕМЛЕННЯ - яку точку обрати ціллю повітряного керування ----
+
+    /**
+     * Яку частку сили гравця ({@link #MAX_AIR_ACCEL}) дозволено витратити, щоб дотягнутись до клітинки зони приземлення. Решта - запас:
+     * на нерівність (тертя об стіну, поштовх) і на те, щоб при потребі довернути чи підгальмувати. Збігається з ідеєю
+     * {@link #NOMINAL_AIR_FRACTION} (розбіг цілиться з 50%), але тут це верхня межа, а не ціль.
+     */
+    static final double ZONE_ACCEL_RESERVE = 0.8;
+
+    /**
+     * Гістерезис: клітинку, яку вже обрали, не міняємо, доки її досягнення вимагає не більше цієї частки сили гравця. Інакше ціль
+     * перескакувала б між сусідніми клітинками щойно потрібне прискорення торкнеться порога {@link #ZONE_ACCEL_RESERVE}.
+     */
+    static final double ZONE_ACCEL_KEEP = 0.95;
+
+    /**
+     * Гістерезис за оцінкою: з обраної клітинки переходимо на кращу лише якщо вона кращa щонайменше на стільки.
+     */
+    static final double ZONE_SCORE_HYSTERESIS = 0.5;
+
+    /**
+     * Яку клітинку зони приземлення обрати ЦІЛЛЮ повітряного керування на цьому тіку.
+     * <p>
+     * Це «вибір напрямку клавішею»: моб не веде себе по дузі, а щотіку дивиться, куди долетить з поточною швидкістю й що потрібно додати
+     * прискоренням (довжина - та сама, що в {@link #airAccel}: {@code (ціль - позиція - V * S1(n)) / S2(n)}), і з клітинок, до яких
+     * вистачає {@link #ZONE_ACCEL_RESERVE} сили гравця, бере ту, що найкраще просуває вздовж ходу шляху ({@code zoneScore}). З плином
+     * польоту часу лишається менше, найкращі клітинки стають недосяжними, і ціль сама відкочується до тих, що ближчі до моба, - зрештою
+     * до клітинки спуску (індекс 0). Якщо не вистачає ні на одну - та, що вимагає найменшого керування (моб, що перелітає, гальмує, а
+     * той, що недолітає, тягнеться до найближчої).
+     *
+     * @param ticks     скільки тіків лишилось до торкання, включно з цим ({@link #remainingAirTicks})
+     * @param zoneScore наскільки добра кожна клітинка як ціль (чим більше, тим краще; {@code LandingZoneMath.score})
+     * @param previous  клітинка, обрана минулого тіку (для гістерезису), або {@code -1}
+     * @return індекс обраної клітинки (0 - клітинка спуску)
+     */
+    static int pickZoneTarget(double posX, double posZ, double velX, double velZ, int ticks,
+                              double[] zoneX, double[] zoneZ, double[] zoneScore, double maxAccel, int previous) {
+        int count = Math.min(Math.min(zoneX.length, zoneZ.length), zoneScore.length);
+        if (count <= 1 || ticks <= 0 || !(maxAccel > 0.0)) {
+            return 0;
+        }
+        int n = Math.min(ticks, 60);
+        double[] need = new double[count];
+        for (int k = 0; k < count; k++) {
+            double needX = zoneX[k] - posX - velX * AIR_CARRY[n];
+            double needZ = zoneZ[k] - posZ - velZ * AIR_CARRY[n];
+            need[k] = Math.sqrt(needX * needX + needZ * needZ) / AIR_PUSH[n];
+        }
+        int best = -1;
+        for (int k = 0; k < count; k++) {
+            if (need[k] > maxAccel * ZONE_ACCEL_RESERVE) {
+                continue;
+            }
+            if (best < 0 || zoneScore[k] > zoneScore[best] || (zoneScore[k] == zoneScore[best] && need[k] < need[best])) {
+                best = k;
+            }
+        }
+        if (previous >= 0 && previous < count && previous != best && need[previous] <= maxAccel * ZONE_ACCEL_KEEP
+                && (best < 0 || zoneScore[best] - zoneScore[previous] < ZONE_SCORE_HYSTERESIS)) {
+            best = previous;
+        }
+        if (best < 0) {
+            best = 0;
+            for (int k = 1; k < count; k++) {
+                if (need[k] < need[best]) {
+                    best = k;
+                }
+            }
+        }
+        return best;
+    }
+
     private static double clamp(double value, double min, double max) {
         return Math.max(min, Math.min(max, value));
     }

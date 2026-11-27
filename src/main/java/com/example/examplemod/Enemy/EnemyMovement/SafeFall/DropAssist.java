@@ -5,6 +5,7 @@ import com.example.examplemod.Enemy.EnemyBehavior.EnemyBreak_N_Build.EnemyBreak_
 import com.example.examplemod.Enemy.EnemyBehavior.EnemyPursuit_N_Search.PursuitBehavior.PursuitEnemyBehavior;
 import com.example.examplemod.Enemy.EnemyMovement.Run_N_Jump.GapJumpAssistGoal;
 import com.example.examplemod.Enemy.EnemyMovement.Run_N_Jump.GapJumpUtils;
+import com.example.examplemod.Enemy.EnemyMovement.Run_N_Jump.Run_N_JumpUtils;
 import com.example.examplemod.Enemy.EnemyMovement.Run_N_Jump.StairBrake;
 import com.example.examplemod.Enemy.EnemyMovement.TerrainShape.HopNode;
 import com.example.examplemod.Enemy.EnemyMovement.TerrainShape.ShapePathAccess;
@@ -222,43 +223,9 @@ public final class DropAssist {
     // ------------------------------------------------------------------------------------------
 
     /**
-     * Кликається з {@code PathNavigation#tick} (TAIL) кожен тік; для не-переслідувачів і твердих приземлень нічого не робить.
+     * На скільки блоків уперед від моба перевіряємо підлогу перед кожним тіком бігу по інерції (моб за тік зсувається до ~0.3 бл).
      */
-    public static void onNavigationTick(Mob mob, Path path) {
-        if (mob == null || path == null || path.isDone() || mob.level().isClientSide()) {
-            return;
-        }
-        // v24: при dropViaRnj (за замовчуванням) усі нетривіальні спуски й м'які приземлення веде RNJ (DropNode), а повільний
-        // "підхід до краю" з v22 - це милиця, що давала вигляд сповільненого часу: тепер він лише запасний (коли RNJ-спуски вимкнено).
-        boolean steering = Config.DROP_AIR_STEERING.get() && !Config.DROP_VIA_RNJ.get();
-        boolean stairBrake = Config.STAIR_DESCENT_BRAKE.get();
-        if (!steering && !stairBrake) {
-            return;
-        }
-        if (mob.isInWater() || mob.isInLava() || mob.onClimbable() || mob.isPassenger()) {
-            return;
-        }
-        if (GapJumpAssistGoal.isActive(mob) || PursuitEnemyBehavior.getChasePosition(mob) == null) {
-            return; // стрибками керує свій гоал; не переслідувачів не чіпаємо
-        }
-        try {
-            if (mob.onGround() && holdForHandoff(mob)) {
-                return; // v25: RNJ ось-ось стартує - не біжимо до краю самі
-            }
-            if (mob.onGround()) {
-                if (stairBrake) {
-                    brakeOnStairs(mob, path); // v24: на сходах швидкість обмежується (див. StairBrake)
-                }
-                if (steering) {
-                    approachEdge(mob, path); // запасний механізм для м'яких приземлень не через RNJ (повільніший підхід, якщо діє)
-                }
-            } else if (steering) {
-                steerInAir(mob, path);
-            }
-        } catch (RuntimeException ignored) {
-            // допоміжна механіка ніколи не повинна ламати навігацію
-        }
-    }
+    private static final double CARRY_PROBE = 0.9;
 
     /**
      * v25: у шляху вже є ГОТОВИЙ стрибок/збіг з краю, на якому моб стоїть, але гоал RNJ ще не стартував: GoalSelector вибирає нові
@@ -299,6 +266,56 @@ public final class DropAssist {
         DebugLog.logThrottled(DebugLog.Cat.FALL, mob, "handoff-hold|" + mob.getId(), 700L,
                 () -> "ПЕРЕДАЧА КЕРУВАННЯ RNJ: моб стоїть до старту гоала (тік " + (held + 1) + " з " + HANDOFF_HOLD_MAX_TICKS + ")");
         return true;
+    }
+    /**
+     * Для кожного моба: {напрямок X, напрямок Z (одиничний), тік моба, ДО якого (включно) діє біг}.
+     */
+    private static final Map<Mob, double[]> LANDING_CARRY = new WeakHashMap<>();
+
+    // ------------------------------------------------------------------------------------------
+    // v27: біг по інерції після приземлення
+    // ------------------------------------------------------------------------------------------
+
+    /**
+     * Кликається з {@code PathNavigation#tick} (TAIL) кожен тік; для не-переслідувачів і твердих приземлень нічого не робить.
+     */
+    public static void onNavigationTick(Mob mob, Path path) {
+        if (mob != null && !mob.level().isClientSide() && applyLandingCarry(mob, path)) {
+            return; // v27: біг по інерції після приземлення в зоні - шлях ще порожній, керуємо ми
+        }
+        if (mob == null || path == null || path.isDone() || mob.level().isClientSide()) {
+            return;
+        }
+        // v24: при dropViaRnj (за замовчуванням) усі нетривіальні спуски й м'які приземлення веде RNJ (DropNode), а повільний
+        // "підхід до краю" з v22 - це милиця, що давала вигляд сповільненого часу: тепер він лише запасний (коли RNJ-спуски вимкнено).
+        boolean steering = Config.DROP_AIR_STEERING.get() && !Config.DROP_VIA_RNJ.get();
+        boolean stairBrake = Config.STAIR_DESCENT_BRAKE.get();
+        if (!steering && !stairBrake) {
+            return;
+        }
+        if (mob.isInWater() || mob.isInLava() || mob.onClimbable() || mob.isPassenger()) {
+            return;
+        }
+        if (GapJumpAssistGoal.isActive(mob) || PursuitEnemyBehavior.getChasePosition(mob) == null) {
+            return; // стрибками керує свій гоал; не переслідувачів не чіпаємо
+        }
+        try {
+            if (mob.onGround() && holdForHandoff(mob)) {
+                return; // v25: RNJ ось-ось стартує - не біжимо до краю самі
+            }
+            if (mob.onGround()) {
+                if (stairBrake) {
+                    brakeOnStairs(mob, path); // v24: на сходах швидкість обмежується (див. StairBrake)
+                }
+                if (steering) {
+                    approachEdge(mob, path); // запасний механізм для м'яких приземлень не через RNJ (повільніший підхід, якщо діє)
+                }
+            } else if (steering) {
+                steerInAir(mob, path);
+            }
+        } catch (RuntimeException ignored) {
+            // допоміжна механіка ніколи не повинна ламати навігацію
+        }
     }
 
     /**
@@ -359,6 +376,83 @@ public final class DropAssist {
         } catch (RuntimeException ignored) {
             // тільки допоміжне
         }
+    }
+
+    /**
+     * v27: після приземлення зі спуску по зоні ({@code GapJumpAssistGoal}) ціль завершується, {@code stop()} скидає навігацію, і до
+     * першого шляху від Pursuit моб ~2-3 тіки лишався без керування й стояв, хоча щойно летів уперед. Тут запам'ятовується напрямок спуску,
+     * і {@link #onNavigationTick} ще кілька тіків тримає «W» уздовж нього (ціль MoveControl - на 2 блоки вперед), доки не з'явиться шлях.
+     * Біг зупиняється сам: щойно попереду нема підлоги чи є стіна, моб не на землі, Pursuit поклав шлях, чи вийшов строк
+     * ({@code Config.LANDING_CARRY_TICKS}); RNJ, що стартує знову, скасовує його ({@link #cancelLandingCarry}).
+     */
+    public static void registerLandingCarry(Mob mob, double dirX, double dirZ) {
+        int ticks = Config.LANDING_CARRY_TICKS.get();
+        double length = Math.sqrt(dirX * dirX + dirZ * dirZ);
+        if (ticks <= 0 || length < 1.0E-6) {
+            return;
+        }
+        LANDING_CARRY.put(mob, new double[]{dirX / length, dirZ / length, mob.tickCount + ticks});
+    }
+
+    /**
+     * v27: скасувати біг по інерції (RNJ стартував на новому сегменті й керує сам).
+     */
+    public static void cancelLandingCarry(Mob mob) {
+        LANDING_CARRY.remove(mob);
+    }
+
+    /**
+     * @return true, якщо цього тіку мобом керує біг по інерції після приземлення
+     */
+    private static boolean applyLandingCarry(Mob mob, Path path) {
+        if (LANDING_CARRY.isEmpty()) {
+            return false;
+        }
+        double[] carry = LANDING_CARRY.get(mob);
+        if (carry == null) {
+            return false;
+        }
+        try {
+            boolean over = mob.tickCount > (int) carry[2] || !mob.onGround() || mob.isInWater() || mob.isInLava() || mob.onClimbable()
+                    || (path != null && !path.isDone()) || !hasFloorAhead(mob, carry[0], carry[1]);
+            if (over) {
+                LANDING_CARRY.remove(mob);
+                return false;
+            }
+            mob.getMoveControl().setWantedPosition(mob.getX() + carry[0] * 2.0, mob.getY(), mob.getZ() + carry[1] * 2.0,
+                    Run_N_JumpUtils.getRunSpeedModifier(mob));
+            if (!mob.isSprinting()) {
+                mob.setSprinting(true); // stop() цілі скинув спринт, а ми ще біжимо
+            }
+            final int left = (int) carry[2] - mob.tickCount;
+            DebugLog.logThrottled(DebugLog.Cat.FALL, mob, "landing-carry|" + mob.getId(), 400L,
+                    () -> "БІГ ПІСЛЯ ПРИЗЕМЛЕННЯ: тримаємо рух уперед, поки нема шляху (лишилось тіків: " + left + ") | швидкість="
+                            + f2(mob.getDeltaMovement().horizontalDistance()) + " бл/тік");
+            return true;
+        } catch (RuntimeException e) {
+            LANDING_CARRY.remove(mob); // допоміжна механіка ніколи не повинна ламати навігацію
+            return false;
+        }
+    }
+
+    /**
+     * Попереду на {@link #CARRY_PROBE} блока є тверда безпечна підлога на рівні моба, а для його тіла вільно (інакше це край чи стіна).
+     */
+    private static boolean hasFloorAhead(Mob mob, double dirX, double dirZ) {
+        LedgePlanner.World world = LedgeDescent.worldOf(mob.level()::getBlockState);
+        int x = (int) Math.floor(mob.getX() + dirX * CARRY_PROBE);
+        int z = (int) Math.floor(mob.getZ() + dirZ * CARRY_PROBE);
+        int y = (int) Math.floor(mob.getY() + 1.0E-3);
+        if (!world.floor(x, y - 1, z)) {
+            return false;
+        }
+        int height = Math.max(1, (int) Math.ceil(mob.getBbHeight() - 0.05));
+        for (int h = 0; h < height; h++) {
+            if (!world.free(x, y + h, z)) {
+                return false;
+            }
+        }
+        return true;
     }
 
     private static String cell(Node n) {

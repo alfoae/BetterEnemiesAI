@@ -70,6 +70,10 @@ public class Config {
     public static final ModConfigSpec.BooleanValue CORRIDOR_GLANCE;
     public static final ModConfigSpec.BooleanValue RNJ_HANDOFF_HOLD;
     public static final ModConfigSpec.BooleanValue TOWER_JUMP_FIRST;
+    // v27: ЗОНА приземлення спуску збігом (розбіг і політ уперед на ту саму підлогу) і біг без паузи після приземлення.
+    public static final ModConfigSpec.BooleanValue LANDING_ZONE;
+    public static final ModConfigSpec.DoubleValue LANDING_ZONE_MAX_REACH;
+    public static final ModConfigSpec.IntValue LANDING_CARRY_TICKS;
     // v26: спуск ВИСТУПАМИ на стіні (LedgePlanner/LedgeDescent): стрибок виконує RNJ, блок ставить placeBlock з Break_N_Build.
     public static final ModConfigSpec.BooleanValue LEDGE_DESCENT;
     public static final ModConfigSpec.IntValue LEDGE_STAGE_BLOCKS;
@@ -366,6 +370,25 @@ public class Config {
                         "до краю на повній швидкості: GoalSelector вибирає нові цілі раз на 2 тіки, і з маленької опори (стовп, сходинка 1x1) моб",
                         "встигав вилетіти за край ДО старту керування (в логу: «ЗАПІЗНІЛЕ КЕРУВАННЯ», +0.9 бл і швидкість 0.3 бл/тік).")
                 .define("rnjHandoffHold", true);
+
+        LANDING_ZONE = builder
+                .comment("Спуск збігом на сусідню клітинку (DropNode) цілиться не в центр цієї клітинки, а в ЗОНУ приземлення: вузли шляху за нею та їхні сусідки",
+                        "в конусі від осі спуску, на тій самій підлозі (та сама висота, твердий безпечний блок, чисте повітря над ними). Моб розбігається й летить",
+                        "уперед, а повітряне керування (сила гравця: W/A/S/D) щотіку обирає клітинку зони, що найкраще просуває вздовж ходу шляху, з тих, до яких ще",
+                        "вистачає запасу керування; коли часу лишається менше, ціль відкочується ближче (зрештою до клітинки спуску). Шкода від падіння та сама",
+                        "(та сама висота). false - як у v26: моб гальмує на краю (майже стає) і падає в сусідню клітинку. Не діє для кутових спусків, м'яких",
+                        "приземлень, спуску виступами й широких мобів.")
+                .define("landingZone", true);
+
+        LANDING_ZONE_MAX_REACH = builder
+                .comment("Найбільша відстань (блоків по горизонталі від центру краю), на яку зона приземлення простягається вздовж шляху.",
+                        "Реальна дальність залежить від висоти падіння: з 10 блоків спринт + керування дають до ~5 блоків, з 3 блоків - до ~3.")
+                .defineInRange("landingZoneMaxReach", 6.0D, 1.5D, 12.0D);
+
+        LANDING_CARRY_TICKS = builder
+                .comment("Скільки тіків після приземлення зі спуску по зоні моб ще біжить уперед, поки Pursuit не поклав новий шлях: без цього він ~2-3 тіки",
+                        "стояв (ціль завершується й скидає шлях). Біг припиняється, щойно попереду нема підлоги. 0 - вимкнено (як у v26).")
+                .defineInRange("landingCarryTicks", 4, 0, 10);
 
         builder.pop();
 

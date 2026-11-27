@@ -1,5 +1,6 @@
 package com.example.examplemod.Enemy.EnemyMovement.Run_N_Jump;
 
+import com.example.examplemod.Config;
 import com.example.examplemod.Enemy.EnemyBehavior.EnemyBreak_N_Build.EnemyBreak_N_BuildUtils;
 import com.example.examplemod.Enemy.EnemyBehavior.EnemyPursuit_N_Search.PursuitBehavior.PursuitEnemyBehavior;
 import com.example.examplemod.Enemy.EnemyMovement.SafeFall.DropNode;
@@ -21,6 +22,7 @@ import net.minecraft.world.level.block.SlimeBlock;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.pathfinder.Node;
 import net.minecraft.world.level.pathfinder.Path;
+import net.minecraft.world.level.pathfinder.PathType;
 import net.minecraft.world.phys.Vec3;
 
 import java.util.*;
@@ -623,6 +625,11 @@ public final class GapJumpUtils {
     }
 
     /**
+     * v27: скільки вузлів шляху після клітинки спуску запам'ятовуємо як кандидатів у зону приземлення ({@code LandingZone}).
+     */
+    private static final int ZONE_MAX_FOLLOW_NODES = 8;
+
+    /**
      * Те саме, але з мобом: для сегмента з НЕСТАНДАРТНОЮ опорою на кінцях ({@link #planJump}) додається точний
      * план (куди саме відриватись/приземлятись і на якій висоті), а якщо є вузли до відриву - ще й шлях підходу
      * ({@link #buildApproach}). Без моба (чи для звичайних блоків) - як і раніше: центри клітинок, цілі висоти.
@@ -656,17 +663,51 @@ public final class GapJumpUtils {
                 int exitX = 0;
                 int exitZ = 0;
                 LedgeHint ledge = null;
+                int[] follow = null;
                 if (b instanceof DropNode dropNode) { // v25: кутовий спуск несе сторону виходу з краю
                     exitX = dropNode.exitX;
                     exitZ = dropNode.exitZ;
                     if (plan == null) {
                         ledge = dropNode.ledge; // v26: спуск виступами (точний план нестандартної опори з ним не змішуємо)
+                        // v27: зона приземлення - лише для звичайного збігу (не кутового, не в м'яке, не виступами, без точного плану)
+                        if (mob != null && ledge == null && exitX == 0 && exitZ == 0 && !dropNode.soft && Config.LANDING_ZONE.get()) {
+                            follow = collectFollow(path, i + 1);
+                        }
                     }
                 }
-                return new GapJump(edge, landing, Math.max(1, gapBlocks), plan, approach, exitX, exitZ, ledge);
+                return new GapJump(edge, landing, Math.max(1, gapBlocks), plan, approach, exitX, exitZ, ledge, follow);
             }
         }
         return null;
+    }
+
+    /**
+     * v27: вузли шляху ПІСЛЯ вузла приземлення {@code landingIndex} (клітинки спуску) - кандидати в зону приземлення: пари {x, z} підряд,
+     * поки шлях лишається на тій самій підлозі (та сама висота, звичайний прохідний вузол, сусідній за попереднім) і не починається знову
+     * особливий перехід ({@link HopNode}/{@link DropNode}). Світ тут НЕ читається: функція викликається щотіку, поки Pursuit питає про
+     * сегмент, тож це лише копіювання координат. Відбір у конусі від осі спуску та перевірку підлоги й повітря робить
+     * {@code LandingZone#build} на старті сегмента.
+     *
+     * @return пари {x, z} підряд, або {@code null}, якщо за клітинкою спуску шлях одразу змінює висоту чи закінчується
+     */
+    private static int[] collectFollow(Path path, int landingIndex) {
+        Node landing = path.getNode(landingIndex);
+        int count = path.getNodeCount();
+        int[] buffer = new int[ZONE_MAX_FOLLOW_NODES * 2];
+        int taken = 0;
+        Node previous = landing;
+        for (int k = landingIndex + 1; k < count && taken < ZONE_MAX_FOLLOW_NODES; k++) {
+            Node node = path.getNode(k);
+            if (node instanceof HopNode || node instanceof DropNode || node.y != landing.y || node.type != PathType.WALKABLE
+                    || Math.abs(node.x - previous.x) > 1 || Math.abs(node.z - previous.z) > 1) {
+                break;
+            }
+            buffer[taken * 2] = node.x;
+            buffer[taken * 2 + 1] = node.z;
+            taken++;
+            previous = node;
+        }
+        return taken == 0 ? null : Arrays.copyOf(buffer, taken * 2);
     }
 
     /**
@@ -748,16 +789,28 @@ public final class GapJumpUtils {
      * реальною висотою поверхні, а точка відриву, межі опори й ліміт кроку беруться з плану (див. методи нижче).
      * Для звичайних блоків {@code plan == null} і нічого не змінюється. {@code approach} - вузли шляху від
      * поточного місця до вузла відриву (для навігатора), або {@code null} (прямий розбіг, як і раніше).
+     * <p>
+     * v27: {@code follow} - кандидати в ЗОНУ ПРИЗЕМЛЕННЯ ({@code LandingZone}): пари {x, z} вузлів шляху після клітинки спуску на тій самій
+     * підлозі ({@link GapJumpUtils#collectFollow}); {@code null} - зони нема (не звичайний спуск збігом, або за ним шлях міняє висоту).
      */
-    public record GapJump(BlockPos edge, Vec3 landing, int gapBlocks, ShapeJump.Plan plan, Path approach, int exitX, int exitZ,
-                          LedgeHint ledge) {
+    public record GapJump(BlockPos edge, Vec3 landing, int gapBlocks, ShapeJump.Plan plan, Path approach, int exitX,
+                          int exitZ,
+                          LedgeHint ledge, int[] follow) {
+
+        /**
+         * Без зони приземлення ({@code follow == null}).
+         */
+        public GapJump(BlockPos edge, Vec3 landing, int gapBlocks, ShapeJump.Plan plan, Path approach, int exitX, int exitZ,
+                       LedgeHint ledge) {
+            this(edge, landing, gapBlocks, plan, approach, exitX, exitZ, ledge, null);
+        }
 
         public GapJump(BlockPos edge, Vec3 landing, int gapBlocks, ShapeJump.Plan plan, Path approach) {
-            this(edge, landing, gapBlocks, plan, approach, 0, 0, null);
+            this(edge, landing, gapBlocks, plan, approach, 0, 0, null, null);
         }
 
         public GapJump(BlockPos edge, Vec3 landing, int gapBlocks) {
-            this(edge, landing, gapBlocks, null, null, 0, 0, null);
+            this(edge, landing, gapBlocks, null, null, 0, 0, null, null);
         }
 
         /** v25: кутовий спуск (див. {@link DropNode#exitX}): сходимо з краю відкритою ортогональною стороною, а не по діагоналі. */
@@ -828,6 +881,7 @@ public final class GapJumpUtils {
         public String toString() {
             return "GapJump[edge=" + this.edge + ", landing=" + this.landing + ", gap=" + this.gapBlocks
                     + (this.ledge != null ? ", ВИСТУПИ(" + this.ledge.ledges() + ")" : "")
+                    + (this.follow != null ? ", вузлів-після=" + this.follow.length / 2 : "")
                     + (this.plan != null ? ", ТОЧНИЙ" : "") + (this.approach != null ? ", підхід=" + this.approach.getNodeCount() + " вуз." : "")
                     + "]";
         }
